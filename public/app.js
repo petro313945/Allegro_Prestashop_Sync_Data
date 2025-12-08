@@ -111,6 +111,12 @@ async function saveCredentials() {
         
         // Step 2: Test authentication immediately
         const authResponse = await fetch(`${API_BASE}/api/test-auth`);
+        
+        // Check for 401 status before parsing JSON
+        if (!authResponse.ok && authResponse.status === 401) {
+            throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+        }
+        
         const authData = await authResponse.json();
         
         if (authData.success) {
@@ -144,8 +150,12 @@ async function saveCredentials() {
             throw new Error(authData.error || 'Authentication failed. Please check your credentials.');
         }
     } catch (error) {
-        // Show error toast and stay on first interface
-        showToast(error.message || 'Authentication failed. Please check your credentials.', 'error');
+        // Show user-friendly error message
+        let errorMessage = 'Authentication failed. Please check your credentials.';
+        if (error.message && !error.message.includes('status code')) {
+            errorMessage = error.message;
+        }
+        showToast(errorMessage, 'error');
         hideMainInterface();
         updateUIState(false);
     } finally {
@@ -380,6 +390,12 @@ async function testAuthentication() {
     
     try {
         const response = await fetch(`${API_BASE}/api/test-auth`);
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+        }
+        
         const data = await response.json();
         
         if (data.success) {
@@ -408,7 +424,12 @@ async function testAuthentication() {
         }
         isAuthenticated = false;
         updateUIState(false);
-        showToast('Authentication error: ' + (error.message || 'Unknown error'), 'error');
+        // Show user-friendly error message
+        let errorMessage = 'Authentication failed. Please check your credentials.';
+        if (error.message && !error.message.includes('status code')) {
+            errorMessage = error.message;
+        }
+        showToast(errorMessage, 'error');
     }
 }
 
@@ -490,6 +511,12 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
         }
         
         const response = await fetch(`${API_BASE}/api/offers?${params}`);
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+        }
+        
         const result = await response.json();
         
         if (result.success) {
@@ -735,6 +762,12 @@ async function loadCategories() {
     
     try {
         const response = await fetch(`${API_BASE}/api/categories`);
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+        }
+        
         const result = await response.json();
         
         if (result.success) {
@@ -746,7 +779,12 @@ async function loadCategories() {
             throw new Error(result.error?.message || 'Failed to fetch categories');
         }
     } catch (error) {
-        errorEl.textContent = `Failed to fetch categories: ${error.message || 'Request failed'}`;
+        // Show user-friendly error message
+        let errorMessage = error.message || 'Failed to fetch categories';
+        if (errorMessage.includes('status code')) {
+            errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
+        }
+        errorEl.textContent = `Failed to fetch categories: ${errorMessage}`;
         errorEl.style.display = 'block';
         categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #c5221f;">Failed to load categories. Please try again.</p>';
     } finally {

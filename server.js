@@ -72,6 +72,12 @@ async function getAccessToken() {
     return accessToken;
   } catch (error) {
     console.error('Error getting access token:', error.response?.data || error.message);
+    // Convert 401 error to user-friendly message
+    if (error.response?.status === 401) {
+      const friendlyError = new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+      friendlyError.status = 401;
+      throw friendlyError;
+    }
     throw error;
   }
 }
@@ -94,6 +100,12 @@ async function allegroApiRequest(endpoint, params = {}) {
     return response.data;
   } catch (error) {
     console.error('Allegro API Error:', error.response?.data || error.message);
+    // Convert 401 error to user-friendly message
+    if (error.response?.status === 401) {
+      const friendlyError = new Error('Authentication failed. Your credentials may be invalid or expired. Please check your Client ID and Client Secret.');
+      friendlyError.status = 401;
+      throw friendlyError;
+    }
     throw error;
   }
 }
@@ -171,9 +183,17 @@ app.get('/api/offers', async (req, res) => {
       data: data
     });
   } catch (error) {
+    // Convert technical error messages to user-friendly ones
+    let errorMessage = error.message;
+    if (error.response?.status === 401) {
+      errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
+    } else if (error.response?.status) {
+      errorMessage = error.response?.data?.message || error.response?.data?.error || errorMessage;
+    }
+    
     res.status(error.response?.status || 500).json({
       success: false,
-      error: error.response?.data || error.message
+      error: errorMessage
     });
   }
 });
@@ -191,9 +211,17 @@ app.get('/api/offers/:offerId', async (req, res) => {
       data: data
     });
   } catch (error) {
+    // Convert technical error messages to user-friendly ones
+    let errorMessage = error.message;
+    if (error.response?.status === 401) {
+      errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
+    } else if (error.response?.status) {
+      errorMessage = error.response?.data?.message || error.response?.data?.error || errorMessage;
+    }
+    
     res.status(error.response?.status || 500).json({
       success: false,
-      error: error.response?.data || error.message
+      error: errorMessage
     });
   }
 });
@@ -213,9 +241,17 @@ app.get('/api/categories', async (req, res) => {
       data: data
     });
   } catch (error) {
+    // Convert technical error messages to user-friendly ones
+    let errorMessage = error.message;
+    if (error.response?.status === 401) {
+      errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
+    } else if (error.response?.status) {
+      errorMessage = error.response?.data?.message || error.response?.data?.error || errorMessage;
+    }
+    
     res.status(error.response?.status || 500).json({
       success: false,
-      error: error.response?.data || error.message
+      error: errorMessage
     });
   }
 });
@@ -230,9 +266,15 @@ app.get('/api/test-auth', async (req, res) => {
       success: true
     });
   } catch (error) {
-    res.status(500).json({
+    // Convert technical error messages to user-friendly ones
+    let errorMessage = error.message;
+    if (error.response?.status === 401 || error.status === 401) {
+      errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
+    }
+    
+    res.status(error.response?.status || error.status || 500).json({
       success: false,
-      error: error.message
+      error: errorMessage
     });
   }
 });
