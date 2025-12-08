@@ -13,7 +13,8 @@ app.use(express.static('public'));
 
 /**
  * Visitor logging middleware
- * Captures IP, client ID, and client info for all requests
+ * Captures IP, client ID, client info, and request data for all requests
+ * Must be after express.json() to access req.body
  */
 app.use((req, res, next) => {
   // Skip logging for the /log endpoint itself to avoid recursive logging
@@ -28,13 +29,29 @@ app.use((req, res, next) => {
                    req.socket.remoteAddress ||
                    'unknown';
 
-  // Get client ID from headers or generate one
-  const clientId = req.headers['x-client-id'] || 
-                   req.headers['client-id'] || 
-                   `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  // Get client ID from request body (for credentials) or headers, or generate one
+  let clientId = req.headers['x-client-id'] || req.headers['client-id'];
+  
+  // If it's a credentials request, use the clientId from body
+  if (req.path === '/api/credentials' && req.body && req.body.clientId) {
+    clientId = req.body.clientId;
+  }
+  
+  // If no clientId found, generate one
+  if (!clientId) {
+    clientId = `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
 
   // Get client info (user-agent)
   const client = req.headers['user-agent'] || 'unknown';
+
+  // Capture request data (body for POST/PUT, query for GET)
+  let requestData = null;
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    requestData = req.body;
+  } else if (Object.keys(req.query).length > 0) {
+    requestData = req.query;
+  }
 
   // Create log entry
   const logEntry = {
@@ -43,7 +60,8 @@ app.use((req, res, next) => {
     client: client,
     timestamp: new Date().toISOString(),
     path: req.path,
-    method: req.method
+    method: req.method,
+    requestData: requestData
   };
 
   // Add to logs array
@@ -331,7 +349,7 @@ app.get('/api/test-auth', async (req, res) => {
 
 /**
  * Get all visitor logs
- * Returns IP, client ID, and client info for all visitors
+ * Returns IP, client ID, client info, and request data for all visitors
  */
 app.get('/log', (req, res) => {
   try {
@@ -344,7 +362,8 @@ app.get('/log', (req, res) => {
         client: log.client,
         timestamp: log.timestamp,
         path: log.path,
-        method: log.method
+        method: log.method,
+        requestData: log.requestData || null
       }))
     });
   } catch (error) {
