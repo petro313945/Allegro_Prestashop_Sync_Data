@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Allegro Importer</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Allegro Importer</h1>
+            <p class="subtitle">Search and import product offers from Allegro marketplace</p>
+        </header>
+
+        <div class="credentials-section">
+            <h2>API Credentials</h2>
+            <p class="section-description">
+                <a href="https://apps.developer.allegro.pl/" target="_blank">Get credentials</a>
+            </p>
+            <div class="credentials-form">
+                <div class="form-group">
+                    <label for="clientId">Client ID</label>
+                    <input type="text" id="clientId" placeholder="Client ID" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="clientSecret">Client Secret</label>
+                    <input type="password" id="clientSecret" placeholder="Client Secret" autocomplete="off">
+                </div>
+                <button id="saveCredentialsBtn" class="btn btn-primary">CONNECT</button>
+                <button id="clearCredentialsBtn" class="btn btn-secondary" style="display: none;">Clear</button>
+            </div>
+            <div id="credentialsMessage" class="message" style="display: none;"></div>
+        </div>
+
+        <div id="mainContent" style="display: none;">
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">Status</span>
+                <span id="apiStatus" class="status-value">Disconnected</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Auth</span>
+                <span id="authStatus" class="status-value">Pending</span>
+            </div>
+            <button id="testAuthBtn" class="btn btn-secondary" disabled>TEST</button>
+        </div>
+
+        <div class="categories-section">
+            <h2>Categories</h2>
+            <p class="section-hint">Browse all categories. Click a category to see products. Categories load automatically after authentication.</p>
+            <div class="category-search-form">
+                <button id="loadCategoriesBtn" class="btn btn-primary">RELOAD CATEGORIES</button>
+                <button id="clearCategoryBtn" class="btn btn-secondary">CLEAR SELECTION</button>
+            </div>
+            <div id="categoriesList" class="categories-list"></div>
+        </div>
+
+        <div class="search-section">
+            <h2>Search Products</h2>
+            <p class="section-hint">Search for product offers. Select a category above or use the dropdown below. Specify product count to limit results.</p>
+            <div id="authRequiredMessage" class="auth-required-message" style="display: none;">
+                Authentication required. Please test connection first.
+            </div>
+            <div class="search-form">
+                <div class="form-group">
+                    <label for="searchPhrase">Product Name (Optional)</label>
+                    <input type="text" id="searchPhrase" placeholder="Enter product name or keyword">
+                </div>
+                <div class="form-group">
+                    <label for="selectedCategory">Category</label>
+                    <select id="selectedCategory">
+                        <option value="">All Categories</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="limit">Product Count</label>
+                    <select id="limit">
+                        <option value="10">10</option>
+                        <option value="20" selected>20</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+                <button id="searchBtn" class="btn btn-primary">SEARCH</button>
+                <button id="clearBtn" class="btn btn-secondary">CLEAR</button>
+            </div>
+        </div>
+
+        <div class="results-section">
+            <div class="results-header">
+                <h2>Product Offers <span id="resultsCount" class="count-badge">0</span></h2>
+                <div class="results-actions">
+                    <button id="importSelectedBtn" class="btn btn-success" disabled>IMPORT</button>
+                    <button id="importAllBtn" class="btn btn-success" disabled>IMPORT ALL</button>
+                </div>
+            </div>
+
+            <div id="loadingIndicator" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Loading...</p>
+            </div>
+
+            <div id="errorMessage" class="error-message" style="display: none;"></div>
+
+            <div id="offersList" class="offers-list"></div>
+
+            <div class="pagination" id="pagination" style="display: none;">
+                <button id="prevBtn" class="btn btn-secondary" disabled>Prev</button>
+                <span id="pageInfo">Page 1</span>
+                <button id="nextBtn" class="btn btn-secondary" disabled>Next</button>
+            </div>
+        </div>
+
+        <div class="imported-section">
+            <h2>Imported Products <span id="importedCount" class="count-badge">0</span></h2>
+            <div id="importedList" class="imported-list"></div>
+        </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+
