@@ -301,36 +301,22 @@ body {
 }
 
 .search-form {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: 3fr 2fr auto auto;
     gap: 15px;
-    align-items: center;
+    align-items: end;
 }
 
 .form-group {
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 10px;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .form-group label {
     font-weight: 500;
     color: #333;
     font-size: 0.9em;
-    white-space: nowrap;
-    flex-shrink: 0;
-}
-
-.form-group select {
-    flex: 1;
-    min-width: 150px;
-}
-
-.form-group.product-count-group select {
-    width: 80px;
-    min-width: 80px;
-    flex: 0 0 80px;
 }
 
 .form-group input,
@@ -342,6 +328,12 @@ body {
     color: #333;
     background: #ffffff;
     transition: all 0.2s;
+    width: 100%;
+    min-width: 200px;
+}
+
+.search-form .form-group select {
+    min-width: 250px;
 }
 
 .form-group input:focus,
