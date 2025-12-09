@@ -560,6 +560,18 @@ async function fetchOffers(offset = 0, limit = 20) {
             updatePagination();
             updateImportButtons();
         } else {
+            // Check if this is the OAuth requirement error
+            if (result.requiresUserOAuth) {
+                let detailedError = result.error || 'User-level OAuth authentication required.';
+                if (result.instructions && Array.isArray(result.instructions)) {
+                    detailedError += '\n\n' + result.instructions.join('\n');
+                }
+                if (result.documentation) {
+                    detailedError += `\n\nFor more information, visit: ${result.documentation}`;
+                }
+                throw new Error(detailedError);
+            }
+            
             // Show the actual error message from the API
             const errorMsg = result.error || result.error?.message || 'Failed to fetch offers';
             throw new Error(errorMsg);
@@ -573,8 +585,12 @@ async function fetchOffers(offset = 0, limit = 20) {
             errorMsg = 'Network error: Could not connect to server. Please check your connection.';
         }
         
-        errorEl.textContent = `Failed to fetch offers: ${errorMsg}`;
+        // Format error message for display (preserve line breaks)
+        errorEl.innerHTML = `<strong>Failed to fetch offers:</strong><br><br>${errorMsg.split('\n').join('<br>')}`;
         errorEl.style.display = 'block';
+        
+        // Show toast notification as well
+        showToast('Unable to load your offers. Please check the error message below.', 'error', 8000);
     } finally {
         loadingEl.style.display = 'none';
     }

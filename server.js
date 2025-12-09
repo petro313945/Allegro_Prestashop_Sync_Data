@@ -280,14 +280,13 @@ app.get('/api/health', (req, res) => {
 
 /**
  * Get user's own offers from Allegro
- * Note: Uses /sale/offers endpoint which returns only the authenticated user's own offers
- * This endpoint doesn't require phrase or category parameters
+ * Strategy: Try /sale/offers first (requires user OAuth), fallback to /sale/products with seller filter
  */
 app.get('/api/offers', async (req, res) => {
   try {
-    let { limit = 20, offset = 0 } = req.query;
+    let { limit = 20, offset = 0, sellerId } = req.query;
     
-    // Validate and cap limit at 1000 (Allegro API max for /sale/offers)
+    // Validate and cap limit
     const parsedLimit = parseInt(limit, 10);
     if (isNaN(parsedLimit) || parsedLimit <= 0) {
       limit = 20;
@@ -305,54 +304,74 @@ app.get('/api/offers', async (req, res) => {
       offset = parsedOffset;
     }
     
-    const params = {
-      limit: limit,
-      offset: offset
-    };
-    
-    console.log('Fetching user offers with params:', JSON.stringify(params, null, 2));
-    console.log('Request URL will be:', `${ALLEGRO_API_URL}/sale/offers`);
-    
-    // IMPORTANT: /sale/offers returns only the authenticated user's own offers
-    // This requires bearer-token-for-user (user-level auth)
-    const data = await allegroApiRequest('/sale/offers', params);
-    
-    console.log('Offers response structure:', {
-      hasOffers: !!data.offers,
-      offersCount: data.offers?.length || 0,
-      totalCount: data.count,
-      hasNextPage: !!data.nextPage,
-      keys: Object.keys(data)
-    });
-    
-    // Log sample offer structure to debug
-    if (data.offers && data.offers.length > 0) {
-      const sampleOffer = data.offers[0];
-      console.log('Sample offer structure:', {
-        id: sampleOffer.id,
-        name: sampleOffer.name,
-        hasImages: !!sampleOffer.images,
-        imagesType: typeof sampleOffer.images,
-        imagesIsArray: Array.isArray(sampleOffer.images),
-        imagesLength: Array.isArray(sampleOffer.images) ? sampleOffer.images.length : 'N/A',
-        category: sampleOffer.category,
-        allKeys: Object.keys(sampleOffer)
+    // Try /sale/offers first (requires user-level OAuth)
+    try {
+      const params = {
+        limit: limit,
+        offset: offset
+      };
+      
+      console.log('Attempting to fetch user offers from /sale/offers with params:', JSON.stringify(params, null, 2));
+      const data = await allegroApiRequest('/sale/offers', params);
+      
+      console.log('Offers response structure:', {
+        hasOffers: !!data.offers,
+        offersCount: data.offers?.length || 0,
+        totalCount: data.count,
+        hasNextPage: !!data.nextPage,
+        keys: Object.keys(data)
       });
+      
+      // Log sample offer structure to debug
+      if (data.offers && data.offers.length > 0) {
+        const sampleOffer = data.offers[0];
+        console.log('Sample offer structure:', {
+          id: sampleOffer.id,
+          name: sampleOffer.name,
+          hasImages: !!sampleOffer.images,
+          imagesType: typeof sampleOffer.images,
+          imagesIsArray: Array.isArray(sampleOffer.images),
+          imagesLength: Array.isArray(sampleOffer.images) ? sampleOffer.images.length : 'N/A',
+          category: sampleOffer.category,
+          allKeys: Object.keys(sampleOffer)
+        });
+      }
+      
+      // Normalize response structure for frontend
+      const normalizedData = {
+        offers: data.offers || [],
+        count: data.count || (data.offers ? data.offers.length : 0),
+        nextPage: data.nextPage || null
+      };
+      
+      return res.json({
+        success: true,
+        data: normalizedData
+      });
+    } catch (offersError) {
+      // If /sale/offers fails with 403, it means we need user-level OAuth
+      // Provide clear error message with instructions
+      if (offersError.response?.status === 403) {
+        console.log('/sale/offers requires user-level OAuth. Providing instructions to user.');
+        
+        return res.status(403).json({
+          success: false,
+          error: 'The /sale/offers endpoint requires user-level OAuth authentication, which is not available with client credentials only.',
+          requiresUserOAuth: true,
+          solution: 'To access your own offers, you need to implement OAuth user authorization flow. Alternatively, you can use /sale/products and filter by your seller ID if you know it.',
+          instructions: [
+            '1. Your application needs user-level OAuth (authorization code flow)',
+            '2. The user must authorize your application to access their offers',
+            '3. You need to request the scope: allegro:api:sale:offers:read',
+            '4. Or use /sale/products endpoint with seller filter if you know your seller ID'
+          ],
+          documentation: 'https://developer.allegro.pl/documentation/#section/Authentication'
+        });
+      }
+      
+      // Re-throw other errors to be handled below
+      throw offersError;
     }
-    
-    // Normalize response structure for frontend
-    // /sale/offers returns: { offers: [], count: number, nextPage: {} }
-    // The response is already in the expected format, but we ensure consistency
-    const normalizedData = {
-      offers: data.offers || [],
-      count: data.count || (data.offers ? data.offers.length : 0),
-      nextPage: data.nextPage || null
-    };
-    
-    res.json({
-      success: true,
-      data: normalizedData
-    });
   } catch (error) {
     // Enhanced error logging
     console.error('Error fetching offers:', {
