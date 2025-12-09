@@ -626,66 +626,82 @@ function displayOffers(offers) {
     });
 }
 
-// Create offer card HTML
-function createOfferCard(offer) {
-    const price = offer.sellingMode?.price?.amount 
-        ? `${parseFloat(offer.sellingMode.price.amount).toFixed(2)} ${offer.sellingMode.price.currency || 'PLN'}`
-        : 'N/A';
-    
-    // Handle different image formats
+// Create offer card HTML (for products from /sale/products endpoint)
+function createOfferCard(product) {
+    // Extract product image - products have images array with url property
     let mainImage = '';
-    if (offer.images) {
-        if (Array.isArray(offer.images)) {
-            mainImage = offer.images.length > 0 ? (offer.images[0].url || offer.images[0] || '') : '';
-        } else if (typeof offer.images === 'string') {
-            // Try to parse JSON string
+    if (product.images) {
+        if (Array.isArray(product.images) && product.images.length > 0) {
+            // Images can be objects with 'url' property or direct URL strings
+            const firstImage = product.images[0];
+            if (typeof firstImage === 'object' && firstImage.url) {
+                mainImage = firstImage.url;
+            } else if (typeof firstImage === 'string') {
+                mainImage = firstImage;
+            } else if (firstImage) {
+                mainImage = firstImage;
+            }
+        } else if (typeof product.images === 'string') {
+            // Try to parse if it's a JSON string
             try {
-                const parsedImages = JSON.parse(offer.images);
-                if (Array.isArray(parsedImages) && parsedImages.length > 0) {
-                    mainImage = parsedImages[0];
+                const parsed = JSON.parse(product.images);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    mainImage = parsed[0].url || parsed[0] || '';
                 }
             } catch (e) {
-                mainImage = offer.images;
+                mainImage = product.images;
             }
         }
     }
     
+    // Product ID
+    const productId = product.id || 'N/A';
+    
+    // Category ID
+    const categoryId = product.category?.id || 'N/A';
+    
+    // Product name
+    const productName = product.name || 'Untitled Product';
+    
+    // Note: Products from /sale/products don't have prices directly
+    // Prices are on offers that use this product
+    // We'll show a message or fetch offers if needed
+    
     return `
-        <div class="offer-card" data-offer-id="${offer.id}">
-            ${mainImage ? `
-                <div class="offer-image-container" style="width: 100%; height: 200px; overflow: hidden; border-radius: 6px; margin-bottom: 15px; background: #f5f5f5; display: flex; align-items: center; justify-content: center;">
-                    <img src="${mainImage}" alt="${escapeHtml(offer.name || 'Product')}" style="max-width: 100%; max-height: 100%; object-fit: contain;">
-                </div>
-            ` : `
-                <div class="offer-image-placeholder" style="width: 100%; height: 200px; background: #f5f5f5; border-radius: 6px; margin-bottom: 15px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 0.9em;">
-                    <span>No Image</span>
-                </div>
-            `}
-            <div class="offer-header">
-                <div class="offer-title">${escapeHtml(offer.name || 'Untitled')}</div>
-                <input type="checkbox" class="offer-checkbox" data-offer-id="${offer.id}">
+        <div class="offer-card" data-product-id="${productId}">
+            <div class="offer-image-wrapper">
+                ${mainImage ? `
+                    <img src="${mainImage}" alt="${escapeHtml(productName)}" class="offer-image" 
+                         loading="lazy"
+                         onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                    <div class="offer-image-placeholder" style="display: none;">
+                        <span>No Image</span>
+                    </div>
+                ` : `
+                    <div class="offer-image-placeholder">
+                        <span>No Image</span>
+                    </div>
+                `}
             </div>
-            <div class="offer-details">
-                <div class="offer-detail">
-                    <span class="detail-label">Price</span>
-                    <span class="detail-value price">${price}</span>
+            <div class="offer-content">
+                <div class="offer-header">
+                    <h3 class="offer-title">${escapeHtml(productName)}</h3>
+                    <input type="checkbox" class="offer-checkbox" data-product-id="${productId}">
                 </div>
-                <div class="offer-detail">
-                    <span class="detail-label">ID</span>
-                    <span class="detail-value">${offer.id}</span>
+                <div class="offer-info">
+                    <div class="offer-info-row">
+                        <span class="info-label">Product ID:</span>
+                        <span class="info-value product-id">${productId}</span>
+                    </div>
+                    <div class="offer-info-row">
+                        <span class="info-label">Category ID:</span>
+                        <span class="info-value category-id">${categoryId}</span>
+                    </div>
+                    <div class="offer-info-row price-info">
+                        <span class="info-label">Price:</span>
+                        <span class="info-value price-note">See offers for price</span>
+                    </div>
                 </div>
-                ${offer.category?.id ? `
-                <div class="offer-detail">
-                    <span class="detail-label">Category</span>
-                    <span class="detail-value">${offer.category.id}</span>
-                </div>
-                ` : ''}
-                ${offer.stock?.available !== undefined ? `
-                <div class="offer-detail">
-                    <span class="detail-label">Stock</span>
-                    <span class="detail-value">${offer.stock.available}</span>
-                </div>
-                ` : ''}
             </div>
         </div>
     `;
@@ -781,7 +797,10 @@ function importSelected() {
     }
     
     const selectedCheckboxes = document.querySelectorAll('.offer-checkbox:checked');
-    const selectedIds = Array.from(selectedCheckboxes).map(cb => cb.dataset.offerId);
+    // Support both data-offer-id and data-product-id for compatibility
+    const selectedIds = Array.from(selectedCheckboxes).map(cb => 
+        cb.dataset.productId || cb.dataset.offerId
+    );
     
     const offersToImport = currentOffers.filter(offer => selectedIds.includes(offer.id));
     importOffers(offersToImport);
@@ -878,7 +897,7 @@ async function loadCategories() {
     errorEl.style.display = 'none';
     categoriesListEl.innerHTML = '<div style="text-align: center; padding: 40px; color: #1a73e8;">Loading categories...</div>';
     loadCategoriesBtn.disabled = true;
-    loadCategoriesBtn.textContent = 'LOADING...';
+    loadCategoriesBtn.textContent = 'Loading...';
     
     try {
         const response = await fetch(`${API_BASE}/api/categories`);
@@ -909,7 +928,7 @@ async function loadCategories() {
         categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #c5221f;">Failed to load categories. Please try again.</p>';
     } finally {
         loadCategoriesBtn.disabled = false;
-        loadCategoriesBtn.textContent = 'LOAD CATEGORIES';
+        loadCategoriesBtn.textContent = 'Reload';
     }
 }
 
@@ -927,7 +946,6 @@ function displayCategories(categories) {
         return `
             <div class="category-item ${isSelected ? 'selected' : ''}" data-category-id="${category.id}">
                 <span class="category-item-name">${escapeHtml(category.name || 'Unnamed Category')}</span>
-                <span class="category-item-id">ID: ${category.id}</span>
             </div>
         `;
     }).join('');
