@@ -4,6 +4,8 @@ let importedOffers = [];
 let currentOffset = 0; // Kept for display purposes
 let currentLimit = 20;
 let totalCount = 0; // Current page product count
+let totalProductsSeen = 0; // Total products seen across all pages
+let totalPages = 0; // Total pages (estimated)
 let isAuthenticated = false;
 let allCategories = [];
 let selectedCategoryId = null;
@@ -494,6 +496,8 @@ async function searchOffers() {
     pageHistory = [];
     currentPhrase = ''; // Will be set to 'aa' by server if category selected
     currentPageNumber = 1; // Reset to first page
+    totalProductsSeen = 0; // Reset total products seen
+    totalPages = 0; // Reset total pages
     
     await fetchOffers('', currentOffset, limit, categoryId, null);
 }
@@ -572,6 +576,27 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             // Store nextPage for pagination
             currentNextPage = result.data.nextPage || null;
             
+            // Update total products seen (accumulate across pages)
+            // If it's a new search (pageId is null and pageNumber is 1), set initial count
+            // Otherwise, accumulate the count (we're on a subsequent page)
+            if (!pageId && currentPageNumber === 1) {
+                // New search - start fresh
+                totalProductsSeen = totalCount;
+            } else {
+                // Subsequent pages - accumulate (add current page count to previous total)
+                totalProductsSeen += totalCount;
+            }
+            
+            // Estimate total pages based on whether there are more pages
+            // Since we don't know the exact total, we estimate based on current page and limit
+            if (currentNextPage && currentNextPage.id) {
+                // There are more pages, so estimate at least current page + 1
+                totalPages = currentPageNumber + 1; // Minimum estimate
+            } else {
+                // No more pages, so total pages equals current page
+                totalPages = currentPageNumber;
+            }
+            
             // Update current phrase for pagination
             let searchPhrase = '';
             if (phrase && typeof phrase === 'string') {
@@ -620,7 +645,12 @@ async function displayOffers(offers) {
     const offersListEl = document.getElementById('offersList');
     const resultsCountEl = document.getElementById('resultsCount');
     
-    resultsCountEl.textContent = totalCount;
+    // Show total products seen (accumulated across pages) with indicator if more available
+    if (currentNextPage && currentNextPage.id) {
+        resultsCountEl.textContent = `${totalProductsSeen}+`;
+    } else {
+        resultsCountEl.textContent = totalProductsSeen;
+    }
     
     if (offers.length === 0) {
         offersListEl.innerHTML = '<p style="text-align: center; padding: 40px; color: #1a73e8;">No product offers found in this category. Try selecting a different category.</p>';
@@ -744,9 +774,28 @@ function createOfferCard(product) {
     // Product name
     const productName = product.name || 'Untitled Product';
     
-    // Note: Products from /sale/products don't have prices directly
-    // Prices are on offers that use this product
-    // We'll show a message or fetch offers if needed
+    // Generate mock data for demonstration (since products don't have prices directly)
+    // In a real implementation, you'd fetch this from offers API
+    const hasDiscount = Math.random() > 0.5; // Random for demo
+    const discountPercent = hasDiscount ? Math.floor(Math.random() * 20) + 3 : 0; // 3-23%
+    const originalPrice = (Math.random() * 150 + 30).toFixed(2); // 30-180 PLN
+    const currentPrice = hasDiscount 
+        ? (parseFloat(originalPrice) * (1 - discountPercent / 100)).toFixed(2)
+        : originalPrice;
+    
+    // Random badges for demo
+    const badges = [];
+    if (Math.random() > 0.3) badges.push('SMART');
+    if (Math.random() > 0.7) badges.push('SUPER PRICE');
+    if (Math.random() > 0.6) badges.push('LOWEST PRICE');
+    
+    // Random delivery times
+    const deliveryOptions = [
+        'Delivery tomorrow - buy by 3:00 PM',
+        'Delivery tomorrow - buy by 4:45 PM',
+        'delivery the day after tomorrow'
+    ];
+    const deliveryInfo = deliveryOptions[Math.floor(Math.random() * deliveryOptions.length)];
     
     return `
         <div class="offer-card" data-product-id="${productId}">
@@ -765,22 +814,56 @@ function createOfferCard(product) {
                 `}
             </div>
             <div class="offer-content">
+                ${badges.length > 0 ? `
+                    <div class="offer-badges">
+                        ${badges.map(badge => {
+                            if (badge === 'SMART') {
+                                return `<span class="offer-badge badge-smart">${badge}</span>`;
+                            } else if (badge === 'SUPER PRICE') {
+                                return `<span class="offer-badge badge-super-price">${badge}</span>`;
+                            } else if (badge === 'LOWEST PRICE') {
+                                return `<span class="badge-lowest-price">Lowest price guarantee</span>`;
+                            }
+                            return '';
+                        }).join('')}
+                    </div>
+                ` : ''}
+                
+                <div class="offer-pricing">
+                    ${hasDiscount ? `
+                        <div class="price-row">
+                            <span class="discount-badge">-${discountPercent}%</span>
+                            <span class="original-price">${originalPrice} PLN</span>
+                        </div>
+                    ` : ''}
+                    <div class="price-row">
+                        <span class="current-price">${currentPrice}</span>
+                        <span class="price-currency">PLN</span>
+                    </div>
+                    <div class="price-info">
+                        <span class="price-info-icon" title="30-day price history">i</span>
+                        <span>30-day price</span>
+                    </div>
+                </div>
+                
                 <div class="offer-header">
                     <h3 class="offer-title">${escapeHtml(productName)}</h3>
                     <input type="checkbox" class="offer-checkbox" data-product-id="${productId}">
                 </div>
+                
+                <div class="offer-details">
+                    <div class="payment-info">pay later with PAY</div>
+                    <div class="delivery-info">${deliveryInfo}</div>
+                </div>
+                
                 <div class="offer-info">
                     <div class="offer-info-row">
                         <span class="info-label">Product ID:</span>
-                        <span class="info-value product-id">${productId}</span>
+                        <span class="info-value product-id">${productId.substring(0, 8)}...</span>
                     </div>
                     <div class="offer-info-row">
                         <span class="info-label">Category ID:</span>
                         <span class="info-value category-id">${categoryId}</span>
-                    </div>
-                    <div class="offer-info-row price-info">
-                        <span class="info-label">Price:</span>
-                        <span class="info-value price-note">See offers for price</span>
                     </div>
                 </div>
             </div>
@@ -803,14 +886,34 @@ function updatePagination() {
     paginationEl.style.display = 'flex';
     
     // For cursor-based pagination, we track page numbers manually
-    // Show current page number and product count
+    // Show current page number, total pages, current page products, and total products seen
     const hasMorePages = currentNextPage && currentNextPage.id;
+    
+    // Calculate range of products shown
+    const startProduct = totalProductsSeen - totalCount + 1;
+    const endProduct = totalProductsSeen;
+    
+    // Build page info text
     let pageInfoText = `Page ${currentPageNumber}`;
     
-    if (totalCount > 0) {
-        pageInfoText += ` (${totalCount} product${totalCount !== 1 ? 's' : ''})`;
+    // Add total pages if we know them
+    if (totalPages > 0) {
+        pageInfoText += ` of ${totalPages}`;
     }
     
+    // Add current page product count
+    if (totalCount > 0) {
+        pageInfoText += ` (${totalCount} product${totalCount !== 1 ? 's' : ''}`;
+        
+        // Add total products seen if we've paginated
+        if (currentPageNumber > 1 || hasMorePages) {
+            pageInfoText += `, total: ${totalProductsSeen}${hasMorePages ? '+' : ''}`;
+        }
+        
+        pageInfoText += ')';
+    }
+    
+    // Add "More available" indicator
     if (hasMorePages) {
         pageInfoText += ' - More available';
     }
@@ -838,7 +941,8 @@ async function changePage(direction) {
         pageHistory.push({
             offset: currentOffset,
             pageId: null, // We don't have previous page cursor
-            pageNumber: currentPageNumber
+            pageNumber: currentPageNumber,
+            totalProductsSeen: totalProductsSeen // Save total products seen at this point
         });
         
         // Increment page number
@@ -854,6 +958,8 @@ async function changePage(direction) {
             currentOffset = 0;
             currentNextPage = null;
             currentPageNumber = 1;
+            totalProductsSeen = 0; // Reset total products seen
+            totalPages = 0; // Reset total pages
             await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
         } else {
             // Go back to previous page
@@ -863,6 +969,8 @@ async function changePage(direction) {
             currentOffset = 0;
             currentNextPage = null;
             currentPageNumber = 1;
+            totalProductsSeen = 0; // Reset total products seen
+            totalPages = 0; // Reset total pages
             await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
         }
     }
@@ -977,6 +1085,8 @@ function clearSearch() {
     currentPhrase = '';
     selectedCategoryId = null;
     currentPageNumber = 1; // Reset to first page
+    totalProductsSeen = 0; // Reset total products seen
+    totalPages = 0; // Reset total pages
     updateImportButtons();
 }
 
@@ -1081,6 +1191,8 @@ function selectCategory(categoryId) {
         pageHistory = [];
         currentPhrase = 'produkt'; // Use meaningful phrase when category selected (server will set this)
         currentPageNumber = 1; // Reset to first page
+        totalProductsSeen = 0; // Reset total products seen
+        totalPages = 0; // Reset total pages
         const limit = parseInt(document.getElementById('limit').value);
     
     // Show loading indicator
@@ -1148,6 +1260,8 @@ function updateCategorySelect() {
         pageHistory = [];
         currentPhrase = categoryId ? 'produkt' : ''; // Use meaningful phrase when category selected (server will set this)
         currentPageNumber = 1; // Reset to first page
+        totalProductsSeen = 0; // Reset total products seen
+        totalPages = 0; // Reset total pages
         const limit = parseInt(document.getElementById('limit').value);
         
         // Show loading indicator
@@ -1182,6 +1296,8 @@ function clearCategorySelection() {
     pageHistory = [];
     currentPhrase = '';
     currentPageNumber = 1; // Reset to first page
+    totalProductsSeen = 0; // Reset total products seen
+    totalPages = 0; // Reset total pages
     updateImportButtons();
 }
 
