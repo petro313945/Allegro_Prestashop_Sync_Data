@@ -42,14 +42,21 @@ function setupEventListeners() {
     if (testAuthBtn) {
         testAuthBtn.addEventListener('click', testAuthentication);
     }
-    document.getElementById('searchBtn').addEventListener('click', searchOffers);
     document.getElementById('clearBtn').addEventListener('click', clearSearch);
+    
+    // Add event listener for product count change
+    const limitSelect = document.getElementById('limit');
+    if (limitSelect) {
+        limitSelect.addEventListener('change', handleProductCountChange);
+    }
     document.getElementById('importSelectedBtn').addEventListener('click', importSelected);
     document.getElementById('importAllBtn').addEventListener('click', importAll);
     document.getElementById('prevBtn').addEventListener('click', () => changePage(-1));
     document.getElementById('nextBtn').addEventListener('click', () => changePage(1));
     document.getElementById('loadCategoriesBtn').addEventListener('click', loadCategories);
     document.getElementById('clearCategoryBtn').addEventListener('click', clearCategorySelection);
+    document.getElementById('clearImportedBtn').addEventListener('click', clearImportedProducts);
+    document.getElementById('exportToPrestashopBtn').addEventListener('click', exportToPrestashop);
 }
 
 // Toast notification system
@@ -303,10 +310,10 @@ function validateAuth() {
 
 // Update UI state based on credentials and authentication
 function updateUIState(configured) {
-    const searchBtn = document.getElementById('searchBtn');
     const importSelectedBtn = document.getElementById('importSelectedBtn');
     const importAllBtn = document.getElementById('importAllBtn');
     const limitSelect = document.getElementById('limit');
+    const selectedCategorySelect = document.getElementById('selectedCategory');
     
     // Disable all actions and inputs if not authenticated
     const authenticated = checkAuthentication();
@@ -316,20 +323,12 @@ function updateUIState(configured) {
         authRequiredMessage.style.display = authenticated ? 'none' : 'block';
     }
     
-    if (searchBtn) {
-        searchBtn.disabled = !authenticated;
-        if (!authenticated) {
-            searchBtn.title = 'Authentication required';
-        } else {
-            searchBtn.title = '';
-        }
-    }
-    
+    // Enable/disable product count based on category selection and authentication
     if (limitSelect) {
-        limitSelect.disabled = !authenticated;
+        const categorySelected = selectedCategorySelect && selectedCategorySelect.value;
+        limitSelect.disabled = !authenticated || !categorySelected;
     }
     
-    const selectedCategorySelect = document.getElementById('selectedCategory');
     const loadCategoriesBtn = document.getElementById('loadCategoriesBtn');
     
     if (selectedCategorySelect) {
@@ -463,41 +462,23 @@ async function testAuthentication() {
     }
 }
 
-// Search offers
-async function searchOffers() {
+// Handle product count change - automatically fetch products
+async function handleProductCountChange() {
     // Validate authentication first
     if (!validateAuth()) {
         return;
     }
     
-    // Check if credentials are set
-    const clientId = document.getElementById('clientId').value.trim();
-    const clientSecret = document.getElementById('clientSecret').value.trim();
+    const limitSelect = document.getElementById('limit');
+    const selectedCategorySelect = document.getElementById('selectedCategory');
     
-    if (!clientId || !clientSecret) {
-        const errorEl = document.getElementById('errorMessage');
-        if (errorEl) {
-            errorEl.textContent = 'Credentials required';
-            errorEl.style.display = 'block';
-        }
+    // Only proceed if category is selected
+    if (!selectedCategorySelect || !selectedCategorySelect.value) {
         return;
     }
     
-    // Ensure credentials are sent to backend
-    await sendCredentialsToBackend(clientId, clientSecret);
-    
-    // Double check auth after sending credentials
-    if (!checkAuthentication()) {
-        const errorEl = document.getElementById('errorMessage');
-        if (errorEl) {
-            errorEl.textContent = 'Authentication required. Please test connection first.';
-            errorEl.style.display = 'block';
-        }
-        return;
-    }
-    
-    const limit = parseInt(document.getElementById('limit').value);
-    const categoryId = document.getElementById('selectedCategory').value || null;
+    const limit = parseInt(limitSelect.value);
+    const categoryId = selectedCategorySelect.value || null;
     
     // Reset pagination state for new search
     currentOffset = 0;
@@ -1167,8 +1148,18 @@ function importOffers(offers) {
 function displayImportedOffers() {
     const importedListEl = document.getElementById('importedList');
     const importedCountEl = document.getElementById('importedCount');
+    const clearImportedBtn = document.getElementById('clearImportedBtn');
+    const exportToPrestashopBtn = document.getElementById('exportToPrestashopBtn');
     
     importedCountEl.textContent = importedOffers.length;
+    
+    // Enable/disable buttons based on imported products count
+    if (clearImportedBtn) {
+        clearImportedBtn.disabled = importedOffers.length === 0;
+    }
+    if (exportToPrestashopBtn) {
+        exportToPrestashopBtn.disabled = importedOffers.length === 0;
+    }
     
     if (importedOffers.length === 0) {
         importedListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No products imported yet</p>';
@@ -1240,6 +1231,59 @@ function removeImportedOffer(offerId) {
     showToast('Product removed from imported list', 'success');
 }
 
+// Clear all imported products
+function clearImportedProducts() {
+    if (importedOffers.length === 0) {
+        return;
+    }
+    
+    if (confirm(`Are you sure you want to clear all ${importedOffers.length} imported product(s)?`)) {
+        importedOffers = [];
+        saveImportedOffers();
+        displayImportedOffers();
+        showToast('All imported products cleared', 'success');
+    }
+}
+
+// Export to PrestaShop
+function exportToPrestashop() {
+    if (importedOffers.length === 0) {
+        showToast('No products to export', 'error');
+        return;
+    }
+    
+    // Create export data in PrestaShop format
+    const exportData = {
+        products: importedOffers.map(offer => ({
+            id: offer.id,
+            name: offer.name || 'Untitled Product',
+            category: offer.category?.name || offer.category?.id || 'N/A',
+            categoryId: offer.category?.id || null,
+            images: offer.images || [],
+            // Add other fields that PrestaShop might need
+            description: offer.description || '',
+            price: offer.price || null,
+            reference: offer.id
+        })),
+        exportDate: new Date().toISOString(),
+        totalProducts: importedOffers.length
+    };
+    
+    // Convert to JSON and download
+    const dataStr = JSON.stringify(exportData, null, 2);
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(dataBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `prestashop_export_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    showToast(`Exported ${importedOffers.length} product(s) to PrestaShop`, 'success');
+}
+
 // Save imported offers to localStorage
 function saveImportedOffers() {
     localStorage.setItem('importedOffers', JSON.stringify(importedOffers));
@@ -1265,6 +1309,18 @@ function clearSearch() {
     document.getElementById('resultsCount').textContent = '0';
     document.getElementById('pagination').style.display = 'none';
     document.getElementById('errorMessage').style.display = 'none';
+    
+    // Clear visual selection
+    document.querySelectorAll('.category-item').forEach(item => {
+        item.classList.remove('selected');
+    });
+    
+    // Disable product count when no category selected
+    const limitSelect = document.getElementById('limit');
+    if (limitSelect) {
+        limitSelect.disabled = true;
+    }
+    
     currentOffers = [];
     currentOffset = 0;
     currentNextPage = null;
@@ -1324,8 +1380,35 @@ async function loadCategories() {
     }
 }
 
+// Fetch product count for a category
+async function fetchCategoryProductCount(categoryId) {
+    try {
+        const params = new URLSearchParams();
+        params.append('phrase', 'produkt');
+        params.append('categoryId', categoryId);
+        params.append('limit', '30'); // Fetch up to 30 to get a better count estimate
+        
+        const response = await fetch(`${API_BASE}/api/offers?${params}`);
+        if (!response.ok) return 0;
+        
+        const result = await response.json();
+        if (result.success && result.data) {
+            const count = result.data.count || result.data.offers?.length || 0;
+            // If we got 30 products, there might be more - show "30+"
+            if (count === 30 && result.data.nextPage) {
+                return '30+';
+            }
+            return count;
+        }
+        return 0;
+    } catch (error) {
+        console.error(`Error fetching count for category ${categoryId}:`, error);
+        return 0;
+    }
+}
+
 // Display categories
-function displayCategories(categories) {
+async function displayCategories(categories) {
     const categoriesListEl = document.getElementById('categoriesList');
     
     if (categories.length === 0) {
@@ -1333,11 +1416,13 @@ function displayCategories(categories) {
         return;
     }
     
+    // First render categories with loading state for counts
     categoriesListEl.innerHTML = categories.map(category => {
         const isSelected = selectedCategoryId === category.id;
         return `
             <div class="category-item ${isSelected ? 'selected' : ''}" data-category-id="${category.id}">
                 <span class="category-item-name">${escapeHtml(category.name || 'Unnamed Category')}</span>
+                <span class="category-item-count" data-category-id="${category.id}">...</span>
             </div>
         `;
     }).join('');
@@ -1349,6 +1434,25 @@ function displayCategories(categories) {
             selectCategory(categoryId);
         });
     });
+    
+    // Fetch product counts for all categories in parallel (limit concurrent requests)
+    const batchSize = 5; // Process 5 categories at a time to avoid overwhelming the API
+    for (let i = 0; i < categories.length; i += batchSize) {
+        const batch = categories.slice(i, i + batchSize);
+        await Promise.all(batch.map(async (category) => {
+            const count = await fetchCategoryProductCount(category.id);
+            const countEl = document.querySelector(`.category-item-count[data-category-id="${category.id}"]`);
+            if (countEl) {
+                if (count === 0) {
+                    countEl.textContent = '(0)';
+                } else if (typeof count === 'string') {
+                    countEl.textContent = `(${count})`;
+                } else {
+                    countEl.textContent = `(${count})`;
+                }
+            }
+        }));
+    }
 }
 
 // Select a category
@@ -1368,6 +1472,12 @@ function selectCategory(categoryId) {
     const selectedCategorySelect = document.getElementById('selectedCategory');
     if (selectedCategorySelect) {
         selectedCategorySelect.value = categoryId;
+    }
+    
+    // Enable product count when category is selected
+    const limitSelect = document.getElementById('limit');
+    if (limitSelect) {
+        limitSelect.disabled = false;
     }
     
         // Automatically search for products in this category
@@ -1431,11 +1541,22 @@ function updateCategorySelect() {
             }
         });
         
-        // If no category selected, clear selection
+        // Enable/disable product count based on category selection
+        const limitSelect = document.getElementById('limit');
+        if (limitSelect) {
+            limitSelect.disabled = !categoryId;
+        }
+        
+        // If no category selected, clear selection and products
         if (!categoryId) {
             document.querySelectorAll('.category-item').forEach(item => {
                 item.classList.remove('selected');
             });
+            document.getElementById('offersList').innerHTML = '';
+            document.getElementById('resultsCount').textContent = '0';
+            document.getElementById('pagination').style.display = 'none';
+            currentOffers = [];
+            return;
         }
         
         // Automatically search for products when category changes
@@ -1469,6 +1590,12 @@ function clearCategorySelection() {
     document.querySelectorAll('.category-item').forEach(item => {
         item.classList.remove('selected');
     });
+    
+    // Disable product count when no category selected
+    const limitSelect = document.getElementById('limit');
+    if (limitSelect) {
+        limitSelect.disabled = true;
+    }
     
     // Clear product results
     document.getElementById('offersList').innerHTML = '';
