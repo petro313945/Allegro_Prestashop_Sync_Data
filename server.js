@@ -356,14 +356,11 @@ app.get('/api/offers', async (req, res) => {
         
         return res.status(403).json({
           success: false,
-          error: 'The /sale/offers endpoint requires user-level OAuth authentication, which is not available with client credentials only.',
+          error: 'To implement your requiremen, it requires user-level OAuth authentication, which is not available with client credentials only.',
           requiresUserOAuth: true,
           solution: 'To access your own offers, you need to implement OAuth user authorization flow. Alternatively, you can use /sale/products and filter by your seller ID if you know it.',
           instructions: [
-            '1. Your application needs user-level OAuth (authorization code flow)',
-            '2. The user must authorize your application to access their offers',
-            '3. You need to request the scope: allegro:api:sale:offers:read',
-            '4. Or use /sale/products endpoint with seller filter if you know your seller ID'
+            'Your application needs user-level OAuth (authorization code flow) and user must authorize your application to access their offers.'
           ],
           documentation: 'https://developer.allegro.pl/documentation/#section/Authentication'
         });

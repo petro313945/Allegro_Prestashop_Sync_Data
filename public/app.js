@@ -562,12 +562,13 @@ async function fetchOffers(offset = 0, limit = 20) {
         } else {
             // Check if this is the OAuth requirement error
             if (result.requiresUserOAuth) {
-                let detailedError = result.error || 'User-level OAuth authentication required.';
-                if (result.instructions && Array.isArray(result.instructions)) {
-                    detailedError += '\n\n' + result.instructions.join('\n');
+                // Format the error message exactly as specified
+                let detailedError = result.error || 'This feature requires user-level OAuth authentication, which is not available with client credentials only.';
+                if (result.instructions && Array.isArray(result.instructions) && result.instructions.length > 0) {
+                    detailedError += '\n\n' + result.instructions[0];
                 }
                 if (result.documentation) {
-                    detailedError += `\n\nFor more information, visit: ${result.documentation}`;
+                    detailedError += `\n\nPlease check this: ${result.documentation}`;
                 }
                 throw new Error(detailedError);
             }
@@ -585,8 +586,12 @@ async function fetchOffers(offset = 0, limit = 20) {
             errorMsg = 'Network error: Could not connect to server. Please check your connection.';
         }
         
-        // Format error message for display (preserve line breaks)
-        errorEl.innerHTML = `<strong>Failed to fetch offers:</strong><br><br>${errorMsg.split('\n').join('<br>')}`;
+        // Format error message for display (preserve line breaks and make links clickable)
+        let formattedMsg = errorMsg.split('\n').join('<br>');
+        // Make URLs clickable
+        formattedMsg = formattedMsg.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+        
+        errorEl.innerHTML = `<strong>Failed to fetch offers:</strong><br><br>${formattedMsg}`;
         errorEl.style.display = 'block';
         
         // Show toast notification as well
