@@ -1136,17 +1136,57 @@ function displayImportedOffers() {
         return;
     }
     
-    importedListEl.innerHTML = importedOffers.map(offer => `
+    importedListEl.innerHTML = importedOffers.map(offer => {
+        // Extract product image - same logic as createOfferCard
+        let mainImage = '';
+        
+        if (offer.images) {
+            if (Array.isArray(offer.images) && offer.images.length > 0) {
+                const firstImage = offer.images[0];
+                if (typeof firstImage === 'object' && firstImage !== null) {
+                    mainImage = firstImage.url || firstImage.uri || firstImage.path || firstImage.src || firstImage.link || '';
+                } else if (typeof firstImage === 'string' && firstImage.startsWith('http')) {
+                    mainImage = firstImage;
+                }
+            } else if (typeof offer.images === 'string' && offer.images.startsWith('http')) {
+                mainImage = offer.images;
+            } else if (typeof offer.images === 'object' && offer.images !== null) {
+                mainImage = offer.images.url || offer.images.uri || offer.images.path || offer.images.src || '';
+            }
+        }
+        
+        if (!mainImage) {
+            mainImage = offer.image || offer.imageUrl || offer.photo || offer.thumbnail || '';
+        }
+        
+        const productName = offer.name || 'Untitled Product';
+        
+        return `
         <div class="imported-item" data-offer-id="${offer.id}">
+            <div class="imported-item-image">
+                ${mainImage ? `
+                    <img src="${mainImage}" alt="${escapeHtml(productName)}" class="imported-item-img" 
+                         loading="lazy"
+                         onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                    <div class="imported-item-image-placeholder" style="display: none;">
+                        <span>No Image</span>
+                    </div>
+                ` : `
+                    <div class="imported-item-image-placeholder">
+                        <span>No Image</span>
+                    </div>
+                `}
+            </div>
             <div class="imported-item-content">
-                <div class="imported-item-title">${escapeHtml(offer.name || 'Untitled')}</div>
+                <div class="imported-item-title">${escapeHtml(productName)}</div>
                 <div class="imported-item-id">ID: ${offer.id}</div>
             </div>
             <button class="imported-item-remove" onclick="removeImportedOffer('${offer.id}')" title="Remove product">
                 <span>×</span>
             </button>
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 // Remove imported offer
