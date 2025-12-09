@@ -200,6 +200,13 @@ async function allegroApiRequest(endpoint, params = {}) {
   try {
     const token = await getAccessToken();
     
+    // Log the actual request that will be made
+    const url = new URL(`${ALLEGRO_API_URL}${endpoint}`);
+    Object.keys(params).forEach(key => {
+      url.searchParams.append(key, params[key]);
+    });
+    console.log('Final request URL:', url.toString());
+    
     const response = await axios.get(`${ALLEGRO_API_URL}${endpoint}`, {
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -288,19 +295,30 @@ app.get('/api/offers', async (req, res) => {
     }
 
     // Allegro /sale/products API requires at least 'phrase' OR 'ean' parameter
-    // phrase must be at least 2 characters long (max 1024)
+    // phrase must be at least 2 characters long (max 1024), and cannot be whitespace-only
     // category.id can only be used when searching by phrase
-    let searchPhrase = phrase && phrase.trim() ? phrase.trim() : '';
+    let searchPhrase = '';
     
-    // If category is selected but no phrase provided, use minimal valid phrase (2 spaces)
-    // This allows category filtering while meeting API minimum length requirement
-    if (categoryId && categoryId.trim() && (!searchPhrase || searchPhrase.length < 2)) {
-      searchPhrase = '  '; // Two spaces - minimum valid length
+    // Check if phrase is provided and valid (non-empty after trim and at least 2 chars)
+    if (phrase && typeof phrase === 'string') {
+      const trimmedPhrase = phrase.trim();
+      if (trimmedPhrase.length >= 2) {
+        searchPhrase = trimmedPhrase;
+      }
     }
     
-    if (searchPhrase && searchPhrase.length >= 2) {
+    // If category is selected but no valid phrase provided, use a minimal valid phrase
+    // Using a more meaningful phrase that's likely to match products in any category
+    // The API requires at least 2 characters, but very short phrases might be rejected
+    if (categoryId && categoryId.trim() && !searchPhrase) {
+      // Use a common word that appears in many product names
+      searchPhrase = 'produkt'; // "product" in Polish - more meaningful than 'ab'
+    }
+    
+    // Validate and set phrase parameter
+    if (searchPhrase && typeof searchPhrase === 'string' && searchPhrase.length >= 2 && searchPhrase.length <= 1024) {
       params.phrase = searchPhrase;
-      // category.id can only be used with phrase
+      // category.id can only be used when searching by phrase
       if (categoryId && categoryId.trim()) {
         params['category.id'] = categoryId.trim();
       }
@@ -309,9 +327,19 @@ app.get('/api/offers', async (req, res) => {
       // category.id cannot be used with ean search
     } else {
       // If no valid phrase or ean provided, return error
+      console.error('No valid phrase or ean provided. searchPhrase:', searchPhrase, 'categoryId:', categoryId);
       return res.status(400).json({
         success: false,
         error: 'Please provide a search phrase (at least 2 characters) or select a category to view products. The products API requires at least a phrase parameter with minimum 2 characters.'
+      });
+    }
+    
+    // Final validation - ensure we have at least phrase or ean
+    if (!params.phrase && !params.ean) {
+      console.error('No phrase or ean in params after processing:', params);
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request: Missing required phrase or ean parameter.'
       });
     }
 
@@ -325,7 +353,13 @@ app.get('/api/offers', async (req, res) => {
     
     console.log('Fetching products with params:', JSON.stringify(params, null, 2));
     console.log('Request URL will be:', `${ALLEGRO_API_URL}/sale/products`);
+    console.log('Raw query params received:', { phrase, categoryId, ean, pageId, language });
+    console.log('Processed searchPhrase:', searchPhrase);
+    console.log('Params object keys:', Object.keys(params));
+    console.log('Params object values:', Object.values(params));
     
+    // IMPORTANT: /sale/products requires bearer-token-for-user (user-level auth)
+    // If using client credentials, ensure your app has the right scopes/permissions
     const data = await allegroApiRequest('/sale/products', params);
     
     console.log('Products response structure:', {

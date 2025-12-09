@@ -467,7 +467,7 @@ async function searchOffers() {
     currentLimit = limit;
     currentNextPage = null;
     pageHistory = [];
-    currentPhrase = ''; // Will be set to '  ' (two spaces) if category selected
+    currentPhrase = ''; // Will be set to 'aa' by server if category selected
     
     await fetchOffers('', currentOffset, limit, categoryId, null);
 }
@@ -497,24 +497,26 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
     try {
         const params = new URLSearchParams();
         
-        // Allegro /sale/products API requires at least 'phrase' parameter (minimum 2 characters)
-        // If category is selected but no phrase provided, use "  " (two spaces) as minimal valid phrase
-        // If phrase is provided, use it (but ensure it's at least 2 chars)
-        let searchPhrase = phrase && phrase.trim() ? phrase.trim() : '';
-        
-        // If we have a category but no phrase, use minimal valid phrase (2 spaces)
-        // This allows category filtering to work while meeting API requirements
-        if (categoryId && !searchPhrase) {
-            searchPhrase = '  '; // Two spaces - minimum valid length
+        // Allegro /sale/products API requires at least 'phrase' parameter (minimum 2 characters, non-whitespace)
+        // If category is selected but no phrase provided, server will use minimal valid phrase
+        // If phrase is provided, use it (but ensure it's at least 2 chars after trim)
+        let searchPhrase = '';
+        if (phrase && typeof phrase === 'string') {
+            const trimmedPhrase = phrase.trim();
+            if (trimmedPhrase.length >= 2) {
+                searchPhrase = trimmedPhrase;
+            }
         }
         
-        // Ensure phrase meets minimum length requirement (2 chars)
-        if (searchPhrase && searchPhrase.length >= 2) {
+        // If we have a category but no valid phrase, let server handle it
+        // Server will use 'aa' as minimal valid phrase when category is selected
+        if (searchPhrase) {
             params.append('phrase', searchPhrase);
         }
         
         // category.id can only be used when searching by phrase
-        if (categoryId && searchPhrase) {
+        // Send categoryId - server will add it as 'category.id' if phrase is valid
+        if (categoryId) {
             params.append('categoryId', categoryId);
         }
         
@@ -543,9 +545,16 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             currentNextPage = result.data.nextPage || null;
             
             // Update current phrase for pagination
-            let searchPhrase = phrase && phrase.trim() ? phrase.trim() : '';
+            let searchPhrase = '';
+            if (phrase && typeof phrase === 'string') {
+                const trimmedPhrase = phrase.trim();
+                if (trimmedPhrase.length >= 2) {
+                    searchPhrase = trimmedPhrase;
+                }
+            }
+            // If category selected but no phrase, server uses 'produkt' as default
             if (categoryId && !searchPhrase) {
-                searchPhrase = '  '; // Two spaces - minimum valid length
+                searchPhrase = 'produkt'; // Server will use this when category is selected
             }
             currentPhrase = searchPhrase;
             
@@ -914,7 +923,7 @@ function selectCategory(categoryId) {
     currentOffset = 0;
     currentNextPage = null;
     pageHistory = [];
-    currentPhrase = '  '; // Use minimal valid phrase (2 spaces) when category selected
+    currentPhrase = 'produkt'; // Use meaningful phrase when category selected (server will set this)
     const limit = parseInt(document.getElementById('limit').value);
     
     // Show loading indicator
@@ -980,7 +989,7 @@ function updateCategorySelect() {
         currentOffset = 0;
         currentNextPage = null;
         pageHistory = [];
-        currentPhrase = categoryId ? '  ' : ''; // Use minimal valid phrase (2 spaces) when category selected
+        currentPhrase = categoryId ? 'produkt' : ''; // Use meaningful phrase when category selected (server will set this)
         const limit = parseInt(document.getElementById('limit').value);
         
         // Show loading indicator
