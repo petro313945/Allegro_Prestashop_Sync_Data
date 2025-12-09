@@ -279,140 +279,73 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
- * Get products from Allegro
- * Note: Uses /sale/products endpoint which requires at least 'phrase' or 'ean' parameter
- * category.id can only be used when searching by phrase
+ * Get user's own offers from Allegro
+ * Note: Uses /sale/offers endpoint which returns only the authenticated user's own offers
+ * This endpoint doesn't require phrase or category parameters
  */
 app.get('/api/offers', async (req, res) => {
   try {
-    let { limit = 20, pageId, phrase, categoryId, ean, language = 'pl-PL' } = req.query;
+    let { limit = 20, offset = 0 } = req.query;
     
-    // Validate and cap limit at 30
+    // Validate and cap limit at 1000 (Allegro API max for /sale/offers)
     const parsedLimit = parseInt(limit, 10);
     if (isNaN(parsedLimit) || parsedLimit <= 0) {
       limit = 20;
-    } else if (parsedLimit > 30) {
-      limit = 30;
+    } else if (parsedLimit > 1000) {
+      limit = 1000;
     } else {
       limit = parsedLimit;
     }
     
-    const params = {};
-
-    // Add language parameter
-    if (language && language.trim()) {
-      params.language = language.trim();
-    }
-
-    // Allegro /sale/products API requires at least 'phrase' OR 'ean' parameter
-    // phrase must be at least 2 characters long (max 1024), and cannot be whitespace-only
-    // category.id can only be used when searching by phrase
-    let searchPhrase = '';
-    
-    // Check if phrase is provided and valid (non-empty after trim and at least 2 chars)
-    if (phrase && typeof phrase === 'string') {
-      const trimmedPhrase = phrase.trim();
-      if (trimmedPhrase.length >= 2) {
-        searchPhrase = trimmedPhrase;
-      }
-    }
-    
-    // If category is selected but no valid phrase provided, use a minimal valid phrase
-    // Using a more meaningful phrase that's likely to match products in any category
-    // The API requires at least 2 characters, but very short phrases might be rejected
-    if (categoryId && categoryId.trim() && !searchPhrase) {
-      // Use a common word that appears in many product names
-      searchPhrase = 'produkt'; // "product" in Polish - more meaningful than 'ab'
-    }
-    
-    // Validate and set phrase parameter
-    if (searchPhrase && typeof searchPhrase === 'string' && searchPhrase.length >= 2 && searchPhrase.length <= 1024) {
-      params.phrase = searchPhrase;
-      // category.id can only be used when searching by phrase
-      if (categoryId && categoryId.trim()) {
-        params['category.id'] = categoryId.trim();
-      }
-    } else if (ean && ean.trim()) {
-      params.ean = ean.trim();
-      // category.id cannot be used with ean search
+    // Validate offset
+    const parsedOffset = parseInt(offset, 10);
+    if (isNaN(parsedOffset) || parsedOffset < 0) {
+      offset = 0;
     } else {
-      // If no valid phrase or ean provided, return error
-      console.error('No valid phrase or ean provided. searchPhrase:', searchPhrase, 'categoryId:', categoryId);
-      return res.status(400).json({
-        success: false,
-        error: 'Please provide a search phrase (at least 2 characters) or select a category to view products. The products API requires at least a phrase parameter with minimum 2 characters.'
-      });
+      offset = parsedOffset;
     }
     
-    // Final validation - ensure we have at least phrase or ean
-    if (!params.phrase && !params.ean) {
-      console.error('No phrase or ean in params after processing:', params);
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid request: Missing required phrase or ean parameter.'
-      });
-    }
-
-    // Add pagination - use page.id (cursor) instead of offset for /sale/products
-    if (pageId && pageId.trim()) {
-      params['page.id'] = pageId.trim();
-    }
-
-    // Note: /sale/products doesn't use limit/offset, it uses cursor-based pagination
-    // The limit parameter is not directly supported by the API, but we can limit results client-side
+    const params = {
+      limit: limit,
+      offset: offset
+    };
     
-    console.log('Fetching products with params:', JSON.stringify(params, null, 2));
-    console.log('Request URL will be:', `${ALLEGRO_API_URL}/sale/products`);
-    console.log('Raw query params received:', { phrase, categoryId, ean, pageId, language });
-    console.log('Processed searchPhrase:', searchPhrase);
-    console.log('Params object keys:', Object.keys(params));
-    console.log('Params object values:', Object.values(params));
+    console.log('Fetching user offers with params:', JSON.stringify(params, null, 2));
+    console.log('Request URL will be:', `${ALLEGRO_API_URL}/sale/offers`);
     
-    // IMPORTANT: /sale/products requires bearer-token-for-user (user-level auth)
-    // If using client credentials, ensure your app has the right scopes/permissions
-    const data = await allegroApiRequest('/sale/products', params);
+    // IMPORTANT: /sale/offers returns only the authenticated user's own offers
+    // This requires bearer-token-for-user (user-level auth)
+    const data = await allegroApiRequest('/sale/offers', params);
     
-    console.log('Products response structure:', {
-      hasProducts: !!data.products,
-      productsCount: data.products?.length || 0,
-      hasCategories: !!data.categories,
-      hasFilters: !!data.filters,
+    console.log('Offers response structure:', {
+      hasOffers: !!data.offers,
+      offersCount: data.offers?.length || 0,
+      totalCount: data.count,
       hasNextPage: !!data.nextPage,
       keys: Object.keys(data)
     });
     
-    // Log sample product structure to debug image extraction
-    if (data.products && data.products.length > 0) {
-      const sampleProduct = data.products[0];
-      console.log('Sample product structure:', {
-        id: sampleProduct.id,
-        name: sampleProduct.name,
-        hasImages: !!sampleProduct.images,
-        imagesType: typeof sampleProduct.images,
-        imagesIsArray: Array.isArray(sampleProduct.images),
-        imagesLength: Array.isArray(sampleProduct.images) ? sampleProduct.images.length : 'N/A',
-        imagesSample: sampleProduct.images ? (Array.isArray(sampleProduct.images) ? sampleProduct.images[0] : sampleProduct.images) : 'N/A',
-        category: sampleProduct.category,
-        allKeys: Object.keys(sampleProduct)
+    // Log sample offer structure to debug
+    if (data.offers && data.offers.length > 0) {
+      const sampleOffer = data.offers[0];
+      console.log('Sample offer structure:', {
+        id: sampleOffer.id,
+        name: sampleOffer.name,
+        hasImages: !!sampleOffer.images,
+        imagesType: typeof sampleOffer.images,
+        imagesIsArray: Array.isArray(sampleOffer.images),
+        imagesLength: Array.isArray(sampleOffer.images) ? sampleOffer.images.length : 'N/A',
+        category: sampleOffer.category,
+        allKeys: Object.keys(sampleOffer)
       });
     }
     
     // Normalize response structure for frontend
-    // /sale/products returns: { products: [], categories: {}, filters: [], nextPage: {} }
-    // Convert to expected format: { offers: [], count: number, nextPage: {} }
-    
-    // Apply limit to results if specified (Allegro API doesn't support limit directly)
-    // Note: limit is already validated and capped at 30 above
-    let products = data.products || [];
-    if (products.length > limit) {
-      products = products.slice(0, limit);
-    }
-    
+    // /sale/offers returns: { offers: [], count: number, nextPage: {} }
+    // The response is already in the expected format, but we ensure consistency
     const normalizedData = {
-      offers: products,
-      count: products.length,
-      categories: data.categories || {},
-      filters: data.filters || [],
+      offers: data.offers || [],
+      count: data.count || (data.offers ? data.offers.length : 0),
       nextPage: data.nextPage || null
     };
     

@@ -44,6 +44,18 @@ function setupEventListeners() {
     }
     document.getElementById('clearBtn').addEventListener('click', clearSearch);
     
+    // Add event listener for load offers button
+    const loadOffersBtn = document.getElementById('loadOffersBtn');
+    if (loadOffersBtn) {
+        loadOffersBtn.addEventListener('click', () => {
+            const limit = parseInt(document.getElementById('limit').value);
+            currentOffset = 0;
+            currentPageNumber = 1;
+            totalProductsSeen = 0;
+            fetchOffers(0, limit);
+        });
+    }
+    
     // Add event listener for product count change
     const limitSelect = document.getElementById('limit');
     if (limitSelect) {
@@ -323,13 +335,13 @@ function updateUIState(configured) {
         authRequiredMessage.style.display = authenticated ? 'none' : 'block';
     }
     
-    // Enable/disable product count based on category selection and authentication
+    // Enable product count based on authentication (no longer requires category)
     if (limitSelect) {
-        const categorySelected = selectedCategorySelect && selectedCategorySelect.value;
-        limitSelect.disabled = !authenticated || !categorySelected;
+        limitSelect.disabled = !authenticated;
     }
     
     const loadCategoriesBtn = document.getElementById('loadCategoriesBtn');
+    const loadOffersBtn = document.getElementById('loadOffersBtn');
     
     if (selectedCategorySelect) {
         selectedCategorySelect.disabled = !authenticated;
@@ -337,6 +349,10 @@ function updateUIState(configured) {
     
     if (loadCategoriesBtn) {
         loadCategoriesBtn.disabled = !authenticated;
+    }
+    
+    if (loadOffersBtn) {
+        loadOffersBtn.disabled = !authenticated;
     }
     
     if (importSelectedBtn) {
@@ -462,7 +478,7 @@ async function testAuthentication() {
     }
 }
 
-// Handle product count change - automatically fetch products
+// Handle product count change - automatically fetch offers if already loaded
 async function handleProductCountChange() {
     // Validate authentication first
     if (!validateAuth()) {
@@ -470,32 +486,25 @@ async function handleProductCountChange() {
     }
     
     const limitSelect = document.getElementById('limit');
-    const selectedCategorySelect = document.getElementById('selectedCategory');
-    
-    // Only proceed if category is selected
-    if (!selectedCategorySelect || !selectedCategorySelect.value) {
-        return;
-    }
-    
     const limit = parseInt(limitSelect.value);
-    const categoryId = selectedCategorySelect.value || null;
     
-    // Reset pagination state for new search
-    currentOffset = 0;
-    currentLimit = limit;
-    currentNextPage = null;
-    pageHistory = [];
-    currentPhrase = ''; // Will be set to 'aa' by server if category selected
-    currentPageNumber = 1; // Reset to first page
-    totalProductsSeen = 0; // Reset total products seen
-    
-    await fetchOffers('', currentOffset, limit, categoryId, null);
+    // Only fetch if we already have offers loaded (user has clicked "Load My Offers")
+    if (currentOffers.length > 0 || currentPageNumber > 1) {
+        // Reset pagination state for new limit
+        currentOffset = 0;
+        currentLimit = limit;
+        pageHistory = [];
+        currentPageNumber = 1; // Reset to first page
+        totalProductsSeen = 0; // Reset total products seen
+        
+        await fetchOffers(currentOffset, limit);
+    }
 }
 
 // Fetch offers from API
-// Note: Allegro /sale/products API requires at least 'phrase' parameter (min 2 chars)
-// When category is selected, we use "  " (two spaces) as a minimal valid phrase to get all products in that category
-async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = null, pageId = null) {
+// Note: Uses /sale/offers endpoint which returns only the authenticated user's own offers
+// This endpoint uses offset-based pagination and doesn't require phrase or category
+async function fetchOffers(offset = 0, limit = 20) {
     // Validate authentication
     if (!checkAuthentication()) {
         const errorEl = document.getElementById('errorMessage');
@@ -517,38 +526,9 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
     try {
         const params = new URLSearchParams();
         
-        // Allegro /sale/products API requires at least 'phrase' parameter (minimum 2 characters, non-whitespace)
-        // If category is selected but no phrase provided, server will use minimal valid phrase
-        // If phrase is provided, use it (but ensure it's at least 2 chars after trim)
-        let searchPhrase = '';
-        if (phrase && typeof phrase === 'string') {
-            const trimmedPhrase = phrase.trim();
-            if (trimmedPhrase.length >= 2) {
-                searchPhrase = trimmedPhrase;
-            }
-        }
-        
-        // If we have a category but no valid phrase, let server handle it
-        // Server will use 'aa' as minimal valid phrase when category is selected
-        if (searchPhrase) {
-            params.append('phrase', searchPhrase);
-        }
-        
-        // category.id can only be used when searching by phrase
-        // Send categoryId - server will add it as 'category.id' if phrase is valid
-        if (categoryId) {
-            params.append('categoryId', categoryId);
-        }
-        
-        // Use pageId for pagination (cursor-based) instead of offset
-        if (pageId) {
-            params.append('pageId', pageId);
-        }
-        
-        // Send limit parameter to server (will be used to limit results)
-        if (limit) {
+        // /sale/offers uses offset-based pagination
+        params.append('offset', offset);
             params.append('limit', limit);
-        }
         
         const response = await fetch(`${API_BASE}/api/offers?${params}`);
         
@@ -561,57 +541,19 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
         
         if (result.success) {
             currentOffers = result.data.offers || [];
-            totalCount = currentOffers.length; // Count of products on current page
+            totalCount = result.data.count || currentOffers.length; // Total count from API or current page count
             
-            // Update total products seen (reset on first page, accumulate on subsequent pages)
-            if (currentPageNumber === 1) {
-                totalProductsSeen = totalCount;
-            } else {
-                totalProductsSeen += totalCount;
-            }
+            // Update current offset for pagination
+            currentOffset = offset;
+            currentLimit = limit;
             
-            // Store nextPage for pagination
-            currentNextPage = result.data.nextPage || null;
+            // Calculate total products seen
+            totalProductsSeen = offset + currentOffers.length;
             
-            // Extract categories from products API response and merge with allCategories
-            // Categories from products API might be an object/dictionary
-            if (result.data.categories) {
-                let productCategories = [];
-                if (Array.isArray(result.data.categories)) {
-                    productCategories = result.data.categories;
-                } else if (typeof result.data.categories === 'object') {
-                    // Convert object/dictionary to array
-                    productCategories = Object.values(result.data.categories);
-                }
-                
-                // Merge with existing categories, avoiding duplicates
-                productCategories.forEach(cat => {
-                    if (cat && cat.id && !allCategories.find(c => c.id === cat.id)) {
-                        allCategories.push(cat);
-                    }
-                });
-            }
-            
-            // Update current phrase for pagination
-            let searchPhrase = '';
-            if (phrase && typeof phrase === 'string') {
-                const trimmedPhrase = phrase.trim();
-                if (trimmedPhrase.length >= 2) {
-                    searchPhrase = trimmedPhrase;
-                }
-            }
-            // If category selected but no phrase, server uses 'produkt' as default
-            if (categoryId && !searchPhrase) {
-                searchPhrase = 'produkt'; // Server will use this when category is selected
-            }
-            currentPhrase = searchPhrase;
-            
-            // Log first product to debug structure
+            // Log first offer to debug structure
             if (currentOffers.length > 0) {
-                console.log('First product from API:', JSON.stringify(currentOffers[0], null, 2));
-                console.log('Product category structure:', currentOffers[0].category);
-                console.log('Available categories count:', allCategories.length);
-                console.log('Sample categories:', allCategories.slice(0, 5));
+                console.log('First offer from API:', JSON.stringify(currentOffers[0], null, 2));
+                console.log('Offer category structure:', currentOffers[0].category);
             }
             
             displayOffers(currentOffers);
@@ -619,7 +561,7 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             updateImportButtons();
         } else {
             // Show the actual error message from the API
-            const errorMsg = result.error || result.error?.message || 'Failed to fetch product offers';
+            const errorMsg = result.error || result.error?.message || 'Failed to fetch offers';
             throw new Error(errorMsg);
         }
     } catch (error) {
@@ -631,7 +573,7 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             errorMsg = 'Network error: Could not connect to server. Please check your connection.';
         }
         
-        errorEl.textContent = `Failed to fetch product offers: ${errorMsg}`;
+        errorEl.textContent = `Failed to fetch offers: ${errorMsg}`;
         errorEl.style.display = 'block';
     } finally {
         loadingEl.style.display = 'none';
@@ -1009,20 +951,20 @@ function updatePagination() {
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
     
-    if (totalCount === 0 && currentPageNumber === 1) {
+    if (currentOffers.length === 0 && currentPageNumber === 1) {
         paginationEl.style.display = 'none';
         return;
     }
     
     paginationEl.style.display = 'flex';
     
-    // For cursor-based pagination, we track page numbers manually
-    // Show current page number and product count
-    const hasMorePages = currentNextPage && currentNextPage.id;
+    // For offset-based pagination, check if we have more results
+    // If we got fewer results than the limit, we're on the last page
+    const hasMorePages = currentOffers.length >= currentLimit;
     let pageInfoText = `Page ${currentPageNumber}`;
     
-    if (totalCount > 0) {
-        pageInfoText += ` (${totalCount} product${totalCount !== 1 ? 's' : ''} on this page)`;
+    if (currentOffers.length > 0) {
+        pageInfoText += ` (${currentOffers.length} offer${currentOffers.length !== 1 ? 's' : ''} on this page)`;
     }
     
     pageInfoEl.textContent = pageInfoText;
@@ -1030,61 +972,50 @@ function updatePagination() {
     // Show total count info
     if (totalCountInfoEl) {
         if (hasMorePages) {
-            totalCountInfoEl.textContent = `Total: ${totalProductsSeen}+ products`;
+            totalCountInfoEl.textContent = `Showing ${totalProductsSeen}+ offers`;
         } else {
-            totalCountInfoEl.textContent = `Total: ${totalProductsSeen} product${totalProductsSeen !== 1 ? 's' : ''}`;
+            totalCountInfoEl.textContent = `Total: ${totalProductsSeen} offer${totalProductsSeen !== 1 ? 's' : ''}`;
         }
     }
     
     // Prev button: enabled if we have history to go back to (not on first page)
     prevBtn.disabled = currentPageNumber === 1;
     
-    // Next button: enabled if we have a nextPage cursor
+    // Next button: enabled if we have more results
     nextBtn.disabled = !hasMorePages;
 }
 
-// Change page (cursor-based pagination)
+// Change page (offset-based pagination)
 async function changePage(direction) {
-    const categoryId = document.getElementById('selectedCategory').value || null;
-    
     if (direction === 1) {
-        // Next page: use currentNextPage.id
-        if (!currentNextPage || !currentNextPage.id) {
-            return;
-        }
-        
+        // Next page: increment offset
         // Save current page to history for going back
         pageHistory.push({
             offset: currentOffset,
-            pageId: null, // We don't have previous page cursor
             pageNumber: currentPageNumber
         });
         
-        // Increment page number
+        // Increment page number and offset
         currentPageNumber++;
-        currentOffset += currentLimit; // Approximate for display
+        currentOffset += currentLimit;
         
-        await fetchOffers(currentPhrase, currentOffset, currentLimit, categoryId, currentNextPage.id);
+        await fetchOffers(currentOffset, currentLimit);
     } else if (direction === -1) {
         // Previous page: go back in history
         if (pageHistory.length === 0 || currentPageNumber === 1) {
             // Reset to first page
             pageHistory = [];
             currentOffset = 0;
-            currentNextPage = null;
             currentPageNumber = 1;
             totalProductsSeen = 0;
-            await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
+            await fetchOffers(0, currentLimit);
         } else {
-            // Go back to previous page
-            // Since we don't have previous page cursors from API, reset to first page
-            // In a full implementation, we'd need to track all page cursors
-            pageHistory = [];
-            currentOffset = 0;
-            currentNextPage = null;
-            currentPageNumber = 1;
-            totalProductsSeen = 0;
-            await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
+            // Go back to previous page from history
+            const previousPage = pageHistory.pop();
+            currentOffset = previousPage.offset;
+            currentPageNumber = previousPage.pageNumber;
+            totalProductsSeen = currentOffset;
+            await fetchOffers(currentOffset, currentLimit);
         }
     }
 }
@@ -1321,9 +1252,7 @@ function clearSearch() {
     
     currentOffers = [];
     currentOffset = 0;
-    currentNextPage = null;
     pageHistory = [];
-    currentPhrase = '';
     selectedCategoryId = null;
     currentPageNumber = 1; // Reset to first page
     totalProductsSeen = 0;
@@ -1431,12 +1360,10 @@ function selectCategory(categoryId) {
         limitSelect.disabled = false;
     }
     
-        // Automatically search for products in this category
+        // Automatically fetch user's offers
         // Reset pagination state
         currentOffset = 0;
-        currentNextPage = null;
         pageHistory = [];
-        currentPhrase = 'produkt'; // Use meaningful phrase when category selected (server will set this)
         currentPageNumber = 1; // Reset to first page
         totalProductsSeen = 0;
         const limit = parseInt(document.getElementById('limit').value);
@@ -1447,9 +1374,8 @@ function selectCategory(categoryId) {
         loadingEl.style.display = 'block';
     }
     
-    // Fetch and display products for selected category
-    // Pass empty phrase - fetchOffers will use '  ' (two spaces) when category is selected
-    fetchOffers('', currentOffset, limit, categoryId, null);
+    // Fetch and display user's offers
+    fetchOffers(currentOffset, limit);
 }
 
 
@@ -1510,12 +1436,10 @@ function updateCategorySelect() {
             return;
         }
         
-        // Automatically search for products when category changes
+        // Automatically fetch user's offers when category selection changes
         // Reset pagination state
         currentOffset = 0;
-        currentNextPage = null;
         pageHistory = [];
-        currentPhrase = categoryId ? 'produkt' : ''; // Use meaningful phrase when category selected (server will set this)
         currentPageNumber = 1; // Reset to first page
         totalProductsSeen = 0;
         const limit = parseInt(document.getElementById('limit').value);
@@ -1526,9 +1450,8 @@ function updateCategorySelect() {
             loadingEl.style.display = 'block';
         }
         
-        // Always fetch products when category is selected
-        // Pass empty phrase - fetchOffers will use '  ' (two spaces) when category is selected
-        fetchOffers('', currentOffset, limit, categoryId, null);
+        // Always fetch user's offers when category selection changes (though category is not used for filtering)
+        fetchOffers(currentOffset, limit);
     });
 }
 
@@ -1554,9 +1477,7 @@ function clearCategorySelection() {
     document.getElementById('pagination').style.display = 'none';
     currentOffers = [];
     currentOffset = 0;
-    currentNextPage = null;
     pageHistory = [];
-    currentPhrase = '';
     currentPageNumber = 1; // Reset to first page
     totalProductsSeen = 0;
     updateImportButtons();

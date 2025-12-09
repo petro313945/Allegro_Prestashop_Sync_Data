@@ -71,25 +71,20 @@
             <main class="content-area">
                 <!-- Search Section -->
                 <div class="search-section">
-                    <h2>Search Products</h2>
+                    <h2>Your Offers</h2>
                     <div id="authRequiredMessage" class="auth-required-message" style="display: none;">
                         Authentication required. Please connect first.
                     </div>
                     <div class="search-form">
                         <div class="form-group">
-                            <label for="selectedCategory">Category</label>
-                            <select id="selectedCategory">
-                                <option value="">All Categories</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label for="limit">Product Count</label>
+                            <label for="limit">Offers per Page</label>
                             <select id="limit" disabled>
                                 <option value="10">10</option>
                                 <option value="20" selected>20</option>
                                 <option value="30">30</option>
                             </select>
                         </div>
+                        <button id="loadOffersBtn" class="btn btn-primary" disabled>Load My Offers</button>
                         <button id="clearBtn" class="btn btn-secondary">Clear</button>
                     </div>
                 </div>
@@ -97,7 +92,7 @@
                 <!-- Results Section -->
                 <div class="results-section">
                     <div class="results-header">
-                        <h2>Product Offers <span id="resultsCount" class="count-badge">0</span></h2>
+                        <h2>Your Offers <span id="resultsCount" class="count-badge">0</span></h2>
                         <div class="results-actions">
                             <button id="importSelectedBtn" class="btn btn-success" disabled>Import</button>
                             <button id="importAllBtn" class="btn btn-success" disabled>Import All</button>
