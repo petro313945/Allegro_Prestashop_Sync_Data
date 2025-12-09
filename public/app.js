@@ -1,12 +1,15 @@
 // State management
 let currentOffers = [];
 let importedOffers = [];
-let currentOffset = 0;
+let currentOffset = 0; // Kept for display purposes
 let currentLimit = 20;
 let totalCount = 0;
 let isAuthenticated = false;
 let allCategories = [];
 let selectedCategoryId = null;
+let currentNextPage = null; // For cursor-based pagination
+let pageHistory = []; // Track page history for going back
+let currentPhrase = ''; // Track current search phrase
 
 // API Base URL
 const API_BASE = '';
@@ -459,15 +462,20 @@ async function searchOffers() {
     const limit = parseInt(document.getElementById('limit').value);
     const categoryId = document.getElementById('selectedCategory').value || null;
     
+    // Reset pagination state for new search
     currentOffset = 0;
     currentLimit = limit;
+    currentNextPage = null;
+    pageHistory = [];
+    currentPhrase = ''; // Will be set to '*' if category selected
     
-    await fetchOffers('', currentOffset, limit, categoryId);
+    await fetchOffers('', currentOffset, limit, categoryId, null);
 }
 
 // Fetch offers from API
-async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = null) {
-    // Note: phrase parameter is kept for backward compatibility but not used
+// Note: Allegro /sale/products API requires at least 'phrase' parameter
+// When category is selected, we use "*" as a wildcard phrase to get all products in that category
+async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = null, pageId = null) {
     // Validate authentication
     if (!checkAuthentication()) {
         const errorEl = document.getElementById('errorMessage');
@@ -487,15 +495,29 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
     offersListEl.innerHTML = '';
     
     try {
-        const params = new URLSearchParams({
-            limit: limit.toString(),
-            offset: offset.toString()
-        });
+        const params = new URLSearchParams();
         
-        // Only add categoryId if provided (phrase search removed)
-        if (categoryId) {
+        // Allegro /sale/products API requires at least 'phrase' parameter
+        // If category is selected but no phrase provided, use "*" as wildcard
+        // If phrase is provided, use it
+        const searchPhrase = phrase && phrase.trim() ? phrase.trim() : (categoryId ? '*' : '');
+        
+        if (searchPhrase) {
+            params.append('phrase', searchPhrase);
+        }
+        
+        // category.id can only be used when searching by phrase
+        if (categoryId && searchPhrase) {
             params.append('categoryId', categoryId);
         }
+        
+        // Use pageId for pagination (cursor-based) instead of offset
+        if (pageId) {
+            params.append('pageId', pageId);
+        }
+        
+        // Note: limit parameter is not directly supported by /sale/products
+        // The API uses cursor-based pagination
         
         const response = await fetch(`${API_BASE}/api/offers?${params}`);
         
@@ -509,6 +531,13 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
         if (result.success) {
             currentOffers = result.data.offers || [];
             totalCount = result.data.count || currentOffers.length;
+            
+            // Store nextPage for pagination
+            currentNextPage = result.data.nextPage || null;
+            
+            // Update current phrase for pagination
+            const searchPhrase = phrase && phrase.trim() ? phrase.trim() : (categoryId ? '*' : '');
+            currentPhrase = searchPhrase;
             
             displayOffers(currentOffers);
             updatePagination();
@@ -614,25 +643,57 @@ function updatePagination() {
     }
     
     paginationEl.style.display = 'flex';
-    const currentPage = Math.floor(currentOffset / currentLimit) + 1;
-    const totalPages = Math.ceil(totalCount / currentLimit);
     
-    pageInfoEl.textContent = `Page ${currentPage} of ${totalPages}`;
-    prevBtn.disabled = currentOffset === 0;
-    nextBtn.disabled = currentOffset + currentLimit >= totalCount;
+    // For cursor-based pagination, we can't calculate exact page numbers
+    // Show approximate page based on current offset
+    const currentPage = Math.floor(currentOffset / currentLimit) + 1;
+    const totalPages = Math.ceil(totalCount / currentLimit) || 1;
+    
+    pageInfoEl.textContent = `Page ${currentPage}${totalPages > 1 ? ` of ~${totalPages}` : ''} (${totalCount} products)`;
+    
+    // Prev button: enabled if we have history to go back to
+    prevBtn.disabled = pageHistory.length === 0;
+    
+    // Next button: enabled if we have a nextPage cursor
+    nextBtn.disabled = !currentNextPage || !currentNextPage.id;
 }
 
-// Change page
+// Change page (cursor-based pagination)
 async function changePage(direction) {
-    const newOffset = currentOffset + (direction * currentLimit);
-    
-    if (newOffset < 0 || newOffset >= totalCount) {
-        return;
-    }
-    
-    currentOffset = newOffset;
     const categoryId = document.getElementById('selectedCategory').value || null;
-    await fetchOffers('', currentOffset, currentLimit, categoryId);
+    
+    if (direction === 1) {
+        // Next page: use currentNextPage.id
+        if (!currentNextPage || !currentNextPage.id) {
+            return;
+        }
+        
+        // Save current page to history (we'll use a marker since we don't have prev cursor)
+        // For simplicity, we'll track that we're on page N
+        pageHistory.push({
+            offset: currentOffset,
+            pageId: null // We don't have previous page cursor
+        });
+        
+        currentOffset += currentLimit; // Approximate for display
+        await fetchOffers(currentPhrase, currentOffset, currentLimit, categoryId, currentNextPage.id);
+    } else if (direction === -1) {
+        // Previous page: go back in history
+        if (pageHistory.length === 0) {
+            // Reset to first page
+            pageHistory = [];
+            currentOffset = 0;
+            currentNextPage = null;
+            await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
+        } else {
+            // For now, just reset to first page since we don't have previous page cursors
+            // In a full implementation, we'd need to track all page cursors
+            pageHistory = [];
+            currentOffset = 0;
+            currentNextPage = null;
+            await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
+        }
+    }
 }
 
 // Update import buttons state
@@ -736,6 +797,9 @@ function clearSearch() {
     document.getElementById('errorMessage').style.display = 'none';
     currentOffers = [];
     currentOffset = 0;
+    currentNextPage = null;
+    pageHistory = [];
+    currentPhrase = '';
     selectedCategoryId = null;
     updateImportButtons();
 }
@@ -836,7 +900,11 @@ function selectCategory(categoryId) {
     }
     
     // Automatically search for products in this category
+    // Reset pagination state
     currentOffset = 0;
+    currentNextPage = null;
+    pageHistory = [];
+    currentPhrase = '*'; // Use wildcard when category selected
     const limit = parseInt(document.getElementById('limit').value);
     
     // Show loading indicator
@@ -846,7 +914,7 @@ function selectCategory(categoryId) {
     }
     
     // Fetch and display products for selected category
-    fetchOffers('', currentOffset, limit, categoryId);
+    fetchOffers('*', currentOffset, limit, categoryId, null);
 }
 
 
@@ -897,7 +965,11 @@ function updateCategorySelect() {
         }
         
         // Automatically search for products when category changes
+        // Reset pagination state
         currentOffset = 0;
+        currentNextPage = null;
+        pageHistory = [];
+        currentPhrase = categoryId ? '*' : '';
         const limit = parseInt(document.getElementById('limit').value);
         
         // Show loading indicator
@@ -907,7 +979,8 @@ function updateCategorySelect() {
         }
         
         // Always fetch products when category is selected
-        fetchOffers('', currentOffset, limit, categoryId);
+        // Use '*' as phrase when category is selected (required by API)
+        fetchOffers(categoryId ? '*' : '', currentOffset, limit, categoryId, null);
     });
 }
 
@@ -927,6 +1000,9 @@ function clearCategorySelection() {
     document.getElementById('pagination').style.display = 'none';
     currentOffers = [];
     currentOffset = 0;
+    currentNextPage = null;
+    pageHistory = [];
+    currentPhrase = '';
     updateImportButtons();
 }
 

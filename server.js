@@ -272,58 +272,72 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
- * Get offers from Allegro
+ * Get products from Allegro
+ * Note: Uses /sale/products endpoint which requires at least 'phrase' or 'ean' parameter
+ * category.id can only be used when searching by phrase
  */
 app.get('/api/offers', async (req, res) => {
   try {
-    const { limit = 20, offset = 0, phrase, categoryId, sellerId } = req.query;
+    const { limit = 20, pageId, phrase, categoryId, ean, language = 'pl-PL' } = req.query;
     
-    const params = {
-      limit: parseInt(limit),
-      offset: parseInt(offset)
-    };
+    const params = {};
 
-    // Add parameters - only add if they have values
+    // Add language parameter
+    if (language && language.trim()) {
+      params.language = language.trim();
+    }
+
+    // Allegro /sale/products API requires at least 'phrase' OR 'ean' parameter
+    // category.id can only be used when searching by phrase
     if (phrase && phrase.trim()) {
       params.phrase = phrase.trim();
-    }
-    if (categoryId && categoryId.trim()) {
-      params['category.id'] = categoryId.trim();
-    }
-    if (sellerId && sellerId.trim()) {
-      params['seller.id'] = sellerId.trim();
-    }
-
-    // Allegro API requires at least one filter parameter (category.id, phrase, or seller.id)
-    // If only category is provided, that should work
-    // If no parameters at all, we'll return an error
-    
-    if (Object.keys(params).length === 2) { // Only limit and offset
+      // category.id can only be used with phrase
+      if (categoryId && categoryId.trim()) {
+        params['category.id'] = categoryId.trim();
+      }
+    } else if (ean && ean.trim()) {
+      params.ean = ean.trim();
+      // category.id cannot be used with ean search
+    } else {
+      // If no phrase or ean provided, return error
       return res.status(400).json({
         success: false,
-        error: 'Please select a category to view products.'
+        error: 'Please provide a search phrase or select a category to view products. The products API requires at least a phrase parameter.'
       });
     }
+
+    // Add pagination - use page.id (cursor) instead of offset for /sale/products
+    if (pageId && pageId.trim()) {
+      params['page.id'] = pageId.trim();
+    }
+
+    // Note: /sale/products doesn't use limit/offset, it uses cursor-based pagination
+    // The limit parameter is not directly supported, but we can request results
     
-    console.log('Fetching offers with params:', JSON.stringify(params, null, 2));
-    console.log('Request URL will be:', `${ALLEGRO_API_URL}/sale/offers`);
+    console.log('Fetching products with params:', JSON.stringify(params, null, 2));
+    console.log('Request URL will be:', `${ALLEGRO_API_URL}/sale/products`);
     
-    const data = await allegroApiRequest('/sale/offers', params);
+    const data = await allegroApiRequest('/sale/products', params);
     
-    console.log('Offers response structure:', {
-      hasOffers: !!data.offers,
-      offersCount: data.offers?.length || 0,
-      hasCount: !!data.count,
-      totalCount: data.totalCount,
-      keys: Object.keys(data),
-      isArray: Array.isArray(data)
+    console.log('Products response structure:', {
+      hasProducts: !!data.products,
+      productsCount: data.products?.length || 0,
+      hasCategories: !!data.categories,
+      hasFilters: !!data.filters,
+      hasNextPage: !!data.nextPage,
+      keys: Object.keys(data)
     });
     
     // Normalize response structure for frontend
-    // Allegro API might return offers directly as array or wrapped in an object
-    const normalizedData = Array.isArray(data) 
-      ? { offers: data, count: data.length }
-      : data;
+    // /sale/products returns: { products: [], categories: {}, filters: [], nextPage: {} }
+    // Convert to expected format: { offers: [], count: number, nextPage: {} }
+    const normalizedData = {
+      offers: data.products || [],
+      count: data.products?.length || 0,
+      categories: data.categories || {},
+      filters: data.filters || [],
+      nextPage: data.nextPage || null
+    };
     
     res.json({
       success: true,
