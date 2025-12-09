@@ -582,6 +582,11 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             }
             currentPhrase = searchPhrase;
             
+            // Log first product to debug structure
+            if (currentOffers.length > 0) {
+                console.log('First product from API:', JSON.stringify(currentOffers[0], null, 2));
+            }
+            
             displayOffers(currentOffers);
             updatePagination();
             updateImportButtons();
@@ -607,7 +612,7 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
 }
 
 // Display offers
-function displayOffers(offers) {
+async function displayOffers(offers) {
     const offersListEl = document.getElementById('offersList');
     const resultsCountEl = document.getElementById('resultsCount');
     
@@ -618,40 +623,112 @@ function displayOffers(offers) {
         return;
     }
     
+    // Render cards first
     offersListEl.innerHTML = offers.map(offer => createOfferCard(offer)).join('');
     
     // Add checkbox listeners
     document.querySelectorAll('.offer-checkbox').forEach(checkbox => {
         checkbox.addEventListener('change', updateImportButtons);
     });
+    
+    // Fetch full product details for products without images
+    // This is done asynchronously to not block the UI
+    const productsWithoutImages = offers.filter(p => !p.images || (Array.isArray(p.images) && p.images.length === 0));
+    if (productsWithoutImages.length > 0) {
+        console.log(`Fetching details for ${productsWithoutImages.length} products without images...`);
+        // Fetch details for first few products to avoid too many requests
+        const productsToFetch = productsWithoutImages.slice(0, 10);
+        await Promise.all(productsToFetch.map(product => fetchProductDetails(product.id)));
+    }
+}
+
+// Fetch full product details including images
+async function fetchProductDetails(productId) {
+    try {
+        const response = await fetch(`${API_BASE}/api/products/${productId}`);
+        if (!response.ok) return;
+        
+        const result = await response.json();
+        if (result.success && result.data) {
+            const product = result.data;
+            // Update the card if product has images
+            if (product.images && Array.isArray(product.images) && product.images.length > 0) {
+                const card = document.querySelector(`[data-product-id="${productId}"]`);
+                if (card) {
+                    const imageWrapper = card.querySelector('.offer-image-wrapper');
+                    if (imageWrapper) {
+                        const firstImage = product.images[0];
+                        const imageUrl = firstImage.url || firstImage.uri || firstImage.path || firstImage.src || '';
+                        if (imageUrl) {
+                            imageWrapper.innerHTML = `
+                                <img src="${imageUrl}" alt="${escapeHtml(product.name || 'Product')}" class="offer-image" 
+                                     loading="lazy"
+                                     onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                                <div class="offer-image-placeholder" style="display: none;">
+                                    <span>No Image</span>
+                                </div>
+                            `;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error(`Error fetching product details for ${productId}:`, error);
+    }
 }
 
 // Create offer card HTML (for products from /sale/products endpoint)
 function createOfferCard(product) {
-    // Extract product image - products have images array with url property
+    // Extract product image - check multiple possible locations
     let mainImage = '';
+    
+    // Debug: Log product structure to understand image location
+    if (!product.images || (Array.isArray(product.images) && product.images.length === 0)) {
+        console.log('Product without images:', {
+            id: product.id,
+            name: product.name,
+            allKeys: Object.keys(product),
+            hasImages: !!product.images,
+            imagesValue: product.images
+        });
+    }
+    
+    // Method 1: Check product.images array (standard Allegro API format)
     if (product.images) {
         if (Array.isArray(product.images) && product.images.length > 0) {
-            // Images can be objects with 'url' property or direct URL strings
             const firstImage = product.images[0];
-            if (typeof firstImage === 'object' && firstImage.url) {
-                mainImage = firstImage.url;
-            } else if (typeof firstImage === 'string') {
-                mainImage = firstImage;
-            } else if (firstImage) {
+            if (typeof firstImage === 'object' && firstImage !== null) {
+                // Try common image URL properties
+                mainImage = firstImage.url || firstImage.uri || firstImage.path || firstImage.src || firstImage.link || '';
+            } else if (typeof firstImage === 'string' && firstImage.startsWith('http')) {
                 mainImage = firstImage;
             }
-        } else if (typeof product.images === 'string') {
-            // Try to parse if it's a JSON string
-            try {
-                const parsed = JSON.parse(product.images);
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                    mainImage = parsed[0].url || parsed[0] || '';
-                }
-            } catch (e) {
-                mainImage = product.images;
-            }
+        } else if (typeof product.images === 'string' && product.images.startsWith('http')) {
+            mainImage = product.images;
+        } else if (typeof product.images === 'object' && product.images !== null) {
+            mainImage = product.images.url || product.images.uri || product.images.path || product.images.src || '';
         }
+    }
+    
+    // Method 2: Check alternative image locations (some APIs use different fields)
+    if (!mainImage) {
+        mainImage = product.image || product.imageUrl || product.photo || product.thumbnail || '';
+    }
+    
+    // Method 3: Check if images are in a nested structure
+    if (!mainImage && product.media && product.media.images) {
+        if (Array.isArray(product.media.images) && product.media.images.length > 0) {
+            const firstMediaImage = product.media.images[0];
+            mainImage = firstMediaImage.url || firstMediaImage.uri || firstMediaImage || '';
+        }
+    }
+    
+    // Log result
+    if (mainImage) {
+        console.log(`Found image for product ${product.id}:`, mainImage);
+    } else {
+        console.log(`No image found for product ${product.id} - will fetch details`);
     }
     
     // Product ID

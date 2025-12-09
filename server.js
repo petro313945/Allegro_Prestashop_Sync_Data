@@ -371,6 +371,22 @@ app.get('/api/offers', async (req, res) => {
       keys: Object.keys(data)
     });
     
+    // Log sample product structure to debug image extraction
+    if (data.products && data.products.length > 0) {
+      const sampleProduct = data.products[0];
+      console.log('Sample product structure:', {
+        id: sampleProduct.id,
+        name: sampleProduct.name,
+        hasImages: !!sampleProduct.images,
+        imagesType: typeof sampleProduct.images,
+        imagesIsArray: Array.isArray(sampleProduct.images),
+        imagesLength: Array.isArray(sampleProduct.images) ? sampleProduct.images.length : 'N/A',
+        imagesSample: sampleProduct.images ? (Array.isArray(sampleProduct.images) ? sampleProduct.images[0] : sampleProduct.images) : 'N/A',
+        category: sampleProduct.category,
+        allKeys: Object.keys(sampleProduct)
+      });
+    }
+    
     // Normalize response structure for frontend
     // /sale/products returns: { products: [], categories: {}, filters: [], nextPage: {} }
     // Convert to expected format: { offers: [], count: number, nextPage: {} }
@@ -483,6 +499,43 @@ app.get('/api/offers/:offerId', async (req, res) => {
     let errorMessage = error.message;
     if (error.response?.status === 401) {
       errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
+    } else if (error.response?.status) {
+      errorMessage = error.response?.data?.message || error.response?.data?.error || errorMessage;
+    }
+    
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: errorMessage
+    });
+  }
+});
+
+/**
+ * Get product details by ID (including images)
+ */
+app.get('/api/products/:productId', async (req, res) => {
+  try {
+    const { productId } = req.params;
+    const { language = 'pl-PL' } = req.query;
+    
+    const params = {};
+    if (language) {
+      params.language = language;
+    }
+    
+    const data = await allegroApiRequest(`/sale/products/${productId}`, params);
+    
+    res.json({
+      success: true,
+      data: data
+    });
+  } catch (error) {
+    // Convert technical error messages to user-friendly ones
+    let errorMessage = error.message;
+    if (error.response?.status === 401) {
+      errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
+    } else if (error.response?.status === 404) {
+      errorMessage = 'Product not found.';
     } else if (error.response?.status) {
       errorMessage = error.response?.data?.message || error.response?.data?.error || errorMessage;
     }
