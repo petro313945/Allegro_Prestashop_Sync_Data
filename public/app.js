@@ -1237,12 +1237,10 @@ function clearImportedProducts() {
         return;
     }
     
-    if (confirm(`Are you sure you want to clear all ${importedOffers.length} imported product(s)?`)) {
-        importedOffers = [];
-        saveImportedOffers();
-        displayImportedOffers();
-        showToast('All imported products cleared', 'success');
-    }
+    importedOffers = [];
+    saveImportedOffers();
+    displayImportedOffers();
+    showToast('All imported products cleared', 'success');
 }
 
 // Export to PrestaShop
@@ -1383,24 +1381,54 @@ async function loadCategories() {
 // Fetch product count for a category
 async function fetchCategoryProductCount(categoryId) {
     try {
-        const params = new URLSearchParams();
-        params.append('phrase', 'produkt');
-        params.append('categoryId', categoryId);
-        params.append('limit', '30'); // Fetch up to 30 to get a better count estimate
+        let totalCount = 0;
+        let nextPageId = null;
+        let currentPage = 0;
+        const maxPages = 1000; // Safety limit to prevent infinite loops
         
-        const response = await fetch(`${API_BASE}/api/offers?${params}`);
-        if (!response.ok) return 0;
-        
-        const result = await response.json();
-        if (result.success && result.data) {
-            const count = result.data.count || result.data.offers?.length || 0;
-            // If we got 30 products, there might be more - show "30+"
-            if (count === 30 && result.data.nextPage) {
-                return '30+';
+        // Paginate through all pages to get total count
+        do {
+            const params = new URLSearchParams();
+            params.append('phrase', 'produkt');
+            params.append('categoryId', categoryId);
+            params.append('limit', '30'); // Use max limit to minimize requests
+            
+            if (nextPageId) {
+                params.append('pageId', nextPageId);
             }
-            return count;
-        }
-        return 0;
+            
+            const response = await fetch(`${API_BASE}/api/offers?${params}`);
+            if (!response.ok) {
+                console.error(`Error fetching page ${currentPage + 1} for category ${categoryId}:`, response.status);
+                break;
+            }
+            
+            const result = await response.json();
+            if (result.success && result.data) {
+                const pageProducts = result.data.offers || [];
+                const productsOnPage = pageProducts.length;
+                totalCount += productsOnPage;
+                
+                // Check if there's a next page
+                nextPageId = result.data.nextPage?.id || null;
+                currentPage++;
+                
+                // If we got fewer than 30 products, we've reached the last page
+                if (productsOnPage < 30) {
+                    break;
+                }
+            } else {
+                break;
+            }
+            
+            // Safety check to prevent infinite loops
+            if (currentPage >= maxPages) {
+                console.warn(`Reached max pages limit (${maxPages}) for category ${categoryId}`);
+                break;
+            }
+        } while (nextPageId);
+        
+        return totalCount;
     } catch (error) {
         console.error(`Error fetching count for category ${categoryId}:`, error);
         return 0;
