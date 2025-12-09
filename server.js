@@ -349,7 +349,7 @@ app.get('/api/offers', async (req, res) => {
     }
 
     // Note: /sale/products doesn't use limit/offset, it uses cursor-based pagination
-    // The limit parameter is not directly supported, but we can request results
+    // The limit parameter is not directly supported by the API, but we can limit results client-side
     
     console.log('Fetching products with params:', JSON.stringify(params, null, 2));
     console.log('Request URL will be:', `${ALLEGRO_API_URL}/sale/products`);
@@ -390,9 +390,17 @@ app.get('/api/offers', async (req, res) => {
     // Normalize response structure for frontend
     // /sale/products returns: { products: [], categories: {}, filters: [], nextPage: {} }
     // Convert to expected format: { offers: [], count: number, nextPage: {} }
+    
+    // Apply limit to results if specified (Allegro API doesn't support limit directly)
+    let products = data.products || [];
+    const limitNum = parseInt(limit, 10);
+    if (!isNaN(limitNum) && limitNum > 0 && products.length > limitNum) {
+      products = products.slice(0, limitNum);
+    }
+    
     const normalizedData = {
-      offers: data.products || [],
-      count: data.products?.length || 0,
+      offers: products,
+      count: products.length,
       categories: data.categories || {},
       filters: data.filters || [],
       nextPage: data.nextPage || null

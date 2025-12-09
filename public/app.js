@@ -3,13 +3,14 @@ let currentOffers = [];
 let importedOffers = [];
 let currentOffset = 0; // Kept for display purposes
 let currentLimit = 20;
-let totalCount = 0;
+let totalCount = 0; // Current page product count
 let isAuthenticated = false;
 let allCategories = [];
 let selectedCategoryId = null;
 let currentNextPage = null; // For cursor-based pagination
 let pageHistory = []; // Track page history for going back
 let currentPhrase = ''; // Track current search phrase
+let currentPageNumber = 1; // Track current page number
 
 // API Base URL
 const API_BASE = '';
@@ -492,6 +493,7 @@ async function searchOffers() {
     currentNextPage = null;
     pageHistory = [];
     currentPhrase = ''; // Will be set to 'aa' by server if category selected
+    currentPageNumber = 1; // Reset to first page
     
     await fetchOffers('', currentOffset, limit, categoryId, null);
 }
@@ -549,8 +551,10 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             params.append('pageId', pageId);
         }
         
-        // Note: limit parameter is not directly supported by /sale/products
-        // The API uses cursor-based pagination
+        // Send limit parameter to server (will be used to limit results)
+        if (limit) {
+            params.append('limit', limit);
+        }
         
         const response = await fetch(`${API_BASE}/api/offers?${params}`);
         
@@ -563,7 +567,7 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
         
         if (result.success) {
             currentOffers = result.data.offers || [];
-            totalCount = result.data.count || currentOffers.length;
+            totalCount = currentOffers.length; // Count of products on current page
             
             // Store nextPage for pagination
             currentNextPage = result.data.nextPage || null;
@@ -791,25 +795,33 @@ function updatePagination() {
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
     
-    if (totalCount === 0) {
+    if (totalCount === 0 && currentPageNumber === 1) {
         paginationEl.style.display = 'none';
         return;
     }
     
     paginationEl.style.display = 'flex';
     
-    // For cursor-based pagination, we can't calculate exact page numbers
-    // Show approximate page based on current offset
-    const currentPage = Math.floor(currentOffset / currentLimit) + 1;
-    const totalPages = Math.ceil(totalCount / currentLimit) || 1;
+    // For cursor-based pagination, we track page numbers manually
+    // Show current page number and product count
+    const hasMorePages = currentNextPage && currentNextPage.id;
+    let pageInfoText = `Page ${currentPageNumber}`;
     
-    pageInfoEl.textContent = `Page ${currentPage}${totalPages > 1 ? ` of ~${totalPages}` : ''} (${totalCount} products)`;
+    if (totalCount > 0) {
+        pageInfoText += ` (${totalCount} product${totalCount !== 1 ? 's' : ''})`;
+    }
     
-    // Prev button: enabled if we have history to go back to
-    prevBtn.disabled = pageHistory.length === 0;
+    if (hasMorePages) {
+        pageInfoText += ' - More available';
+    }
+    
+    pageInfoEl.textContent = pageInfoText;
+    
+    // Prev button: enabled if we have history to go back to (not on first page)
+    prevBtn.disabled = currentPageNumber === 1;
     
     // Next button: enabled if we have a nextPage cursor
-    nextBtn.disabled = !currentNextPage || !currentNextPage.id;
+    nextBtn.disabled = !hasMorePages;
 }
 
 // Change page (cursor-based pagination)
@@ -822,29 +834,35 @@ async function changePage(direction) {
             return;
         }
         
-        // Save current page to history (we'll use a marker since we don't have prev cursor)
-        // For simplicity, we'll track that we're on page N
+        // Save current page to history for going back
         pageHistory.push({
             offset: currentOffset,
-            pageId: null // We don't have previous page cursor
+            pageId: null, // We don't have previous page cursor
+            pageNumber: currentPageNumber
         });
         
+        // Increment page number
+        currentPageNumber++;
         currentOffset += currentLimit; // Approximate for display
+        
         await fetchOffers(currentPhrase, currentOffset, currentLimit, categoryId, currentNextPage.id);
     } else if (direction === -1) {
         // Previous page: go back in history
-        if (pageHistory.length === 0) {
+        if (pageHistory.length === 0 || currentPageNumber === 1) {
             // Reset to first page
             pageHistory = [];
             currentOffset = 0;
             currentNextPage = null;
+            currentPageNumber = 1;
             await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
         } else {
-            // For now, just reset to first page since we don't have previous page cursors
+            // Go back to previous page
+            // Since we don't have previous page cursors from API, reset to first page
             // In a full implementation, we'd need to track all page cursors
             pageHistory = [];
             currentOffset = 0;
             currentNextPage = null;
+            currentPageNumber = 1;
             await fetchOffers(currentPhrase, 0, currentLimit, categoryId, null);
         }
     }
@@ -958,6 +976,7 @@ function clearSearch() {
     pageHistory = [];
     currentPhrase = '';
     selectedCategoryId = null;
+    currentPageNumber = 1; // Reset to first page
     updateImportButtons();
 }
 
@@ -1055,13 +1074,14 @@ function selectCategory(categoryId) {
         selectedCategorySelect.value = categoryId;
     }
     
-    // Automatically search for products in this category
-    // Reset pagination state
-    currentOffset = 0;
-    currentNextPage = null;
-    pageHistory = [];
-    currentPhrase = 'produkt'; // Use meaningful phrase when category selected (server will set this)
-    const limit = parseInt(document.getElementById('limit').value);
+        // Automatically search for products in this category
+        // Reset pagination state
+        currentOffset = 0;
+        currentNextPage = null;
+        pageHistory = [];
+        currentPhrase = 'produkt'; // Use meaningful phrase when category selected (server will set this)
+        currentPageNumber = 1; // Reset to first page
+        const limit = parseInt(document.getElementById('limit').value);
     
     // Show loading indicator
     const loadingEl = document.getElementById('loadingIndicator');
@@ -1127,6 +1147,7 @@ function updateCategorySelect() {
         currentNextPage = null;
         pageHistory = [];
         currentPhrase = categoryId ? 'produkt' : ''; // Use meaningful phrase when category selected (server will set this)
+        currentPageNumber = 1; // Reset to first page
         const limit = parseInt(document.getElementById('limit').value);
         
         // Show loading indicator
@@ -1160,6 +1181,7 @@ function clearCategorySelection() {
     currentNextPage = null;
     pageHistory = [];
     currentPhrase = '';
+    currentPageNumber = 1; // Reset to first page
     updateImportButtons();
 }
 
