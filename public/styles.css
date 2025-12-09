@@ -255,18 +255,6 @@ body {
     color: #ffffff;
 }
 
-.category-item-count {
-    font-size: 0.85em;
-    color: #666;
-    font-weight: 400;
-    flex-shrink: 0;
-    white-space: nowrap;
-}
-
-.category-item.selected .category-item-count {
-    color: rgba(255, 255, 255, 0.9);
-}
-
 .categories-list:empty::before {
     content: 'No categories loaded. Click "Reload" to fetch categories.';
     display: block;

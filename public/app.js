@@ -1378,33 +1378,6 @@ async function loadCategories() {
     }
 }
 
-// Fetch product count for a category
-async function fetchCategoryProductCount(categoryId) {
-    try {
-        const params = new URLSearchParams();
-        params.append('phrase', 'produkt');
-        params.append('categoryId', categoryId);
-        params.append('limit', '30'); // Fetch up to 30 to get a better count estimate
-        
-        const response = await fetch(`${API_BASE}/api/offers?${params}`);
-        if (!response.ok) return 0;
-        
-        const result = await response.json();
-        if (result.success && result.data) {
-            const count = result.data.count || result.data.offers?.length || 0;
-            // If we got 30 products, there might be more - show "30+"
-            if (count === 30 && result.data.nextPage) {
-                return '30+';
-            }
-            return count;
-        }
-        return 0;
-    } catch (error) {
-        console.error(`Error fetching count for category ${categoryId}:`, error);
-        return 0;
-    }
-}
-
 // Display categories
 async function displayCategories(categories) {
     const categoriesListEl = document.getElementById('categoriesList');
@@ -1414,13 +1387,12 @@ async function displayCategories(categories) {
         return;
     }
     
-    // First render categories with loading state for counts
+    // Render categories
     categoriesListEl.innerHTML = categories.map(category => {
         const isSelected = selectedCategoryId === category.id;
         return `
             <div class="category-item ${isSelected ? 'selected' : ''}" data-category-id="${category.id}">
                 <span class="category-item-name">${escapeHtml(category.name || 'Unnamed Category')}</span>
-                <span class="category-item-count" data-category-id="${category.id}">...</span>
             </div>
         `;
     }).join('');
@@ -1432,25 +1404,6 @@ async function displayCategories(categories) {
             selectCategory(categoryId);
         });
     });
-    
-    // Fetch product counts for all categories in parallel (limit concurrent requests)
-    const batchSize = 5; // Process 5 categories at a time to avoid overwhelming the API
-    for (let i = 0; i < categories.length; i += batchSize) {
-        const batch = categories.slice(i, i + batchSize);
-        await Promise.all(batch.map(async (category) => {
-            const count = await fetchCategoryProductCount(category.id);
-            const countEl = document.querySelector(`.category-item-count[data-category-id="${category.id}"]`);
-            if (countEl) {
-                if (count === 0) {
-                    countEl.textContent = '(0)';
-                } else if (typeof count === 'string') {
-                    countEl.textContent = `(${count})`;
-                } else {
-                    countEl.textContent = `(${count})`;
-                }
-            }
-        }));
-    }
 }
 
 // Select a category
