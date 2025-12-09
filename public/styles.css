@@ -505,10 +505,10 @@ body {
     transition: all 0.3s;
     display: flex;
     flex-direction: row;
-    overflow: hidden;
+    overflow: visible;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
     min-height: 140px;
-    max-height: 140px;
+    align-items: flex-start;
 }
 
 .offer-card:hover {
@@ -526,7 +526,7 @@ body {
 .offer-image-wrapper {
     width: 140px;
     min-width: 140px;
-    height: 140px;
+    min-height: 140px;
     background: #ffffff;
     display: flex;
     align-items: center;
@@ -535,6 +535,7 @@ body {
     position: relative;
     flex-shrink: 0;
     border-right: 1px solid #f0f0f0;
+    align-self: flex-start;
 }
 
 .offer-image {

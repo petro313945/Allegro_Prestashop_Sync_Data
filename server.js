@@ -285,7 +285,17 @@ app.get('/api/health', (req, res) => {
  */
 app.get('/api/offers', async (req, res) => {
   try {
-    const { limit = 20, pageId, phrase, categoryId, ean, language = 'pl-PL' } = req.query;
+    let { limit = 20, pageId, phrase, categoryId, ean, language = 'pl-PL' } = req.query;
+    
+    // Validate and cap limit at 30
+    const parsedLimit = parseInt(limit, 10);
+    if (isNaN(parsedLimit) || parsedLimit <= 0) {
+      limit = 20;
+    } else if (parsedLimit > 30) {
+      limit = 30;
+    } else {
+      limit = parsedLimit;
+    }
     
     const params = {};
 
@@ -392,10 +402,10 @@ app.get('/api/offers', async (req, res) => {
     // Convert to expected format: { offers: [], count: number, nextPage: {} }
     
     // Apply limit to results if specified (Allegro API doesn't support limit directly)
+    // Note: limit is already validated and capped at 30 above
     let products = data.products || [];
-    const limitNum = parseInt(limit, 10);
-    if (!isNaN(limitNum) && limitNum > 0 && products.length > limitNum) {
-      products = products.slice(0, limitNum);
+    if (products.length > limit) {
+      products = products.slice(0, limit);
     }
     
     const normalizedData = {

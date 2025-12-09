@@ -738,13 +738,30 @@ function createOfferCard(product) {
     // Product ID
     const productId = product.id || 'N/A';
     
-    // Category ID
+    // Category ID and Name
     const categoryId = product.category?.id || 'N/A';
     
-    // Get category name from allCategories array
+    // Get category name - check multiple sources
     let categoryName = 'N/A';
-    if (categoryId !== 'N/A' && allCategories && allCategories.length > 0) {
-        const category = allCategories.find(cat => cat.id === categoryId);
+    
+    // First, check if category name is directly available in product.category
+    if (product.category?.name) {
+        categoryName = product.category.name;
+    }
+    // Second, try to find category name from allCategories array
+    else if (categoryId !== 'N/A' && allCategories && allCategories.length > 0) {
+        // Try exact match first
+        let category = allCategories.find(cat => cat.id === categoryId);
+        
+        // If not found, try with type conversion (string vs number)
+        if (!category) {
+            category = allCategories.find(cat => 
+                String(cat.id) === String(categoryId) || 
+                cat.id === String(categoryId) ||
+                String(cat.id) === categoryId
+            );
+        }
+        
         if (category && category.name) {
             categoryName = category.name;
         }
