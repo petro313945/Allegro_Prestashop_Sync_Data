@@ -572,6 +572,25 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             // Store nextPage for pagination
             currentNextPage = result.data.nextPage || null;
             
+            // Extract categories from products API response and merge with allCategories
+            // Categories from products API might be an object/dictionary
+            if (result.data.categories) {
+                let productCategories = [];
+                if (Array.isArray(result.data.categories)) {
+                    productCategories = result.data.categories;
+                } else if (typeof result.data.categories === 'object') {
+                    // Convert object/dictionary to array
+                    productCategories = Object.values(result.data.categories);
+                }
+                
+                // Merge with existing categories, avoiding duplicates
+                productCategories.forEach(cat => {
+                    if (cat && cat.id && !allCategories.find(c => c.id === cat.id)) {
+                        allCategories.push(cat);
+                    }
+                });
+            }
+            
             // Update current phrase for pagination
             let searchPhrase = '';
             if (phrase && typeof phrase === 'string') {
@@ -589,6 +608,9 @@ async function fetchOffers(phrase = '', offset = 0, limit = 20, categoryId = nul
             // Log first product to debug structure
             if (currentOffers.length > 0) {
                 console.log('First product from API:', JSON.stringify(currentOffers[0], null, 2));
+                console.log('Product category structure:', currentOffers[0].category);
+                console.log('Available categories count:', allCategories.length);
+                console.log('Sample categories:', allCategories.slice(0, 5));
             }
             
             displayOffers(currentOffers);
@@ -739,7 +761,15 @@ function createOfferCard(product) {
     const productId = product.id || 'N/A';
     
     // Category ID and Name
-    const categoryId = product.category?.id || 'N/A';
+    // Check multiple possible category structures
+    let categoryId = 'N/A';
+    if (product.category) {
+        if (typeof product.category === 'string') {
+            categoryId = product.category;
+        } else if (product.category.id) {
+            categoryId = product.category.id;
+        }
+    }
     
     // Get category name - check multiple sources
     let categoryName = 'N/A';
@@ -751,19 +781,39 @@ function createOfferCard(product) {
     // Second, try to find category name from allCategories array
     else if (categoryId !== 'N/A' && allCategories && allCategories.length > 0) {
         // Try exact match first
-        let category = allCategories.find(cat => cat.id === categoryId);
-        
-        // If not found, try with type conversion (string vs number)
-        if (!category) {
-            category = allCategories.find(cat => 
-                String(cat.id) === String(categoryId) || 
-                cat.id === String(categoryId) ||
-                String(cat.id) === categoryId
-            );
-        }
+        let category = allCategories.find(cat => {
+            const catId = cat.id;
+            const prodCatId = categoryId;
+            return catId === prodCatId || 
+                   String(catId) === String(prodCatId) ||
+                   catId === String(prodCatId) ||
+                   String(catId) === prodCatId;
+        });
         
         if (category && category.name) {
             categoryName = category.name;
+        } else {
+            // Debug: log when category not found
+            console.log(`Category not found for ID: ${categoryId}`, {
+                productId: product.id,
+                productCategory: product.category,
+                availableCategoryIds: allCategories.slice(0, 10).map(c => c.id)
+            });
+        }
+    }
+    
+    // Fallback: if category name still not found and we have a selected category, use that
+    if (categoryName === 'N/A' && selectedCategoryId && allCategories && allCategories.length > 0) {
+        const selectedCategory = allCategories.find(cat => {
+            const catId = cat.id;
+            const selCatId = selectedCategoryId;
+            return catId === selCatId || 
+                   String(catId) === String(selCatId) ||
+                   catId === String(selCatId) ||
+                   String(catId) === selCatId;
+        });
+        if (selectedCategory && selectedCategory.name) {
+            categoryName = selectedCategory.name;
         }
     }
     
@@ -1087,13 +1137,24 @@ function displayImportedOffers() {
     }
     
     importedListEl.innerHTML = importedOffers.map(offer => `
-        <div class="imported-item">
-            <div>
+        <div class="imported-item" data-offer-id="${offer.id}">
+            <div class="imported-item-content">
                 <div class="imported-item-title">${escapeHtml(offer.name || 'Untitled')}</div>
                 <div class="imported-item-id">ID: ${offer.id}</div>
             </div>
+            <button class="imported-item-remove" onclick="removeImportedOffer('${offer.id}')" title="Remove product">
+                <span>×</span>
+            </button>
         </div>
     `).join('');
+}
+
+// Remove imported offer
+function removeImportedOffer(offerId) {
+    importedOffers = importedOffers.filter(offer => offer.id !== offerId);
+    saveImportedOffers();
+    displayImportedOffers();
+    showToast('Product removed from imported list', 'success');
 }
 
 // Save imported offers to localStorage

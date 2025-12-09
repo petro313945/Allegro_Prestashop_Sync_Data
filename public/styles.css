@@ -526,7 +526,8 @@ body {
 .offer-image-wrapper {
     width: 140px;
     min-width: 140px;
-    min-height: 140px;
+    height: 140px;
+    max-height: 140px;
     background: #ffffff;
     display: flex;
     align-items: center;
@@ -541,8 +542,8 @@ body {
 .offer-image {
     width: 100%;
     height: 100%;
-    object-fit: contain;
-    padding: 8px;
+    object-fit: cover;
+    object-position: center;
 }
 
 .offer-image-placeholder {
@@ -851,19 +852,70 @@ body {
     border: 1px solid #e0e0e0;
     border-radius: 8px;
     display: flex;
-    flex-direction: column;
-    gap: 8px;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    position: relative;
+    transition: all 0.2s;
+}
+
+.imported-item:hover {
+    border-color: #1a73e8;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.imported-item-content {
+    flex: 1;
+    min-width: 0;
 }
 
 .imported-item-title {
     font-weight: 500;
     color: #333;
     font-size: 1em;
+    margin-bottom: 4px;
+    word-wrap: break-word;
 }
 
 .imported-item-id {
     color: #666;
     font-size: 0.85em;
+    word-break: break-all;
+}
+
+.imported-item-remove {
+    background: transparent;
+    border: none;
+    color: #c5221f;
+    font-size: 24px;
+    font-weight: bold;
+    cursor: pointer;
+    padding: 0;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.imported-item-remove:hover {
+    background: #fce8e6;
+    color: #a50e0e;
+    transform: scale(1.1);
+}
+
+.imported-item-remove:active {
+    transform: scale(0.95);
+}
+
+.imported-item-remove span {
+    display: block;
+    line-height: 1;
 }
 
 /* Toast Notifications */
