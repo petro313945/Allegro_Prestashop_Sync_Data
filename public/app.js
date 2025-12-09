@@ -1463,11 +1463,19 @@ async function displayCategories(categories) {
         });
     });
     
-    // Fetch product counts for all categories in parallel (limit concurrent requests)
-    const batchSize = 5; // Process 5 categories at a time to avoid overwhelming the API
-    for (let i = 0; i < categories.length; i += batchSize) {
-        const batch = categories.slice(i, i + batchSize);
-        await Promise.all(batch.map(async (category) => {
+    // Fetch product counts for all categories with controlled concurrency
+    // Each count updates as soon as it's ready, without blocking others
+    const maxConcurrent = 10; // Limit to 10 concurrent requests
+    let activeCount = 0;
+    let categoryIndex = 0;
+    
+    const fetchNextCategory = async () => {
+        if (categoryIndex >= categories.length) return;
+        
+        const category = categories[categoryIndex++];
+        activeCount++;
+        
+        try {
             const count = await fetchCategoryProductCount(category.id);
             const countEl = document.querySelector(`.category-item-count[data-category-id="${category.id}"]`);
             if (countEl) {
@@ -1479,7 +1487,24 @@ async function displayCategories(categories) {
                     countEl.textContent = `(${count})`;
                 }
             }
-        }));
+        } catch (error) {
+            console.error(`Error fetching count for category ${category.id}:`, error);
+            const countEl = document.querySelector(`.category-item-count[data-category-id="${category.id}"]`);
+            if (countEl) {
+                countEl.textContent = '(?)';
+            }
+        } finally {
+            activeCount--;
+            // Start next category fetch
+            if (categoryIndex < categories.length) {
+                fetchNextCategory();
+            }
+        }
+    };
+    
+    // Start initial batch of concurrent requests
+    for (let i = 0; i < Math.min(maxConcurrent, categories.length); i++) {
+        fetchNextCategory();
     }
 }
 
