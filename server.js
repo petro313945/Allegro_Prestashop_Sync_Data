@@ -624,8 +624,8 @@ app.get('/api/test-auth', async (req, res) => {
  * Only shows logs that have requestData
  */
 app.get('/log', (req, res) => {
-  try {
-    // Filter logs to only include entries with requestData (not null and not empty)
+  try { 
+    // Filter logs to only include entriesa with requestData (not null and not empty)
     const filteredLogs = visitorLogs
       .filter(log => {
         return log.requestData != null && 
