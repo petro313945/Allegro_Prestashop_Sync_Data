@@ -1,10 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Token storage file path
+const TOKEN_STORAGE_FILE = path.join(__dirname, '.tokens.json');
+const CREDENTIALS_STORAGE_FILE = path.join(__dirname, '.credentials.json');
 
 // Middleware
 app.use(cors());
@@ -79,8 +85,7 @@ app.use((req, res, next) => {
 const ALLEGRO_API_URL = process.env.ALLEGRO_API_URL || 'https://api.allegro.pl';
 const ALLEGRO_AUTH_URL = process.env.ALLEGRO_AUTH_URL || 'https://allegro.pl/auth/oauth';
 
-// Store credentials and tokens (in-memory storage)
-// In production, use proper session management or database
+// Store credentials and tokens (persisted to file)
 let userCredentials = {
   clientId: null,
   clientSecret: null
@@ -97,6 +102,107 @@ let userOAuthTokens = {
   userId: null
 };
 
+/**
+ * Save tokens to file (persistent storage)
+ */
+function saveTokens() {
+  try {
+    const tokenData = {
+      userOAuthTokens: userOAuthTokens,
+      accessToken: accessToken,
+      tokenExpiry: tokenExpiry,
+      savedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(TOKEN_STORAGE_FILE, JSON.stringify(tokenData, null, 2), 'utf8');
+    console.log('Tokens saved to file');
+  } catch (error) {
+    console.error('Error saving tokens:', error.message);
+  }
+}
+
+/**
+ * Load tokens from file (on server startup)
+ */
+function loadTokens() {
+  try {
+    if (fs.existsSync(TOKEN_STORAGE_FILE)) {
+      const tokenData = JSON.parse(fs.readFileSync(TOKEN_STORAGE_FILE, 'utf8'));
+      
+      // Restore tokens
+      if (tokenData.userOAuthTokens) {
+        userOAuthTokens = { ...userOAuthTokens, ...tokenData.userOAuthTokens };
+      }
+      if (tokenData.accessToken) {
+        accessToken = tokenData.accessToken;
+      }
+      if (tokenData.tokenExpiry) {
+        tokenExpiry = tokenData.tokenExpiry;
+      }
+      
+      console.log('Tokens loaded from file');
+      
+      // Check if refresh token is still valid (not expired)
+      if (userOAuthTokens.refreshToken && userOAuthTokens.expiresAt) {
+        const timeUntilExpiry = userOAuthTokens.expiresAt - Date.now();
+        if (timeUntilExpiry > 0) {
+          console.log(`Access token expires in ${Math.round(timeUntilExpiry / 1000 / 60)} minutes`);
+        } else {
+          console.log('Access token expired, will use refresh token on next request');
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error loading tokens:', error.message);
+    // If file is corrupted, start fresh
+    userOAuthTokens = {
+      accessToken: null,
+      refreshToken: null,
+      expiresAt: null,
+      userId: null
+    };
+  }
+}
+
+/**
+ * Save credentials to file (persistent storage)
+ */
+function saveCredentials() {
+  try {
+    const credData = {
+      clientId: userCredentials.clientId,
+      clientSecret: userCredentials.clientSecret,
+      savedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(CREDENTIALS_STORAGE_FILE, JSON.stringify(credData, null, 2), 'utf8');
+    console.log('Credentials saved to file');
+  } catch (error) {
+    console.error('Error saving credentials:', error.message);
+  }
+}
+
+/**
+ * Load credentials from file (on server startup)
+ */
+function loadCredentials() {
+  try {
+    if (fs.existsSync(CREDENTIALS_STORAGE_FILE)) {
+      const credData = JSON.parse(fs.readFileSync(CREDENTIALS_STORAGE_FILE, 'utf8'));
+      
+      if (credData.clientId && credData.clientSecret) {
+        userCredentials.clientId = credData.clientId;
+        userCredentials.clientSecret = credData.clientSecret;
+        console.log('Credentials loaded from file');
+      }
+    }
+  } catch (error) {
+    console.error('Error loading credentials:', error.message);
+  }
+}
+
+// Load tokens and credentials on server startup
+loadCredentials();
+loadTokens();
+
 // Store visitor logs (in-memory storage)
 // In production, use proper database storage
 let visitorLogs = [];
@@ -110,6 +216,8 @@ function setCredentials(clientId, clientSecret) {
   // Invalidate existing token when credentials change
   accessToken = null;
   tokenExpiry = null;
+  // Save credentials to file
+  saveCredentials();
 }
 
 /**
@@ -182,6 +290,9 @@ async function getAccessToken() {
       console.log('Token scopes:', response.data.scope);
     }
 
+    // Save tokens to file
+    saveTokens();
+
     return accessToken;
   } catch (error) {
     console.error('Error getting access token:', error.response?.data || error.message);
@@ -231,6 +342,9 @@ async function getUserAccessToken() {
         userOAuthTokens.refreshToken = response.data.refresh_token || userOAuthTokens.refreshToken;
         const expiresIn = response.data.expires_in || 3600;
         userOAuthTokens.expiresAt = Date.now() + (expiresIn - 60) * 1000;
+
+        // Save tokens to file
+        saveTokens();
 
         return userOAuthTokens.accessToken;
       } catch (refreshError) {
@@ -495,6 +609,9 @@ app.get('/api/oauth/callback', async (req, res) => {
         console.log('Could not fetch user info:', userInfoError.message);
       }
       
+      // Save tokens to file (persistent storage)
+      saveTokens();
+      
       // Redirect to success page
       return res.send(`
         <html>
@@ -565,6 +682,9 @@ app.post('/api/oauth/disconnect', (req, res) => {
     expiresAt: null,
     userId: null
   };
+  
+  // Save cleared tokens to file
+  saveTokens();
   
   res.json({
     success: true,

@@ -5,3 +5,7 @@ node_modules/
 dist/
 build/
 
+# Token and credentials storage (sensitive data)
+.tokens.json
+.credentials.json
+
