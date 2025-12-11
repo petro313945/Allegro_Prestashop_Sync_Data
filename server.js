@@ -352,7 +352,7 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
- * OAuth Authorization endpoint - redirects user to Allegro
+ * OAuth Authorization endpoint - returns authorization URL for frontend to open
  */
 app.get('/api/oauth/authorize', (req, res) => {
   if (!userCredentials.clientId) {
@@ -387,7 +387,12 @@ app.get('/api/oauth/authorize', (req, res) => {
   console.log('OAuth authorization URL:', authUrl);
   console.log('Redirect URI:', redirectUri);
   
-  res.redirect(authUrl);
+  // Return URL as JSON instead of redirecting (frontend will open it)
+  res.json({
+    success: true,
+    authUrl: authUrl,
+    redirectUri: redirectUri
+  });
 });
 
 /**
@@ -596,8 +601,8 @@ app.get('/api/offers', async (req, res) => {
       console.log('Offers response structure:', {
         hasOffers: !!data.offers,
         offersCount: data.offers?.length || 0,
-        totalCount: data.count,
-        hasNextPage: !!data.nextPage,
+        count: data.count,
+        totalCount: data.totalCount,
         keys: Object.keys(data)
       });
       
@@ -616,11 +621,12 @@ app.get('/api/offers', async (req, res) => {
         });
       }
       
-      // Normalize response structure for frontend
+      // Normalize response structure for frontend according to API docs
+      // API returns: { "offers": [...], "count": 1, "totalCount": 1234 }
       const normalizedData = {
         offers: data.offers || [],
         count: data.count || (data.offers ? data.offers.length : 0),
-        nextPage: data.nextPage || null
+        totalCount: data.totalCount || data.count || 0
       };
       
       return res.json({

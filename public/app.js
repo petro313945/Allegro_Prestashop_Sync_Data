@@ -479,46 +479,59 @@ async function checkOAuthStatus() {
 }
 
 // Authorize account (OAuth flow)
-function authorizeAccount() {
+async function authorizeAccount() {
     if (!isAuthenticated) {
         showToast('Please connect with Client ID and Secret first', 'error');
         return;
     }
     
-    // Open OAuth authorization in a popup window
-    const width = 600;
-    const height = 700;
-    const left = (window.screen.width - width) / 2;
-    const top = (window.screen.height - height) / 2;
-    
-    const popup = window.open(
-        `${API_BASE}/api/oauth/authorize`,
-        'Allegro Authorization',
-        `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes,resizable=yes`
-    );
-    
-    // Check if popup was blocked
-    if (!popup) {
-        showToast('Popup blocked. Please allow popups for this site and try again.', 'error');
-        return;
-    }
-    
-    // Poll for popup closure or check status periodically
-    const checkInterval = setInterval(async () => {
-        if (popup.closed) {
-            clearInterval(checkInterval);
-            // Check OAuth status after popup closes
-            await checkOAuthStatus();
-            // If connected, refresh offers
-            if (isOAuthConnected) {
-                showToast('Account authorized successfully!', 'success');
-                // Refresh offers if already loaded
-                if (currentOffers.length > 0 || currentPageNumber > 1) {
-                    await fetchOffers(currentOffset, currentLimit);
+    try {
+        // Get OAuth authorization URL from backend
+        const response = await fetch(`${API_BASE}/api/oauth/authorize`);
+        const data = await response.json();
+        
+        if (!data.success || !data.authUrl) {
+            throw new Error(data.error || 'Failed to get authorization URL');
+        }
+        
+        // Open OAuth authorization in a popup window using the URL from backend
+        const width = 600;
+        const height = 700;
+        const left = (window.screen.width - width) / 2;
+        const top = (window.screen.height - height) / 2;
+        
+        const popup = window.open(
+            data.authUrl,
+            'Allegro Authorization',
+            `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes,resizable=yes`
+        );
+        
+        // Check if popup was blocked
+        if (!popup) {
+            showToast('Popup blocked. Please allow popups for this site and try again.', 'error');
+            return;
+        }
+        
+        // Poll for popup closure or check status periodically
+        const checkInterval = setInterval(async () => {
+            if (popup.closed) {
+                clearInterval(checkInterval);
+                // Check OAuth status after popup closes
+                await checkOAuthStatus();
+                // If connected, refresh offers
+                if (isOAuthConnected) {
+                    showToast('Account authorized successfully!', 'success');
+                    // Refresh offers if already loaded
+                    if (currentOffers.length > 0 || currentPageNumber > 1) {
+                        await fetchOffers(currentOffset, currentLimit);
+                    }
                 }
             }
-        }
-    }, 500);
+        }, 500);
+    } catch (error) {
+        console.error('Error starting OAuth flow:', error);
+        showToast('Failed to start authorization: ' + error.message, 'error');
+    }
 }
 
 // Test authentication (kept for backward compatibility, but not used in main flow)
@@ -667,14 +680,19 @@ async function fetchOffers(offset = 0, limit = 20) {
         
         if (result.success) {
             currentOffers = result.data.offers || [];
-            totalCount = result.data.count || currentOffers.length; // Total count from API or current page count
+            // Use totalCount from API if available, otherwise use count or current offers length
+            totalCount = result.data.totalCount || result.data.count || currentOffers.length;
             
             // Update current offset for pagination
             currentOffset = offset;
             currentLimit = limit;
             
-            // Calculate total products seen
-            totalProductsSeen = offset + currentOffers.length;
+            // Calculate total products seen (use totalCount if available, otherwise calculate)
+            if (result.data.totalCount) {
+                totalProductsSeen = Math.min(offset + currentOffers.length, result.data.totalCount);
+            } else {
+                totalProductsSeen = offset + currentOffers.length;
+            }
             
             // Log first offer to debug structure
             if (currentOffers.length > 0) {
@@ -1143,8 +1161,11 @@ function updatePagination() {
     paginationEl.style.display = 'flex';
     
     // For offset-based pagination, check if we have more results
-    // If we got fewer results than the limit, we're on the last page
-    const hasMorePages = currentOffers.length >= currentLimit;
+    // If totalCount is available, use it to determine if there are more pages
+    // Otherwise, if we got fewer results than the limit, we're on the last page
+    const hasMorePages = totalCount > 0 
+        ? (currentOffset + currentOffers.length) < totalCount
+        : currentOffers.length >= currentLimit;
     let pageInfoText = `Page ${currentPageNumber}`;
     
     if (currentOffers.length > 0) {
