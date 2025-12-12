@@ -30,9 +30,31 @@ document.addEventListener('DOMContentLoaded', () => {
     hideMainInterface();
     setupEventListeners();
     loadImportedOffers();
+    setupConfigTabs();
     // Initially disable all actions until authenticated
     updateUIState(false);
 });
+
+// Setup configuration tabs
+function setupConfigTabs() {
+    const tabs = document.querySelectorAll('.config-tab');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            const targetTab = tab.dataset.tab;
+            
+            // Remove active class from all tabs and contents
+            document.querySelectorAll('.config-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.config-tab-content').forEach(c => c.classList.remove('active'));
+            
+            // Add active class to clicked tab and corresponding content
+            tab.classList.add('active');
+            const content = document.getElementById(targetTab + 'Tab');
+            if (content) {
+                content.classList.add('active');
+            }
+        });
+    });
+}
 
 // Setup event listeners
 function setupEventListeners() {
@@ -136,9 +158,12 @@ function showToast(message, type = 'info', duration = 5000) {
         info: 'ℹ'
     };
     
+    // Check if message contains HTML (like <br> tags)
+    const isHTML = /<[^>]+>/.test(message);
+    
     toast.innerHTML = `
         <span class="toast-icon">${icons[type] || icons.info}</span>
-        <span class="toast-message">${escapeHtml(message)}</span>
+        <span class="toast-message">${isHTML ? message : escapeHtml(message)}</span>
         <button class="toast-close" onclick="this.parentElement.remove()">×</button>
     `;
     
@@ -1939,9 +1964,13 @@ async function savePrestashopConfig() {
     const disableStockSync = document.getElementById('disableStockSyncToAllegro').checked;
     
     if (!url || !apiKey) {
-        showMessage('prestashopMessage', 'Please fill in all fields', 'error');
+        showToast('Please fill in all PrestaShop fields', 'error');
         return;
     }
+    
+    // Hide any previous messages
+    const messageEl = document.getElementById('prestashopMessage');
+    if (messageEl) messageEl.style.display = 'none';
     
     try {
         const response = await fetch(`${API_BASE}/api/prestashop/configure`, {
@@ -1957,17 +1986,16 @@ async function savePrestashopConfig() {
         const data = await response.json();
         
         if (data.success) {
-            showMessage('prestashopMessage', 'PrestaShop configuration saved successfully', 'success');
+            showToast('✓ PrestaShop configuration saved successfully!', 'success');
             localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey, disableStockSync }));
             prestashopConfigured = true;
             checkPrestashopStatus();
-            // Enable export button if products are imported
             updateExportButtonState();
         } else {
-            showMessage('prestashopMessage', data.error || 'Failed to save configuration', 'error');
+            showToast('✗ ' + (data.error || 'Failed to save configuration'), 'error', 8000);
         }
     } catch (error) {
-        showMessage('prestashopMessage', 'Error saving configuration: ' + error.message, 'error');
+        showToast('✗ Error: ' + error.message, 'error', 8000);
     }
 }
 
@@ -1976,12 +2004,22 @@ async function testPrestashopConnection() {
     const apiKey = document.getElementById('prestashopApiKey').value.trim();
     
     if (!url || !apiKey) {
-        showMessage('prestashopMessage', 'Please fill in URL and API key first', 'error');
+        showToast('Please fill in URL and API key first', 'error');
         return;
     }
     
-    // Save temporarily for test
+    // Hide any previous messages
+    const messageEl = document.getElementById('prestashopMessage');
+    if (messageEl) messageEl.style.display = 'none';
+    
+    // Show loading
+    const testBtn = document.getElementById('testPrestashopBtn');
+    const originalText = testBtn.textContent;
+    testBtn.disabled = true;
+    testBtn.textContent = 'Testing...';
+    
     try {
+        // Save temporarily for test
         const response = await fetch(`${API_BASE}/api/prestashop/configure`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1993,7 +2031,8 @@ async function testPrestashopConnection() {
         });
         
         if (!response.ok) {
-            throw new Error('Failed to save configuration');
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Failed to save configuration');
         }
         
         // Test connection
@@ -2001,14 +2040,25 @@ async function testPrestashopConnection() {
         const testData = await testResponse.json();
         
         if (testData.success) {
-            showMessage('prestashopMessage', 'Connection successful!', 'success');
+            showToast('✓ ' + testData.message, 'success');
             prestashopConfigured = true;
             checkPrestashopStatus();
         } else {
-            showMessage('prestashopMessage', testData.error || 'Connection failed', 'error');
+            // Show error with line breaks if it contains \n
+            const errorMsg = (testData.error || 'Connection failed').replace(/\n/g, '<br>');
+            showToast('✗ ' + errorMsg, 'error', 10000);
         }
     } catch (error) {
-        showMessage('prestashopMessage', 'Error testing connection: ' + error.message, 'error');
+        // Format error message for better readability
+        let errorMsg = error.message;
+        if (errorMsg.includes('\n')) {
+            errorMsg = errorMsg.replace(/\n/g, '<br>• ');
+            errorMsg = '• ' + errorMsg;
+        }
+        showToast('✗ ' + errorMsg, 'error', 10000);
+    } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = originalText;
     }
 }
 

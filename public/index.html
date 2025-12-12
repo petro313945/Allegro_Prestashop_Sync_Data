@@ -9,49 +9,99 @@
 <body>
     <!-- Credentials Section (shown initially) -->
     <div class="credentials-overlay" id="credentialsOverlay">
-        <div class="credentials-modal">
-            <h1>Allegro Importer</h1>
+        <div class="credentials-modal" style="max-width: 900px;">
+            <h1 style="margin-bottom: 30px;">Allegro → PrestaShop Integration</h1>
             
-            <div class="credentials-section">
-                <h2>Allegro API Credentials</h2>
-                <div class="credentials-form">
-                    <div class="form-group">
-                        <label for="clientId">Client ID</label>
-                        <input type="text" id="clientId" placeholder="Client ID" autocomplete="off">
-                    </div>
-                    <div class="form-group">
-                        <label for="clientSecret">Client Secret</label>
-                        <input type="password" id="clientSecret" placeholder="Client Secret" autocomplete="off">
-                    </div>
-                    <button id="saveCredentialsBtn" class="btn btn-primary">CONNECT</button>
-                    <button id="clearCredentialsBtn" class="btn btn-secondary" style="display: none;">Clear</button>
-                </div>
-                <div id="credentialsMessage" class="message" style="display: none;"></div>
+            <!-- Tabs for Configuration -->
+            <div class="config-tabs">
+                <button class="config-tab active" data-tab="allegro">
+                    <span class="tab-icon">🔵</span>
+                    <span>Allegro API</span>
+                </button>
+                <button class="config-tab" data-tab="prestashop">
+                    <span class="tab-icon">🛒</span>
+                    <span>PrestaShop</span>
+                </button>
             </div>
-
-            <div class="credentials-section" style="margin-top: 30px; border-top: 1px solid #ddd; padding-top: 30px;">
-                <h2>PrestaShop Configuration</h2>
-                <div class="credentials-form">
-                    <div class="form-group">
-                        <label for="prestashopUrl">PrestaShop Base URL</label>
-                        <input type="text" id="prestashopUrl" placeholder="http://localhost/poland" value="http://localhost/poland" autocomplete="off">
-                        <small style="color: #666; font-size: 12px;">Base URL of your PrestaShop installation (without /api/)</small>
+            
+            <!-- Allegro Tab Content -->
+            <div class="config-tab-content active" id="allegroTab">
+                <div class="credentials-section">
+                    <h2 style="margin-top: 0;">Step 1: Connect to Allegro</h2>
+                    <p style="color: #666; margin-bottom: 20px;">Enter your Allegro API credentials to import offers</p>
+                    <div class="credentials-form">
+                        <div class="form-group">
+                            <label for="clientId">Client ID</label>
+                            <input type="text" id="clientId" placeholder="Enter your Allegro Client ID" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label for="clientSecret">Client Secret</label>
+                            <input type="password" id="clientSecret" placeholder="Enter your Allegro Client Secret" autocomplete="off">
+                        </div>
+                        <div style="display: flex; gap: 10px; margin-top: 20px;">
+                            <button id="saveCredentialsBtn" class="btn btn-primary" style="flex: 1;">CONNECT TO ALLEGRO</button>
+                            <button id="clearCredentialsBtn" class="btn btn-secondary" style="display: none;">Clear</button>
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label for="prestashopApiKey">API Key</label>
-                        <input type="password" id="prestashopApiKey" placeholder="PrestaShop API Key" autocomplete="off">
-                        <small style="color: #666; font-size: 12px;">Generate from: Advanced Parameters → Web Service</small>
+                    <div id="credentialsMessage" class="message" style="display: none;"></div>
+                </div>
+            </div>
+            
+            <!-- PrestaShop Tab Content -->
+            <div class="config-tab-content" id="prestashopTab">
+                <div class="credentials-section">
+                    <h2 style="margin-top: 0;">Step 2: Connect to PrestaShop</h2>
+                    <p style="color: #666; margin-bottom: 20px;">Configure your PrestaShop store to export products</p>
+                    <div class="credentials-form">
+                        <div class="form-group">
+                            <label for="prestashopUrl">
+                                PrestaShop Base URL
+                                <span class="help-icon" title="The base URL of your PrestaShop installation, without /api/">ℹ️</span>
+                            </label>
+                            <input type="text" id="prestashopUrl" placeholder="http://localhost/poland" value="http://localhost/poland" autocomplete="off">
+                            <small style="color: #666; font-size: 12px; display: block; margin-top: 5px;">
+                                Example: <code>http://localhost/poland</code> or <code>https://yourdomain.com</code><br>
+                                <strong>Important:</strong> Make sure you can access this URL in your browser first!
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label for="prestashopApiKey">
+                                API Key
+                                <span class="help-icon" title="Generate from PrestaShop Admin: Advanced Parameters → Web Service">ℹ️</span>
+                            </label>
+                            <input type="password" id="prestashopApiKey" placeholder="Enter your PrestaShop API Key" autocomplete="off">
+                            <small style="color: #666; font-size: 12px; display: block; margin-top: 5px;">
+                                Generate from: <strong>Advanced Parameters → Web Service</strong>
+                            </small>
+                        </div>
+                        <div class="form-group" style="background: #f8f9fa; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                            <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin: 0;">
+                                <input type="checkbox" id="disableStockSyncToAllegro" style="width: auto;">
+                                <span style="font-weight: normal;">Disable PrestaShop → Allegro stock updates</span>
+                            </label>
+                            <small style="color: #666; font-size: 12px; display: block; margin-top: 8px; margin-left: 28px;">
+                                When checked, stock changes in PrestaShop won't sync back to Allegro
+                            </small>
+                        </div>
+                        <div style="display: flex; gap: 10px; margin-top: 20px;">
+                            <button id="testPrestashopBtn" class="btn btn-secondary" style="flex: 1;">Test Connection</button>
+                            <button id="savePrestashopBtn" class="btn btn-primary" style="flex: 1;">Save Configuration</button>
+                        </div>
                     </div>
-                    <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
-                        <input type="checkbox" id="disableStockSyncToAllegro" style="width: auto;">
-                        <label for="disableStockSyncToAllegro" style="margin: 0; font-weight: normal;">Disable PrestaShop → Allegro stock updates</label>
-                    </div>
-                    <div style="display: flex; gap: 10px;">
-                        <button id="savePrestashopBtn" class="btn btn-primary">Save PrestaShop Config</button>
-                        <button id="testPrestashopBtn" class="btn btn-secondary">Test Connection</button>
+                    <div id="prestashopMessage" class="message" style="display: none;"></div>
+                    
+                    <!-- Troubleshooting Tips -->
+                    <div style="background: #e3f2fd; border-left: 4px solid #2196f3; padding: 15px; margin-top: 20px; border-radius: 4px;">
+                        <strong style="color: #1976d2; display: block; margin-bottom: 10px;">💡 Troubleshooting Tips:</strong>
+                        <ul style="margin: 0; padding-left: 20px; color: #555; font-size: 13px; line-height: 1.8;">
+                            <li>Verify PrestaShop is running: Open <code>http://localhost/poland</code> in your browser</li>
+                            <li>Check Web Service is enabled: <strong>Advanced Parameters → Webservice</strong></li>
+                            <li>Test API manually: Try <code>http://localhost/poland/api/</code> in browser (should show API info)</li>
+                            <li>If using custom port: Include it in URL (e.g., <code>http://localhost:8080/poland</code>)</li>
+                            <li>SSL warning is normal for localhost - HTTP works fine for testing</li>
+                        </ul>
                     </div>
                 </div>
-                <div id="prestashopMessage" class="message" style="display: none;"></div>
             </div>
         </div>
     </div>

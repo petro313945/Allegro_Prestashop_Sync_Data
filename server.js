@@ -463,10 +463,14 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
       apiUrl += '/api';
     }
     apiUrl += '/';
-
+    
     const url = `${apiUrl}${endpoint}`;
     
+    // Log the URL for debugging (remove in production if needed)
+    console.log('PrestaShop API Request:', method, url);
+    
     // PrestaShop uses Basic Auth with API key as password
+    // Format: Basic base64(api_key:)
     const auth = Buffer.from(`${prestashopCredentials.apiKey}:`).toString('base64');
     
     const config = {
@@ -476,6 +480,11 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
         'Authorization': `Basic ${auth}`,
         'Content-Type': 'application/json',
         'Output-Format': 'JSON'
+      },
+      timeout: 15000, // 15 second timeout
+      validateStatus: function (status) {
+        // Don't throw error for 4xx/5xx, let us handle it
+        return status >= 200 && status < 600;
       }
     };
 
@@ -484,13 +493,62 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
     }
 
     const response = await axios(config);
+    
+    // Check for error status codes
+    if (response.status >= 400) {
+      const error = new Error(`PrestaShop API returned status ${response.status}`);
+      error.response = response;
+      throw error;
+    }
+    
     return response.data;
   } catch (error) {
-    console.error('PrestaShop API Error:', error.response?.data || error.message);
-    if (error.response?.status === 401) {
-      throw new Error('PrestaShop authentication failed. Please check your API key.');
+    console.error('PrestaShop API Error:', {
+      code: error.code,
+      message: error.message,
+      status: error.response?.status,
+      url: error.config?.url,
+      data: error.response?.data
+    });
+    
+    // Provide user-friendly error messages
+    if (error.code === 'ECONNREFUSED') {
+      throw new Error('Cannot connect to PrestaShop. Please check:\n• Is PrestaShop running?\n• Is the Base URL correct? (e.g., http://localhost/poland)\n• Try accessing the URL in your browser first\n• If using a custom port, include it: http://localhost:8080/poland');
     }
-    throw error;
+    
+    if (error.code === 'ENOTFOUND') {
+      throw new Error('PrestaShop hostname not found. Please check:\n• Is the Base URL correct?\n• Can you access PrestaShop in your browser?\n• Try: http://localhost/poland');
+    }
+    
+    if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
+      throw new Error('Connection to PrestaShop timed out. Please check if PrestaShop is running and accessible.');
+    }
+    
+    if (error.response?.status === 401) {
+      throw new Error('PrestaShop authentication failed. Please check your API key in: Advanced Parameters → Web Service');
+    }
+    
+    if (error.response?.status === 404) {
+      const attemptedUrl = error.config?.url || 'unknown';
+      throw new Error(`PrestaShop API endpoint not found (404).\n\nAttempted URL: ${attemptedUrl}\n\nPlease verify:\n• The Base URL is correct (should be: http://localhost/poland)\n• Web Service is enabled in PrestaShop (Advanced Parameters → Webservice)\n• Try accessing: ${attemptedUrl.replace('/api/products', '/api')} in your browser\n• Check if URL rewriting is enabled in PrestaShop`);
+    }
+    
+    if (error.response?.status === 403) {
+      throw new Error('Access denied. Please check if the API key has proper permissions.');
+    }
+    
+    if (error.response?.data) {
+      const errorData = error.response.data;
+      if (errorData.errors && Array.isArray(errorData.errors)) {
+        throw new Error('PrestaShop error: ' + errorData.errors.map(e => e.message || e).join(', '));
+      }
+      if (errorData.error) {
+        throw new Error('PrestaShop error: ' + errorData.error);
+      }
+    }
+    
+    // Generic error
+    throw new Error(`PrestaShop connection error: ${error.message}`);
   }
 }
 
@@ -1213,23 +1271,24 @@ app.get('/api/prestashop/status', (req, res) => {
  */
 app.get('/api/prestashop/test', async (req, res) => {
   try {
-    // Try to fetch shop info or products list
-    const data = await prestashopApiRequest('', 'GET');
+    // Try to fetch shop info - use a simple endpoint that always exists
+    // PrestaShop API root or products endpoint
+    const data = await prestashopApiRequest('products?limit=1', 'GET');
     res.json({
       success: true,
-      message: 'PrestaShop connection successful'
+      message: 'PrestaShop connection successful! ✓'
     });
   } catch (error) {
-    let errorMessage = error.message;
-    if (error.response?.status === 401) {
-      errorMessage = 'Invalid API key. Please check your PrestaShop API key.';
-    } else if (error.response?.status === 404) {
-      errorMessage = 'PrestaShop API endpoint not found. Please check your base URL.';
-    }
+    // Log the actual URL being used for debugging
+    const apiUrl = prestashopCredentials.baseUrl 
+      ? `${prestashopCredentials.baseUrl.replace(/\/+$/, '')}/api/products?limit=1`
+      : 'not configured';
+    console.log('PrestaShop test URL:', apiUrl);
     
+    // Error message is already user-friendly from prestashopApiRequest
     res.status(error.response?.status || 500).json({
       success: false,
-      error: errorMessage
+      error: error.message
     });
   }
 });

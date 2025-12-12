@@ -29,9 +29,66 @@ body {
     background: #ffffff;
     border-radius: 12px;
     padding: 40px;
-    max-width: 500px;
+    max-width: 900px;
     width: 90%;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+/* Configuration Tabs */
+.config-tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 30px;
+    border-bottom: 2px solid #e0e0e0;
+}
+
+.config-tab {
+    background: none;
+    border: none;
+    padding: 15px 25px;
+    cursor: pointer;
+    font-size: 1em;
+    color: #666;
+    border-bottom: 3px solid transparent;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+}
+
+.config-tab:hover {
+    color: #1a73e8;
+    background: #f8f9fa;
+}
+
+.config-tab.active {
+    color: #1a73e8;
+    border-bottom-color: #1a73e8;
+    background: #f8f9fa;
+}
+
+.tab-icon {
+    font-size: 1.2em;
+}
+
+.config-tab-content {
+    display: none;
+}
+
+.config-tab-content.active {
+    display: block;
+}
+
+.help-icon {
+    font-size: 0.9em;
+    cursor: help;
+    margin-left: 5px;
+    opacity: 0.6;
+}
+
+.help-icon:hover {
+    opacity: 1;
 }
 
 .credentials-modal h1 {
@@ -50,7 +107,11 @@ body {
 }
 
 .credentials-section h2 {
-    display: none;
+    display: block;
+    font-size: 1.3em;
+    color: #333;
+    margin-bottom: 10px;
+    font-weight: 600;
 }
 
 .credentials-form {
