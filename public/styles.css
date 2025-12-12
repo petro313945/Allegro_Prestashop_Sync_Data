@@ -349,6 +349,50 @@ body {
     gap: 20px;
 }
 
+.header-controls {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin-right: 10px;
+    padding-right: 15px;
+    border-right: 1px solid #e0e0e0;
+}
+
+.control-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.control-label {
+    font-weight: 500;
+    color: #666;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.control-select {
+    padding: 6px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.85em;
+    background: #ffffff;
+    color: #333;
+    cursor: pointer;
+    transition: all 0.2s;
+    min-width: 100px;
+}
+
+.control-select:hover {
+    border-color: #1a73e8;
+}
+
+.control-select:focus {
+    outline: none;
+    border-color: #1a73e8;
+    box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.1);
+}
+
 .status-item {
     display: flex;
     align-items: center;

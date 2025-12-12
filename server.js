@@ -83,9 +83,27 @@ app.use((req, res, next) => {
   next();
 });
 
-// Allegro API Configuration - PRODUCTION MODE
-const ALLEGRO_API_URL = process.env.ALLEGRO_API_URL || 'https://api.allegro.pl';
-const ALLEGRO_AUTH_URL = process.env.ALLEGRO_AUTH_URL || 'https://allegro.pl/auth/oauth';
+// Allegro API Configuration - Mode switching support
+let currentMode = process.env.ALLEGRO_MODE || 'sandbox'; // Default to sandbox
+
+// API URLs based on mode
+const API_URLS = {
+  production: {
+    api: 'https://api.allegro.pl',
+    auth: 'https://allegro.pl/auth/oauth'
+  },
+  sandbox: {
+    api: 'https://api.allegro.pl.allegrosandbox.pl',
+    auth: 'https://allegro.pl.allegrosandbox.pl/auth/oauth'
+  }
+};
+
+function getApiUrls() {
+  return API_URLS[currentMode] || API_URLS.sandbox;
+}
+
+let ALLEGRO_API_URL = getApiUrls().api;
+let ALLEGRO_AUTH_URL = getApiUrls().auth;
 
 // Store credentials and tokens (persisted to file)
 let userCredentials = {
@@ -648,6 +666,61 @@ app.get('/api/credentials/status', (req, res) => {
 });
 
 /**
+ * Get current mode
+ */
+app.get('/api/mode', (req, res) => {
+  res.json({ 
+    mode: currentMode,
+    apiUrl: ALLEGRO_API_URL,
+    authUrl: ALLEGRO_AUTH_URL
+  });
+});
+
+/**
+ * Set mode (production or sandbox)
+ */
+app.post('/api/mode', (req, res) => {
+  try {
+    const { mode } = req.body;
+    
+    if (mode !== 'production' && mode !== 'sandbox') {
+      return res.status(400).json({
+        success: false,
+        error: 'Mode must be either "production" or "sandbox"'
+      });
+    }
+
+    currentMode = mode;
+    const urls = getApiUrls();
+    ALLEGRO_API_URL = urls.api;
+    ALLEGRO_AUTH_URL = urls.auth;
+    
+    // Clear tokens when switching modes (they're mode-specific)
+    accessToken = null;
+    tokenExpiry = null;
+    userOAuthTokens = {
+      accessToken: null,
+      refreshToken: null,
+      expiresAt: null,
+      userId: null
+    };
+    saveTokens();
+    
+    res.json({
+      success: true,
+      mode: currentMode,
+      apiUrl: ALLEGRO_API_URL,
+      authUrl: ALLEGRO_AUTH_URL
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * Health check endpoint
  */
 app.get('/api/health', (req, res) => {
@@ -655,7 +728,7 @@ app.get('/api/health', (req, res) => {
     status: 'ok', 
     configured: !!(userCredentials.clientId && userCredentials.clientSecret),
     apiUrl: ALLEGRO_API_URL,
-    mode: 'PRODUCTION'
+    mode: currentMode.toUpperCase()
   });
 });
 
@@ -1818,6 +1891,6 @@ app.get('/log', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Allegro API: ${ALLEGRO_API_URL}`);
-  console.log(`Mode: PRODUCTION`);
+  console.log(`Mode: ${currentMode.toUpperCase()}`);
 });
 

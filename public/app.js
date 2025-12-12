@@ -21,6 +21,10 @@ let currentPageNumber = 1; // Track current page number
 let prestashopCategories = [];
 let prestashopConfigured = false;
 
+// Mode and Language state
+let currentMode = 'sandbox';
+let currentLanguage = 'en';
+
 // API Base URL
 const API_BASE = '';
 
@@ -32,6 +36,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadImportedOffers();
     loadPrestashopConfig();
     checkPrestashopStatus();
+    loadCurrentMode();
+    loadCurrentLanguage();
     // Initially disable all actions until authenticated
     updateUIState(false);
 });
@@ -149,6 +155,107 @@ function setupEventListeners() {
     // Load PrestaShop config on startup
     loadPrestashopConfig();
     checkPrestashopStatus();
+    
+    // Mode and Language selectors
+    const modeSelect = document.getElementById('modeSelect');
+    if (modeSelect) {
+        modeSelect.addEventListener('change', handleModeChange);
+    }
+    
+    const languageSelect = document.getElementById('languageSelect');
+    if (languageSelect) {
+        languageSelect.addEventListener('change', handleLanguageChange);
+    }
+}
+
+// Load current mode from server
+async function loadCurrentMode() {
+    try {
+        const response = await fetch(`${API_BASE}/api/mode`);
+        const data = await response.json();
+        if (data.mode) {
+            currentMode = data.mode;
+            const modeSelect = document.getElementById('modeSelect');
+            if (modeSelect) {
+                modeSelect.value = currentMode;
+            }
+        }
+    } catch (error) {
+        console.error('Error loading mode:', error);
+    }
+}
+
+// Handle mode change
+async function handleModeChange(event) {
+    const newMode = event.target.value;
+    if (newMode === currentMode) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/api/mode`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ mode: newMode })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            currentMode = newMode;
+            showToast(`Mode changed to ${newMode.toUpperCase()}`, 'success');
+            
+            // Clear authentication state when switching modes
+            isAuthenticated = false;
+            isOAuthConnected = false;
+            updateUIState(false);
+            updateConfigStatuses();
+            
+            // Clear credentials display
+            document.getElementById('clientId').value = '';
+            document.getElementById('clientSecret').value = '';
+        } else {
+            showToast(`Failed to change mode: ${data.error}`, 'error');
+            // Revert selection
+            event.target.value = currentMode;
+        }
+    } catch (error) {
+        console.error('Error changing mode:', error);
+        showToast('Failed to change mode', 'error');
+        // Revert selection
+        event.target.value = currentMode;
+    }
+}
+
+// Load current language from localStorage
+function loadCurrentLanguage() {
+    const savedLanguage = localStorage.getItem('appLanguage') || 'en';
+    currentLanguage = savedLanguage;
+    const languageSelect = document.getElementById('languageSelect');
+    if (languageSelect) {
+        languageSelect.value = currentLanguage;
+    }
+    applyLanguage(currentLanguage);
+}
+
+// Handle language change
+function handleLanguageChange(event) {
+    const newLanguage = event.target.value;
+    currentLanguage = newLanguage;
+    localStorage.setItem('appLanguage', newLanguage);
+    applyLanguage(newLanguage);
+    showToast(`Language changed to ${newLanguage === 'en' ? 'English' : 'Polski'}`, 'success');
+}
+
+// Apply language (basic implementation - can be extended)
+function applyLanguage(lang) {
+    // Update HTML lang attribute
+    document.documentElement.lang = lang;
+    
+    // You can extend this to translate all UI elements
+    // For now, we'll just store the preference
+    // In a full implementation, you would load translation files here
 }
 
 // Toast notification system
