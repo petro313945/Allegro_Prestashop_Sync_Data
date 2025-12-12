@@ -2040,6 +2040,9 @@ async function testPrestashopConnection() {
         const testData = await testResponse.json();
         
         if (testData.success) {
+            // Save to localStorage when test succeeds
+            const disableStockSync = document.getElementById('disableStockSyncToAllegro').checked;
+            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey, disableStockSync }));
             showToast('✓ ' + testData.message, 'success');
             prestashopConfigured = true;
             updateConfigStatuses();
@@ -2068,17 +2071,20 @@ function loadPrestashopConfig() {
     if (saved) {
         try {
             const config = JSON.parse(saved);
-            document.getElementById('prestashopUrl').value = config.url || 'http://localhost/poland';
+            // Always use saved URL as default (user's entered URL)
+            document.getElementById('prestashopUrl').value = config.url || '';
             document.getElementById('prestashopApiKey').value = config.apiKey || '';
             document.getElementById('disableStockSyncToAllegro').checked = config.disableStockSync || false;
         } catch (e) {
             console.error('Error loading PrestaShop config:', e);
+            // Fallback to empty if parsing fails
+            document.getElementById('prestashopUrl').value = '';
+            document.getElementById('prestashopApiKey').value = '';
         }
     } else {
-        // Set default URL
-        document.getElementById('prestashopUrl').value = 'http://localhost/poland';
-        // Pre-fill API key if provided
-        document.getElementById('prestashopApiKey').value = 'NMVZBKSLERBWPBW8KVF2GVBKJW7Z3IXT';
+        // No saved config - leave empty so user enters their URL
+        document.getElementById('prestashopUrl').value = '';
+        document.getElementById('prestashopApiKey').value = '';
     }
 }
 

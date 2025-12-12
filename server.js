@@ -536,7 +536,9 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
     
     if (error.response?.status === 404) {
       const attemptedUrl = error.config?.url || 'unknown';
-      throw new Error(`PrestaShop API endpoint not found (404).\n\nAttempted URL: ${attemptedUrl}\n\nPlease verify:\n• The Base URL is correct (should be: http://localhost/poland)\n• Web Service is enabled in PrestaShop (Advanced Parameters → Webservice)\n• Try accessing: ${attemptedUrl.replace('/api/products', '/api')} in your browser\n• Check if URL rewriting is enabled in PrestaShop`);
+      const baseUrl = prestashopCredentials.baseUrl || 'unknown';
+      const expectedApiUrl = baseUrl.replace(/\/+$/, '') + '/api/';
+      throw new Error(`PrestaShop API endpoint not found (404).\n\nAttempted URL: ${attemptedUrl}\nConfigured Base URL: ${baseUrl}\nExpected API URL: ${expectedApiUrl}\n\nPlease verify:\n• The Base URL is correct (e.g., http://localhost/polandstore)\n• Web Service is enabled in PrestaShop (Advanced Parameters → Webservice)\n• Try accessing ${expectedApiUrl} in your browser\n• Make sure the URL matches exactly what works in your browser`);
     }
     
     if (error.response?.status === 403) {
