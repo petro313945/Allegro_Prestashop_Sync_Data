@@ -17,6 +17,10 @@ let pageHistory = []; // Track page history for going back
 let currentPhrase = ''; // Track current search phrase
 let currentPageNumber = 1; // Track current page number
 
+// PrestaShop state
+let prestashopCategories = [];
+let prestashopConfigured = false;
+
 // API Base URL
 const API_BASE = '';
 
@@ -98,6 +102,24 @@ function setupEventListeners() {
     document.getElementById('clearCategoryBtn').addEventListener('click', clearCategorySelection);
     document.getElementById('clearImportedBtn').addEventListener('click', clearImportedProducts);
     document.getElementById('exportToPrestashopBtn').addEventListener('click', exportToPrestashop);
+    
+    // PrestaShop event listeners
+    const savePrestashopBtn = document.getElementById('savePrestashopBtn');
+    if (savePrestashopBtn) {
+        savePrestashopBtn.addEventListener('click', savePrestashopConfig);
+    }
+    const testPrestashopBtn = document.getElementById('testPrestashopBtn');
+    if (testPrestashopBtn) {
+        testPrestashopBtn.addEventListener('click', testPrestashopConnection);
+    }
+    const loadPrestashopCategoriesBtn = document.getElementById('loadPrestashopCategoriesBtn');
+    if (loadPrestashopCategoriesBtn) {
+        loadPrestashopCategoriesBtn.addEventListener('click', loadPrestashopCategories);
+    }
+    
+    // Load PrestaShop config on startup
+    loadPrestashopConfig();
+    checkPrestashopStatus();
 }
 
 // Toast notification system
@@ -131,6 +153,23 @@ function showToast(message, type = 'info', duration = 5000) {
             }
         }, 300);
     }, duration);
+}
+
+// Show message in a message element (for credentials forms)
+function showMessage(elementId, message, type = 'info') {
+    const element = document.getElementById(elementId);
+    if (!element) return;
+    
+    element.textContent = message;
+    element.className = `message ${type}`;
+    element.style.display = 'block';
+    
+    // Auto-hide after 5 seconds for success messages
+    if (type === 'success') {
+        setTimeout(() => {
+            element.style.display = 'none';
+        }, 5000);
+    }
 }
 
 // Save credentials and authenticate immediately
@@ -1706,9 +1745,9 @@ function displayImportedOffers() {
     if (clearImportedBtn) {
         clearImportedBtn.disabled = importedOffers.length === 0;
     }
-    if (exportToPrestashopBtn) {
-        exportToPrestashopBtn.disabled = importedOffers.length === 0;
-    }
+    
+    // Update export button state (checks both imported offers and PrestaShop config)
+    updateExportButtonState();
     
     if (importedOffers.length === 0) {
         importedListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No products imported yet</p>';
@@ -1892,69 +1931,263 @@ function extractDescription(offer) {
     return '';
 }
 
-// Export to PrestaShop
-function exportToPrestashop() {
+// PrestaShop Configuration Functions
+
+async function savePrestashopConfig() {
+    const url = document.getElementById('prestashopUrl').value.trim();
+    const apiKey = document.getElementById('prestashopApiKey').value.trim();
+    const disableStockSync = document.getElementById('disableStockSyncToAllegro').checked;
+    
+    if (!url || !apiKey) {
+        showMessage('prestashopMessage', 'Please fill in all fields', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/api/prestashop/configure`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                baseUrl: url,
+                apiKey: apiKey,
+                disableStockSyncToAllegro: disableStockSync
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            showMessage('prestashopMessage', 'PrestaShop configuration saved successfully', 'success');
+            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey, disableStockSync }));
+            prestashopConfigured = true;
+            checkPrestashopStatus();
+            // Enable export button if products are imported
+            updateExportButtonState();
+        } else {
+            showMessage('prestashopMessage', data.error || 'Failed to save configuration', 'error');
+        }
+    } catch (error) {
+        showMessage('prestashopMessage', 'Error saving configuration: ' + error.message, 'error');
+    }
+}
+
+async function testPrestashopConnection() {
+    const url = document.getElementById('prestashopUrl').value.trim();
+    const apiKey = document.getElementById('prestashopApiKey').value.trim();
+    
+    if (!url || !apiKey) {
+        showMessage('prestashopMessage', 'Please fill in URL and API key first', 'error');
+        return;
+    }
+    
+    // Save temporarily for test
+    try {
+        const response = await fetch(`${API_BASE}/api/prestashop/configure`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                baseUrl: url,
+                apiKey: apiKey,
+                disableStockSyncToAllegro: document.getElementById('disableStockSyncToAllegro').checked
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to save configuration');
+        }
+        
+        // Test connection
+        const testResponse = await fetch(`${API_BASE}/api/prestashop/test`);
+        const testData = await testResponse.json();
+        
+        if (testData.success) {
+            showMessage('prestashopMessage', 'Connection successful!', 'success');
+            prestashopConfigured = true;
+            checkPrestashopStatus();
+        } else {
+            showMessage('prestashopMessage', testData.error || 'Connection failed', 'error');
+        }
+    } catch (error) {
+        showMessage('prestashopMessage', 'Error testing connection: ' + error.message, 'error');
+    }
+}
+
+function loadPrestashopConfig() {
+    const saved = localStorage.getItem('prestashopConfig');
+    if (saved) {
+        try {
+            const config = JSON.parse(saved);
+            document.getElementById('prestashopUrl').value = config.url || 'http://localhost/poland';
+            document.getElementById('prestashopApiKey').value = config.apiKey || '';
+            document.getElementById('disableStockSyncToAllegro').checked = config.disableStockSync || false;
+        } catch (e) {
+            console.error('Error loading PrestaShop config:', e);
+        }
+    } else {
+        // Set default URL
+        document.getElementById('prestashopUrl').value = 'http://localhost/poland';
+        // Pre-fill API key if provided
+        document.getElementById('prestashopApiKey').value = 'NMVZBKSLERBWPBW8KVF2GVBKJW7Z3IXT';
+    }
+}
+
+async function checkPrestashopStatus() {
+    try {
+        const response = await fetch(`${API_BASE}/api/prestashop/status`);
+        const data = await response.json();
+        
+        prestashopConfigured = data.configured;
+        const statusEl = document.getElementById('prestashopStatus');
+        if (statusEl) {
+            statusEl.textContent = data.configured ? 'Configured' : 'Not Configured';
+            statusEl.style.color = data.configured ? '#28a745' : '#dc3545';
+        }
+        
+        updateExportButtonState();
+    } catch (error) {
+        console.error('Error checking PrestaShop status:', error);
+    }
+}
+
+async function loadPrestashopCategories() {
+    if (!prestashopConfigured) {
+        showToast('Please configure PrestaShop first', 'error');
+        return;
+    }
+    
+    try {
+        showToast('Loading PrestaShop categories...', 'info');
+        const response = await fetch(`${API_BASE}/api/prestashop/categories`);
+        const data = await response.json();
+        
+        if (data.success && data.categories) {
+            prestashopCategories = data.categories;
+            displayPrestashopCategories();
+            document.getElementById('prestashopCategoriesSection').style.display = 'block';
+            showToast(`Loaded ${prestashopCategories.length} categories`, 'success');
+        } else {
+            showToast(data.error || 'Failed to load categories', 'error');
+        }
+    } catch (error) {
+        showToast('Error loading categories: ' + error.message, 'error');
+    }
+}
+
+function displayPrestashopCategories() {
+    const listEl = document.getElementById('prestashopCategoriesList');
+    if (!listEl) return;
+    
+    if (prestashopCategories.length === 0) {
+        listEl.innerHTML = '<p style="padding: 20px; color: #666;">No categories found</p>';
+        return;
+    }
+    
+    listEl.innerHTML = prestashopCategories.map(cat => {
+        const catData = cat.category || cat;
+        const id = catData.id || cat.id;
+        const name = (catData.name && Array.isArray(catData.name)) 
+            ? catData.name[0]?.value || catData.name[0] || 'Unnamed'
+            : (catData.name || 'Unnamed');
+        
+        return `
+            <div class="imported-item" style="padding: 10px; border-bottom: 1px solid #eee;">
+                <strong>${name}</strong> <span style="color: #666;">(ID: ${id})</span>
+            </div>
+        `;
+    }).join('');
+}
+
+function updateExportButtonState() {
+    const exportBtn = document.getElementById('exportToPrestashopBtn');
+    const loadCategoriesBtn = document.getElementById('loadPrestashopCategoriesBtn');
+    
+    if (exportBtn) {
+        exportBtn.disabled = importedOffers.length === 0 || !prestashopConfigured;
+    }
+    if (loadCategoriesBtn) {
+        loadCategoriesBtn.disabled = !prestashopConfigured;
+    }
+}
+
+// Export to PrestaShop - Actually create products
+async function exportToPrestashop() {
     if (importedOffers.length === 0) {
         showToast('No products to export', 'error');
         return;
     }
     
-    // Create export data in PrestaShop format
-    const exportData = {
-        products: importedOffers.map(offer => {
-            // Extract category info
+    if (!prestashopConfigured) {
+        showToast('Please configure PrestaShop first', 'error');
+        return;
+    }
+    
+    const autoCreateCategories = document.getElementById('autoCreateCategories')?.checked || false;
+    
+    // Confirm before export
+    if (!confirm(`Export ${importedOffers.length} product(s) to PrestaShop?`)) {
+        return;
+    }
+    
+    showToast('Starting export to PrestaShop...', 'info');
+    
+    let successCount = 0;
+    let errorCount = 0;
+    const errors = [];
+    
+    // Export products one by one
+    for (let i = 0; i < importedOffers.length; i++) {
+        const offer = importedOffers[i];
+        
+        try {
+            // Find category mapping
             let categoryId = null;
-            let categoryName = 'N/A';
-            
             if (offer.category) {
-                if (typeof offer.category === 'string') {
-                    categoryId = offer.category;
-                } else if (offer.category.id) {
-                    categoryId = offer.category.id;
-                }
-                if (offer.category.name) {
-                    categoryName = offer.category.name;
-                } else if (categoryId && categoryNameCache[categoryId]) {
-                    categoryName = categoryNameCache[categoryId];
-                }
+                const allegroCategoryId = typeof offer.category === 'string' 
+                    ? offer.category 
+                    : offer.category.id;
+                
+                // Try to find matching PrestaShop category
+                // For now, we'll use auto-create or default
+                categoryId = null; // Will be handled by backend if auto-create is enabled
             }
             
-            return {
-                id: offer.id,
-                name: offer.name || 'Untitled Product',
-                category: categoryName,
-                categoryId: categoryId,
-                images: extractImages(offer),
-                description: extractDescription(offer),
-                price: extractPrice(offer),
-                reference: offer.id,
-                // Additional useful fields
-                stock: offer.stock?.available || null,
-                publicationStatus: offer.publication?.status || null,
-                sellingMode: offer.sellingMode?.format || null,
-                delivery: offer.delivery ? {
-                    shippingRates: offer.delivery.shippingRates,
-                    time: offer.delivery.time
-                } : null
-            };
-        }),
-        exportDate: new Date().toISOString(),
-        totalProducts: importedOffers.length
-    };
+            const response = await fetch(`${API_BASE}/api/prestashop/products`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    offer: offer,
+                    categoryId: categoryId,
+                    autoCreateCategory: autoCreateCategories
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                successCount++;
+                showToast(`Exported ${successCount}/${importedOffers.length}: ${offer.name}`, 'success', 2000);
+            } else {
+                errorCount++;
+                errors.push(`${offer.name}: ${data.error}`);
+                console.error('Export error:', data.error);
+            }
+        } catch (error) {
+            errorCount++;
+            errors.push(`${offer.name}: ${error.message}`);
+            console.error('Export error:', error);
+        }
+        
+        // Small delay to avoid overwhelming the API
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
     
-    // Convert to JSON and download
-    const dataStr = JSON.stringify(exportData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `prestashop_export_${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    
-    showToast(`Exported ${importedOffers.length} product(s) to PrestaShop`, 'success');
+    // Show final results
+    if (errorCount > 0) {
+        showToast(`Export completed: ${successCount} success, ${errorCount} errors`, 'error', 10000);
+        console.error('Export errors:', errors);
+    } else {
+        showToast(`Successfully exported ${successCount} product(s) to PrestaShop!`, 'success', 10000);
+    }
 }
 
 // Save imported offers to localStorage

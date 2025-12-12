@@ -11,6 +11,8 @@ const PORT = process.env.PORT || 3000;
 // Token storage file path
 const TOKEN_STORAGE_FILE = path.join(__dirname, '.tokens.json');
 const CREDENTIALS_STORAGE_FILE = path.join(__dirname, '.credentials.json');
+const PRESTASHOP_CREDENTIALS_FILE = path.join(__dirname, '.prestashop.json');
+const PRODUCT_MAPPINGS_FILE = path.join(__dirname, '.product_mappings.json');
 
 // Middleware
 app.use(cors());
@@ -101,6 +103,16 @@ let userOAuthTokens = {
   expiresAt: null,
   userId: null
 };
+
+// Store PrestaShop credentials
+let prestashopCredentials = {
+  baseUrl: null,
+  apiKey: null,
+  disableStockSyncToAllegro: false // Toggle for PrestaShop → Allegro stock sync
+};
+
+// Store product mappings (Allegro offer ID → PrestaShop product ID)
+let productMappings = {};
 
 /**
  * Save tokens to file (persistent storage)
@@ -199,9 +211,76 @@ function loadCredentials() {
   }
 }
 
+/**
+ * Save PrestaShop credentials to file
+ */
+function savePrestashopCredentials() {
+  try {
+    const credData = {
+      baseUrl: prestashopCredentials.baseUrl,
+      apiKey: prestashopCredentials.apiKey,
+      disableStockSyncToAllegro: prestashopCredentials.disableStockSyncToAllegro,
+      savedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(PRESTASHOP_CREDENTIALS_FILE, JSON.stringify(credData, null, 2), 'utf8');
+    console.log('PrestaShop credentials saved to file');
+  } catch (error) {
+    console.error('Error saving PrestaShop credentials:', error.message);
+  }
+}
+
+/**
+ * Load PrestaShop credentials from file
+ */
+function loadPrestashopCredentials() {
+  try {
+    if (fs.existsSync(PRESTASHOP_CREDENTIALS_FILE)) {
+      const credData = JSON.parse(fs.readFileSync(PRESTASHOP_CREDENTIALS_FILE, 'utf8'));
+      
+      if (credData.baseUrl && credData.apiKey) {
+        prestashopCredentials.baseUrl = credData.baseUrl;
+        prestashopCredentials.apiKey = credData.apiKey;
+        prestashopCredentials.disableStockSyncToAllegro = credData.disableStockSyncToAllegro || false;
+        console.log('PrestaShop credentials loaded from file');
+      }
+    }
+  } catch (error) {
+    console.error('Error loading PrestaShop credentials:', error.message);
+  }
+}
+
+/**
+ * Save product mappings to file
+ */
+function saveProductMappings() {
+  try {
+    fs.writeFileSync(PRODUCT_MAPPINGS_FILE, JSON.stringify(productMappings, null, 2), 'utf8');
+    console.log('Product mappings saved to file');
+  } catch (error) {
+    console.error('Error saving product mappings:', error.message);
+  }
+}
+
+/**
+ * Load product mappings from file
+ */
+function loadProductMappings() {
+  try {
+    if (fs.existsSync(PRODUCT_MAPPINGS_FILE)) {
+      productMappings = JSON.parse(fs.readFileSync(PRODUCT_MAPPINGS_FILE, 'utf8'));
+      console.log('Product mappings loaded from file');
+    }
+  } catch (error) {
+    console.error('Error loading product mappings:', error.message);
+    productMappings = {};
+  }
+}
+
 // Load tokens and credentials on server startup
 loadCredentials();
 loadTokens();
+loadPrestashopCredentials();
+loadProductMappings();
 
 // Store visitor logs (in-memory storage)
 // In production, use proper database storage
@@ -362,6 +441,55 @@ async function getUserAccessToken() {
 
     throw new Error('No valid user token. Please authorize your account.');
   } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * Make authenticated request to PrestaShop API
+ */
+async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
+  try {
+    if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
+      throw new Error('PrestaShop credentials not configured');
+    }
+
+    // Ensure baseUrl ends with /api/
+    let apiUrl = prestashopCredentials.baseUrl.trim();
+    // Remove trailing slashes first
+    apiUrl = apiUrl.replace(/\/+$/, '');
+    // Add /api/ if not present
+    if (!apiUrl.endsWith('/api')) {
+      apiUrl += '/api';
+    }
+    apiUrl += '/';
+
+    const url = `${apiUrl}${endpoint}`;
+    
+    // PrestaShop uses Basic Auth with API key as password
+    const auth = Buffer.from(`${prestashopCredentials.apiKey}:`).toString('base64');
+    
+    const config = {
+      method: method,
+      url: url,
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/json',
+        'Output-Format': 'JSON'
+      }
+    };
+
+    if (data && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      config.data = data;
+    }
+
+    const response = await axios(config);
+    return response.data;
+  } catch (error) {
+    console.error('PrestaShop API Error:', error.response?.data || error.message);
+    if (error.response?.status === 401) {
+      throw new Error('PrestaShop authentication failed. Please check your API key.');
+    }
     throw error;
   }
 }
@@ -1029,6 +1157,440 @@ app.get('/api/test-auth', async (req, res) => {
     res.status(error.response?.status || error.status || 500).json({
       success: false,
       error: errorMessage
+    });
+  }
+});
+
+/**
+ * PrestaShop API Endpoints
+ */
+
+/**
+ * Configure PrestaShop credentials
+ */
+app.post('/api/prestashop/configure', (req, res) => {
+  try {
+    const { baseUrl, apiKey, disableStockSyncToAllegro } = req.body;
+    
+    if (!baseUrl || !apiKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'Base URL and API key are required'
+      });
+    }
+
+    prestashopCredentials.baseUrl = baseUrl;
+    prestashopCredentials.apiKey = apiKey;
+    prestashopCredentials.disableStockSyncToAllegro = disableStockSyncToAllegro || false;
+    
+    savePrestashopCredentials();
+    
+    res.json({
+      success: true,
+      message: 'PrestaShop credentials saved successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get PrestaShop configuration status
+ */
+app.get('/api/prestashop/status', (req, res) => {
+  res.json({
+    configured: !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey),
+    baseUrl: prestashopCredentials.baseUrl,
+    disableStockSyncToAllegro: prestashopCredentials.disableStockSyncToAllegro
+  });
+});
+
+/**
+ * Test PrestaShop connection
+ */
+app.get('/api/prestashop/test', async (req, res) => {
+  try {
+    // Try to fetch shop info or products list
+    const data = await prestashopApiRequest('', 'GET');
+    res.json({
+      success: true,
+      message: 'PrestaShop connection successful'
+    });
+  } catch (error) {
+    let errorMessage = error.message;
+    if (error.response?.status === 401) {
+      errorMessage = 'Invalid API key. Please check your PrestaShop API key.';
+    } else if (error.response?.status === 404) {
+      errorMessage = 'PrestaShop API endpoint not found. Please check your base URL.';
+    }
+    
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: errorMessage
+    });
+  }
+});
+
+/**
+ * Get PrestaShop categories
+ */
+app.get('/api/prestashop/categories', async (req, res) => {
+  try {
+    const { limit = 1000, offset = 0 } = req.query;
+    const data = await prestashopApiRequest(`categories?limit=${limit}&offset=${offset}`, 'GET');
+    
+    // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
+    let categories = [];
+    if (data.categories) {
+      if (Array.isArray(data.categories)) {
+        categories = data.categories.map(item => item.category || item);
+      } else if (data.categories.category) {
+        categories = [data.categories.category];
+      }
+    } else if (data.category) {
+      categories = [data.category];
+    }
+    
+    res.json({
+      success: true,
+      categories: categories
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Create category in PrestaShop
+ */
+app.post('/api/prestashop/categories', async (req, res) => {
+  try {
+    const { name, idParent = 2, active = 1 } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        error: 'Category name is required'
+      });
+    }
+
+    // PrestaShop requires XML format for creation, but we'll use JSON
+    const categoryData = {
+      category: {
+        name: [
+          { id: 1, value: name }, // Polish (id: 1)
+          { id: 2, value: name }  // English (id: 2)
+        ],
+        id_parent: idParent,
+        active: active,
+        link_rewrite: [
+          { id: 1, value: name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') },
+          { id: 2, value: name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') }
+        ]
+      }
+    };
+
+    const data = await prestashopApiRequest('categories', 'POST', categoryData);
+    
+    res.json({
+      success: true,
+      category: data.category || data,
+      message: 'Category created successfully'
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Create product in PrestaShop
+ */
+app.post('/api/prestashop/products', async (req, res) => {
+  try {
+    const { offer, categoryId, autoCreateCategory } = req.body;
+    
+    if (!offer || !offer.id || !offer.name) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid offer data'
+      });
+    }
+
+    // Extract product data from Allegro offer
+    const price = offer.sellingMode?.price?.amount || offer.price || 0;
+    const stock = offer.stock?.available || 0;
+    const description = offer.description || offer.name || '';
+    
+    // Handle category
+    let finalCategoryId = categoryId || 2; // Default to Home category (id: 2)
+    
+    // If category doesn't exist and auto-create is enabled, create it
+    if (!categoryId && autoCreateCategory && offer.category) {
+      const categoryName = offer.category.name || 'Imported Category';
+      try {
+        const categoryRes = await prestashopApiRequest('categories', 'POST', {
+          category: {
+            name: [
+              { id: 1, value: categoryName },
+              { id: 2, value: categoryName }
+            ],
+            id_parent: 2,
+            active: 1
+          }
+        });
+        finalCategoryId = categoryRes.category?.id || categoryRes.id || 2;
+      } catch (error) {
+        console.error('Failed to create category:', error.message);
+        finalCategoryId = 2; // Fallback to Home
+      }
+    }
+
+    // Build product data for PrestaShop
+    const productData = {
+      product: {
+        id_shop_default: 1,
+        id_category_default: finalCategoryId,
+        reference: offer.id.toString(),
+        name: [
+          { id: 1, value: offer.name }, // Polish
+          { id: 2, value: offer.name }  // English
+        ],
+        description: [
+          { id: 1, value: description },
+          { id: 2, value: description }
+        ],
+        description_short: [
+          { id: 1, value: description.substring(0, 800) },
+          { id: 2, value: description.substring(0, 800) }
+        ],
+        price: parseFloat(price),
+        active: 1,
+        associations: {
+          categories: {
+            category: [{ id: finalCategoryId }]
+          }
+        }
+      }
+    };
+
+    // Create product
+    const productResponse = await prestashopApiRequest('products', 'POST', productData);
+    // PrestaShop returns: { product: { id: ... } } or { id: ... }
+    let prestashopProductId = null;
+    if (productResponse.product) {
+      prestashopProductId = productResponse.product.id;
+    } else if (productResponse.id) {
+      prestashopProductId = productResponse.id;
+    } else if (Array.isArray(productResponse) && productResponse.length > 0) {
+      prestashopProductId = productResponse[0].id || productResponse[0].product?.id;
+    }
+    
+    if (!prestashopProductId) {
+      throw new Error('Failed to create product - no product ID returned');
+    }
+
+    // Update stock
+    try {
+      // Get stock available ID for the product
+      const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]`, 'GET');
+      let stockAvailableId = null;
+      
+      if (stockData.stock_availables) {
+        if (Array.isArray(stockData.stock_availables) && stockData.stock_availables.length > 0) {
+          stockAvailableId = stockData.stock_availables[0].stock_available?.id || stockData.stock_availables[0].id;
+        } else if (stockData.stock_availables.stock_available) {
+          stockAvailableId = stockData.stock_availables.stock_available.id;
+        }
+      } else if (stockData.stock_available) {
+        stockAvailableId = stockData.stock_available.id;
+      }
+      
+      if (stockAvailableId) {
+        await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', {
+          stock_available: {
+            quantity: parseInt(stock),
+            id_product: prestashopProductId
+          }
+        });
+      }
+    } catch (stockError) {
+      console.error('Failed to update stock:', stockError.message);
+      // Continue even if stock update fails
+    }
+
+    // Handle images
+    let images = [];
+    if (offer.primaryImage && offer.primaryImage.url) {
+      images.push(offer.primaryImage.url);
+    } else if (offer.images && Array.isArray(offer.images)) {
+      images = offer.images.slice(0, 5).map(img => 
+        typeof img === 'string' ? img : (img.url || img.uri || img.path || '')
+      ).filter(url => url);
+    }
+
+    // Store product mapping
+    productMappings[offer.id] = {
+      prestashopProductId: prestashopProductId,
+      allegroOfferId: offer.id,
+      syncedAt: new Date().toISOString()
+    };
+    saveProductMappings();
+
+    res.json({
+      success: true,
+      product: {
+        id: prestashopProductId,
+        prestashopProductId: prestashopProductId,
+        allegroOfferId: offer.id
+      },
+      images: images,
+      message: 'Product created successfully in PrestaShop'
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Update product stock in PrestaShop
+ */
+app.put('/api/prestashop/products/:productId/stock', async (req, res) => {
+  try {
+    const { productId } = req.params;
+    const { quantity } = req.body;
+    
+    if (quantity === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'Quantity is required'
+      });
+    }
+
+    // Get stock available ID
+    const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${productId}]`, 'GET');
+    let stockAvailableId = null;
+    
+    if (stockData.stock_availables) {
+      if (Array.isArray(stockData.stock_availables) && stockData.stock_availables.length > 0) {
+        stockAvailableId = stockData.stock_availables[0].stock_available?.id || stockData.stock_availables[0].id;
+      } else if (stockData.stock_availables.stock_available) {
+        stockAvailableId = stockData.stock_availables.stock_available.id;
+      }
+    } else if (stockData.stock_available) {
+      stockAvailableId = stockData.stock_available.id;
+    }
+    
+    if (!stockAvailableId) {
+      return res.status(404).json({
+        success: false,
+        error: 'Stock entry not found for this product'
+      });
+    }
+
+    await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', {
+      stock_available: {
+        quantity: parseInt(quantity),
+        id_product: parseInt(productId)
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Stock updated successfully'
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get product mappings
+ */
+app.get('/api/prestashop/mappings', (req, res) => {
+  res.json({
+    success: true,
+    mappings: productMappings
+  });
+});
+
+/**
+ * Sync stock from Allegro to PrestaShop
+ */
+app.post('/api/prestashop/sync/stock', async (req, res) => {
+  try {
+    const { offerId, quantity } = req.body;
+    
+    if (!offerId || quantity === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'Offer ID and quantity are required'
+      });
+    }
+
+    // Find PrestaShop product ID from mapping
+    const mapping = productMappings[offerId];
+    if (!mapping || !mapping.prestashopProductId) {
+      return res.status(404).json({
+        success: false,
+        error: 'Product mapping not found for this offer'
+      });
+    }
+
+    // Update stock in PrestaShop
+    const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${mapping.prestashopProductId}]`, 'GET');
+    let stockAvailableId = null;
+    
+    if (stockData.stock_availables) {
+      if (Array.isArray(stockData.stock_availables) && stockData.stock_availables.length > 0) {
+        stockAvailableId = stockData.stock_availables[0].stock_available?.id || stockData.stock_availables[0].id;
+      } else if (stockData.stock_availables.stock_available) {
+        stockAvailableId = stockData.stock_availables.stock_available.id;
+      }
+    } else if (stockData.stock_available) {
+      stockAvailableId = stockData.stock_available.id;
+    }
+    
+    if (!stockAvailableId) {
+      return res.status(404).json({
+        success: false,
+        error: 'Stock entry not found'
+      });
+    }
+
+    await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', {
+      stock_available: {
+        quantity: parseInt(quantity),
+        id_product: mapping.prestashopProductId
+      }
+    });
+
+    // Update mapping sync time
+    mapping.lastStockSync = new Date().toISOString();
+    saveProductMappings();
+
+    res.json({
+      success: true,
+      message: 'Stock synced successfully'
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.message
     });
   }
 });

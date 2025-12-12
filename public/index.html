@@ -13,7 +13,7 @@
             <h1>Allegro Importer</h1>
             
             <div class="credentials-section">
-                <h2>API Credentials</h2>
+                <h2>Allegro API Credentials</h2>
                 <div class="credentials-form">
                     <div class="form-group">
                         <label for="clientId">Client ID</label>
@@ -27,6 +27,31 @@
                     <button id="clearCredentialsBtn" class="btn btn-secondary" style="display: none;">Clear</button>
                 </div>
                 <div id="credentialsMessage" class="message" style="display: none;"></div>
+            </div>
+
+            <div class="credentials-section" style="margin-top: 30px; border-top: 1px solid #ddd; padding-top: 30px;">
+                <h2>PrestaShop Configuration</h2>
+                <div class="credentials-form">
+                    <div class="form-group">
+                        <label for="prestashopUrl">PrestaShop Base URL</label>
+                        <input type="text" id="prestashopUrl" placeholder="http://localhost/poland" value="http://localhost/poland" autocomplete="off">
+                        <small style="color: #666; font-size: 12px;">Base URL of your PrestaShop installation (without /api/)</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="prestashopApiKey">API Key</label>
+                        <input type="password" id="prestashopApiKey" placeholder="PrestaShop API Key" autocomplete="off">
+                        <small style="color: #666; font-size: 12px;">Generate from: Advanced Parameters → Web Service</small>
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="disableStockSyncToAllegro" style="width: auto;">
+                        <label for="disableStockSyncToAllegro" style="margin: 0; font-weight: normal;">Disable PrestaShop → Allegro stock updates</label>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button id="savePrestashopBtn" class="btn btn-primary">Save PrestaShop Config</button>
+                        <button id="testPrestashopBtn" class="btn btn-secondary">Test Connection</button>
+                    </div>
+                </div>
+                <div id="prestashopMessage" class="message" style="display: none;"></div>
             </div>
         </div>
     </div>
@@ -51,6 +76,10 @@
                     <div class="status-item">
                         <span class="status-label">Account</span>
                         <span id="oauthStatus" class="status-value">Not Connected</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">PrestaShop</span>
+                        <span id="prestashopStatus" class="status-value">Not Configured</span>
                     </div>
                     <button id="authorizeAccountBtn" class="btn btn-primary btn-small" style="display: none;">Authorize Account</button>
                     <button id="clearCredentialsBtnHeader" class="btn btn-secondary btn-small" style="display: none;">Disconnect</button>
@@ -136,10 +165,25 @@
                         <h2>Imported Products <span id="importedCount" class="count-badge">0</span></h2>
                         <div class="imported-section-actions">
                             <button id="clearImportedBtn" class="btn btn-secondary btn-small" disabled>Clear Imported</button>
+                            <button id="loadPrestashopCategoriesBtn" class="btn btn-primary btn-small" disabled>Load PrestaShop Categories</button>
                             <button id="exportToPrestashopBtn" class="btn btn-success btn-small" disabled>Export to PrestaShop</button>
                         </div>
                     </div>
                     <div id="importedList" class="imported-list"></div>
+                </div>
+
+                <!-- PrestaShop Categories Section -->
+                <div class="imported-section" id="prestashopCategoriesSection" style="display: none;">
+                    <div class="imported-section-header">
+                        <h2>PrestaShop Categories</h2>
+                        <div class="imported-section-actions">
+                            <label style="display: flex; align-items: center; gap: 10px; font-size: 14px;">
+                                <input type="checkbox" id="autoCreateCategories" checked>
+                                Auto-create categories if not found
+                            </label>
+                        </div>
+                    </div>
+                    <div id="prestashopCategoriesList" class="imported-list"></div>
                 </div>
             </main>
         </div>
