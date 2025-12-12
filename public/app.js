@@ -1,5 +1,6 @@
 // State management
 let currentOffers = [];
+let allLoadedOffers = []; // Store all loaded offers for filtering
 let importedOffers = [];
 let currentOffset = 0; // Kept for display purposes
 let currentLimit = 20;
@@ -8,8 +9,9 @@ let totalProductsSeen = 0; // Total products seen across all pages in current ca
 let isAuthenticated = false;
 let isOAuthConnected = false; // Track OAuth connection status
 let allCategories = [];
+let categoriesWithProducts = []; // Categories that have products
 let categoryNameCache = {}; // Cache for category names by ID
-let selectedCategoryId = null;
+let selectedCategoryId = null; // null means "All Categories"
 let currentNextPage = null; // For cursor-based pagination
 let pageHistory = []; // Track page history for going back
 let currentPhrase = ''; // Track current search phrase
@@ -61,10 +63,12 @@ function setupEventListeners() {
     if (loadOffersBtn) {
         loadOffersBtn.addEventListener('click', () => {
             const limit = parseInt(document.getElementById('limit').value);
+            currentLimit = limit;
             currentOffset = 0;
             currentPageNumber = 1;
             totalProductsSeen = 0;
-            fetchOffers(0, limit);
+            allLoadedOffers = []; // Clear previous offers
+            fetchAllOffers(); // Fetch all offers
         });
     }
     
@@ -626,8 +630,8 @@ async function handleProductCountChange() {
     const limitSelect = document.getElementById('limit');
     const limit = parseInt(limitSelect.value);
     
-    // Only fetch if we already have offers loaded (user has clicked "Load My Offers")
-    if (currentOffers.length > 0 || currentPageNumber > 1) {
+    // Only update if we already have offers loaded (user has clicked "Load My Offers")
+    if (allLoadedOffers.length > 0 || currentOffers.length > 0 || currentPageNumber > 1) {
         // Reset pagination state for new limit
         currentOffset = 0;
         currentLimit = limit;
@@ -635,15 +639,210 @@ async function handleProductCountChange() {
         currentPageNumber = 1; // Reset to first page
         totalProductsSeen = 0; // Reset total products seen
         
-        await fetchOffers(currentOffset, limit);
+        // Just update the display with new limit (no need to re-fetch)
+        displayOffersPage();
     }
 }
 
-// Fetch offers from API
+// Fetch all offers from API (loads all pages)
+async function fetchAllOffers() {
+    // Validate authentication
+    if (!checkAuthentication()) {
+        const errorEl = document.getElementById('errorMessage');
+        if (errorEl) {
+            const errorContentEl = errorEl.querySelector('.error-message-content');
+            if (errorContentEl) {
+                errorContentEl.textContent = 'Authentication required. Please test connection first.';
+            } else {
+                errorEl.innerHTML = `<div class="error-message-content">Authentication required. Please test connection first.</div><button class="error-message-close" onclick="closeErrorMessage()" title="Close">×</button>`;
+            }
+            errorEl.style.display = 'flex';
+        }
+        return;
+    }
+    
+    const loadingEl = document.getElementById('loadingIndicator');
+    const errorEl = document.getElementById('errorMessage');
+    const offersListEl = document.getElementById('offersList');
+    
+    loadingEl.style.display = 'block';
+    errorEl.style.display = 'none';
+    offersListEl.innerHTML = '<div style="text-align: center; padding: 40px; color: #1a73e8;">Loading all offers...</div>';
+    
+    try {
+        let allOffers = [];
+        let offset = 0;
+        const limit = 1000; // Use maximum limit to fetch more at once
+        let hasMore = true;
+        let totalCountFromAPI = null;
+        
+        // Fetch all pages
+        while (hasMore) {
+            const params = new URLSearchParams();
+            params.append('offset', offset);
+            params.append('limit', limit);
+            
+            const response = await fetch(`${API_BASE}/api/offers?${params}`);
+            
+            // Check for 401 status before parsing JSON
+            if (!response.ok && response.status === 401) {
+                throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+            }
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                const offers = result.data.offers || [];
+                allOffers = allOffers.concat(offers);
+                
+                // Get total count from first response
+                if (totalCountFromAPI === null) {
+                    totalCountFromAPI = result.data.totalCount || result.data.count || 0;
+                }
+                
+                // Check if there are more offers to fetch
+                if (offers.length < limit || (totalCountFromAPI > 0 && allOffers.length >= totalCountFromAPI)) {
+                    hasMore = false;
+                } else {
+                    offset += limit;
+                }
+            } else {
+                // Check if this is the OAuth requirement error
+                if (result.requiresUserOAuth) {
+                    // Show user-friendly message with action button
+                    const errorContentEl = errorEl.querySelector('.error-message-content');
+                    let errorMsg = result.error || 'User OAuth authentication required.';
+                    if (result.instructions && Array.isArray(result.instructions) && result.instructions.length > 0) {
+                        errorMsg += ' ' + result.instructions[0];
+                    }
+                    
+                    if (errorContentEl) {
+                        errorContentEl.innerHTML = `
+                            <strong>Authorization Required</strong><br><br>
+                            ${escapeHtml(errorMsg)}<br><br>
+                            <button id="authorizeFromErrorBtn" class="btn btn-primary" style="margin-top: 10px;">Authorize Account</button>
+                        `;
+                        
+                        // Add event listener to authorize button
+                        setTimeout(() => {
+                            const authorizeFromErrorBtn = document.getElementById('authorizeFromErrorBtn');
+                            if (authorizeFromErrorBtn) {
+                                authorizeFromErrorBtn.addEventListener('click', authorizeAccount);
+                            }
+                        }, 100);
+                    } else {
+                        errorEl.innerHTML = `
+                            <div class="error-message-content">
+                                <strong>Authorization Required</strong><br><br>
+                                ${escapeHtml(errorMsg)}<br><br>
+                                <button id="authorizeFromErrorBtn" class="btn btn-primary" style="margin-top: 10px;">Authorize Account</button>
+                            </div>
+                            <button class="error-message-close" onclick="closeErrorMessage()" title="Close">×</button>
+                        `;
+                        setTimeout(() => {
+                            const authorizeFromErrorBtn = document.getElementById('authorizeFromErrorBtn');
+                            if (authorizeFromErrorBtn) {
+                                authorizeFromErrorBtn.addEventListener('click', authorizeAccount);
+                            }
+                        }, 100);
+                    }
+                    errorEl.style.display = 'flex';
+                    return; // Don't throw error, just show the message
+                }
+                
+                // Show the actual error message from the API
+                const errorMsg = result.error || result.error?.message || 'Failed to fetch offers';
+                throw new Error(errorMsg);
+            }
+        }
+        
+        // Store all loaded offers
+        allLoadedOffers = allOffers;
+        totalCount = totalCountFromAPI || allOffers.length;
+        
+        // Log first offer to debug structure
+        if (allOffers.length > 0) {
+            console.log(`Loaded ${allOffers.length} total offers`);
+            console.log('First offer from API:', JSON.stringify(allOffers[0], null, 2));
+            console.log('Offer category structure:', allOffers[0].category);
+        }
+        
+        // Apply category filter if selected
+        if (selectedCategoryId !== null) {
+            currentOffers = allOffers.filter(offer => {
+                let offerCategoryId = null;
+                if (offer.category) {
+                    if (typeof offer.category === 'string') {
+                        offerCategoryId = offer.category;
+                    } else if (offer.category.id) {
+                        offerCategoryId = offer.category.id;
+                    }
+                }
+                return offerCategoryId && String(offerCategoryId) === String(selectedCategoryId);
+            });
+        } else {
+            currentOffers = allOffers;
+        }
+        
+        // Reset pagination
+        currentOffset = 0;
+        currentPageNumber = 1;
+        pageHistory = [];
+        totalProductsSeen = 0;
+        
+        // Display first page
+        displayOffersPage();
+        updateImportButtons();
+        
+        // Update categories to show only those with products
+        if (allCategories.length > 0) {
+            displayCategories(allCategories);
+        }
+    } catch (error) {
+        // Show detailed error message
+        let errorMsg = error.message || 'Request failed';
+        
+        // If it's a network error, provide more context
+        if (error.message === 'Failed to fetch' || error.message === 'NetworkError') {
+            errorMsg = 'Network error: Could not connect to server. Please check your connection.';
+        }
+        
+        // Format error message for display (preserve line breaks and make links clickable)
+        let formattedMsg = errorMsg.split('\n').join('<br>');
+        // Make URLs clickable
+        formattedMsg = formattedMsg.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+        
+        // Update error message content in the content div
+        const errorContentEl = errorEl.querySelector('.error-message-content');
+        if (errorContentEl) {
+            errorContentEl.innerHTML = `<strong>Failed to fetch offers:</strong><br><br>${formattedMsg}`;
+        } else {
+            // Fallback if structure is not updated
+            errorEl.innerHTML = `<div class="error-message-content"><strong>Failed to fetch offers:</strong><br><br>${formattedMsg}</div><button class="error-message-close" onclick="closeErrorMessage()" title="Close">×</button>`;
+        }
+        errorEl.style.display = 'flex';
+        
+        // Show toast notification as well
+        showToast('Unable to load your offers. Please check the error message below.', 'error', 8000);
+    } finally {
+        loadingEl.style.display = 'none';
+    }
+}
+
+// Fetch offers from API (for pagination - single page)
 // Note: Uses /sale/offers endpoint which returns only the authenticated user's own offers
 // This endpoint uses offset-based pagination and doesn't require phrase or category
 async function fetchOffers(offset = 0, limit = 20) {
-    // Validate authentication
+    // If we have all offers loaded, just paginate through them
+    if (allLoadedOffers.length > 0) {
+        currentOffset = offset;
+        currentPageNumber = Math.floor(offset / limit) + 1;
+        displayOffersPage();
+        return;
+    }
+    
+    // Otherwise, fetch from API (shouldn't happen if Load My Offers was clicked)
+    // This is kept for backward compatibility
     if (!checkAuthentication()) {
         const errorEl = document.getElementById('errorMessage');
         if (errorEl) {
@@ -671,7 +870,7 @@ async function fetchOffers(offset = 0, limit = 20) {
         
         // /sale/offers uses offset-based pagination
         params.append('offset', offset);
-            params.append('limit', limit);
+        params.append('limit', limit);
         
         const response = await fetch(`${API_BASE}/api/offers?${params}`);
         
@@ -683,9 +882,9 @@ async function fetchOffers(offset = 0, limit = 20) {
         const result = await response.json();
         
         if (result.success) {
-            currentOffers = result.data.offers || [];
+            const pageOffers = result.data.offers || [];
             // Use totalCount from API if available, otherwise use count or current offers length
-            totalCount = result.data.totalCount || result.data.count || currentOffers.length;
+            totalCount = result.data.totalCount || result.data.count || 0;
             
             // Update current offset for pagination
             currentOffset = offset;
@@ -693,19 +892,42 @@ async function fetchOffers(offset = 0, limit = 20) {
             
             // Calculate total products seen (use totalCount if available, otherwise calculate)
             if (result.data.totalCount) {
-                totalProductsSeen = Math.min(offset + currentOffers.length, result.data.totalCount);
+                totalProductsSeen = Math.min(offset + pageOffers.length, result.data.totalCount);
             } else {
-                totalProductsSeen = offset + currentOffers.length;
+                totalProductsSeen = offset + pageOffers.length;
             }
             
-            // Log first offer to debug structure
-            if (currentOffers.length > 0) {
-                console.log('First offer from API:', JSON.stringify(currentOffers[0], null, 2));
-                console.log('Offer category structure:', currentOffers[0].category);
+            // If this is the first page, store all offers
+            if (offset === 0) {
+                allLoadedOffers = pageOffers;
+            } else {
+                // For subsequent pages, append to allLoadedOffers if not already there
+                pageOffers.forEach(offer => {
+                    if (!allLoadedOffers.find(o => o.id === offer.id)) {
+                        allLoadedOffers.push(offer);
+                    }
+                });
             }
             
-            displayOffers(currentOffers);
-            updatePagination();
+            // Apply category filter
+            if (selectedCategoryId !== null) {
+                currentOffers = allLoadedOffers.filter(offer => {
+                    let offerCategoryId = null;
+                    if (offer.category) {
+                        if (typeof offer.category === 'string') {
+                            offerCategoryId = offer.category;
+                        } else if (offer.category.id) {
+                            offerCategoryId = offer.category.id;
+                        }
+                    }
+                    return offerCategoryId && String(offerCategoryId) === String(selectedCategoryId);
+                });
+            } else {
+                currentOffers = allLoadedOffers;
+            }
+            
+            // Display current page
+            displayOffersPage();
             updateImportButtons();
         } else {
             // Check if this is the OAuth requirement error
@@ -786,16 +1008,15 @@ async function fetchOffers(offset = 0, limit = 20) {
     }
 }
 
-// Display offers
+// Display offers (for backward compatibility)
 async function displayOffers(offers) {
-    const offersListEl = document.getElementById('offersList');
-    const resultsCountEl = document.getElementById('resultsCount');
+    // Store all offers
+    allLoadedOffers = offers;
     
-    // Filter offers by selected category if a category is selected
+    // Apply category filter if selected
     let filteredOffers = offers;
-    if (selectedCategoryId) {
+    if (selectedCategoryId !== null) {
         filteredOffers = offers.filter(offer => {
-            // Check if offer's category matches selected category
             let offerCategoryId = null;
             if (offer.category) {
                 if (typeof offer.category === 'string') {
@@ -804,30 +1025,53 @@ async function displayOffers(offers) {
                     offerCategoryId = offer.category.id;
                 }
             }
-            
-            // Compare category IDs (handle both string and number comparisons)
-            if (offerCategoryId) {
-                return String(offerCategoryId) === String(selectedCategoryId) || 
-                       offerCategoryId === selectedCategoryId;
-            }
-            return false;
+            return offerCategoryId && String(offerCategoryId) === String(selectedCategoryId);
         });
     }
     
-    // Update results count with filtered count
-    resultsCountEl.textContent = filteredOffers.length;
+    currentOffers = filteredOffers;
+    totalCount = filteredOffers.length;
     
-    if (filteredOffers.length === 0) {
-        if (selectedCategoryId) {
+    // Reset pagination
+    currentOffset = 0;
+    currentPageNumber = 1;
+    pageHistory = [];
+    totalProductsSeen = 0;
+    
+    // Display first page
+    displayOffersPage();
+    
+    // Update categories to show only those with products
+    if (allCategories.length > 0) {
+        displayCategories(allCategories);
+    }
+}
+
+// Display current page of offers
+async function displayOffersPage() {
+    const offersListEl = document.getElementById('offersList');
+    const resultsCountEl = document.getElementById('resultsCount');
+    
+    // Get offers for current page
+    const startIndex = currentOffset;
+    const endIndex = Math.min(startIndex + currentLimit, currentOffers.length);
+    const pageOffers = currentOffers.slice(startIndex, endIndex);
+    
+    // Update results count with total filtered count
+    resultsCountEl.textContent = currentOffers.length;
+    
+    if (pageOffers.length === 0) {
+        if (selectedCategoryId !== null) {
             offersListEl.innerHTML = '<p style="text-align: center; padding: 40px; color: #1a73e8;">No product offers found in this category. Try selecting a different category or click "Load My Offers" to load products.</p>';
         } else {
             offersListEl.innerHTML = '<p style="text-align: center; padding: 40px; color: #1a73e8;">No product offers found. Click "Load My Offers" to load products.</p>';
         }
+        updatePagination();
         return;
     }
     
     // Render cards first
-    offersListEl.innerHTML = filteredOffers.map(offer => createOfferCard(offer)).join('');
+    offersListEl.innerHTML = pageOffers.map(offer => createOfferCard(offer)).join('');
     
     // Add checkbox listeners
     document.querySelectorAll('.offer-checkbox').forEach(checkbox => {
@@ -836,7 +1080,7 @@ async function displayOffers(offers) {
     
     // Fetch full product details for products without images
     // This is done asynchronously to not block the UI
-    const productsWithoutImages = filteredOffers.filter(p => {
+    const productsWithoutImages = pageOffers.filter(p => {
         // Check if product has no image in primaryImage or images array
         const hasPrimaryImage = p.primaryImage && p.primaryImage.url;
         const hasImages = p.images && Array.isArray(p.images) && p.images.length > 0;
@@ -848,6 +1092,8 @@ async function displayOffers(offers) {
         const productsToFetch = productsWithoutImages.slice(0, 10);
         await Promise.all(productsToFetch.map(product => fetchProductDetails(product.id)));
     }
+    
+    updatePagination();
 }
 
 // Fetch full product details including images
@@ -1261,10 +1507,10 @@ function updatePagination() {
     
     paginationEl.style.display = 'flex';
     
-    // Calculate max page number
+    // Calculate max page number based on filtered offers
     let maxPage = 1;
-    if (totalCount > 0 && currentLimit > 0) {
-        maxPage = Math.ceil(totalCount / currentLimit);
+    if (currentOffers.length > 0 && currentLimit > 0) {
+        maxPage = Math.ceil(currentOffers.length / currentLimit);
     }
     
     // Update page jump input
@@ -1274,37 +1520,34 @@ function updatePagination() {
         pageJumpInput.min = 1;
     }
     
-    // For offset-based pagination, check if we have more results
-    // If totalCount is available, use it to determine if there are more pages
-    // Otherwise, if we got fewer results than the limit, we're on the last page
-    const hasMorePages = totalCount > 0 
-        ? (currentOffset + currentOffers.length) < totalCount
-        : currentOffers.length >= currentLimit;
+    // Calculate current page offers count
+    const startIndex = currentOffset;
+    const endIndex = Math.min(startIndex + currentLimit, currentOffers.length);
+    const pageOffersCount = endIndex - startIndex;
+    
+    // Check if there are more pages
+    const hasMorePages = currentOffset + currentLimit < currentOffers.length;
     
     let pageInfoText = `Page ${currentPageNumber}`;
     if (maxPage > 1) {
         pageInfoText += ` of ${maxPage}`;
     }
     
-    if (currentOffers.length > 0) {
-        pageInfoText += ` (${currentOffers.length} offer${currentOffers.length !== 1 ? 's' : ''} on this page)`;
+    if (pageOffersCount > 0) {
+        pageInfoText += ` (${pageOffersCount} offer${pageOffersCount !== 1 ? 's' : ''} on this page)`;
     }
     
     pageInfoEl.textContent = pageInfoText;
     
     // Show total count info
     if (totalCountInfoEl) {
-        if (hasMorePages) {
-            totalCountInfoEl.textContent = `Showing ${totalProductsSeen}+ offers`;
-        } else {
-            totalCountInfoEl.textContent = `Total: ${totalProductsSeen} offer${totalProductsSeen !== 1 ? 's' : ''}`;
-        }
+        totalCountInfoEl.textContent = `Total: ${currentOffers.length} offer${currentOffers.length !== 1 ? 's' : ''}`;
     }
     
-    // Prev button: enabled if we have history to go back to (not on first page)
+    // Prev button: enabled if not on first page
     prevBtn.disabled = currentPageNumber === 1;
     
-    // Next button: enabled if we have more results
+    // Next button: enabled if there are more pages
     nextBtn.disabled = !hasMorePages;
 }
 
@@ -1322,7 +1565,8 @@ async function changePage(direction) {
         currentPageNumber++;
         currentOffset += currentLimit;
         
-        await fetchOffers(currentOffset, currentLimit);
+        // Display the page (no need to fetch if we have all offers loaded)
+        displayOffersPage();
     } else if (direction === -1) {
         // Previous page: go back in history
         if (pageHistory.length === 0 || currentPageNumber === 1) {
@@ -1331,14 +1575,14 @@ async function changePage(direction) {
             currentOffset = 0;
             currentPageNumber = 1;
             totalProductsSeen = 0;
-            await fetchOffers(0, currentLimit);
+            displayOffersPage();
         } else {
             // Go back to previous page from history
             const previousPage = pageHistory.pop();
             currentOffset = previousPage.offset;
             currentPageNumber = previousPage.pageNumber;
             totalProductsSeen = currentOffset;
-            await fetchOffers(currentOffset, currentLimit);
+            displayOffersPage();
         }
     }
 }
@@ -1354,10 +1598,10 @@ async function jumpToPage() {
         return;
     }
     
-    // Calculate max page
+    // Calculate max page based on filtered offers
     let maxPage = 1;
-    if (totalCount > 0 && currentLimit > 0) {
-        maxPage = Math.ceil(totalCount / currentLimit);
+    if (currentOffers.length > 0 && currentLimit > 0) {
+        maxPage = Math.ceil(currentOffers.length / currentLimit);
     }
     
     if (targetPage > maxPage) {
@@ -1375,8 +1619,8 @@ async function jumpToPage() {
     currentOffset = targetOffset;
     totalProductsSeen = targetOffset;
     
-    // Fetch offers for target page
-    await fetchOffers(targetOffset, currentLimit);
+    // Display the page (no need to fetch if we have all offers loaded)
+    displayOffersPage();
 }
 
 // Update import buttons state
@@ -1724,21 +1968,27 @@ function clearSearch() {
     document.getElementById('pagination').style.display = 'none';
     document.getElementById('errorMessage').style.display = 'none';
     
-    // Clear visual selection
+    // Clear visual selection - select "All Categories"
     document.querySelectorAll('.category-item').forEach(item => {
-        item.classList.remove('selected');
+        if (item.dataset.categoryId === 'all') {
+            item.classList.add('selected');
+        } else {
+            item.classList.remove('selected');
+        }
     });
     
-    // Disable product count when no category selected
+    // Enable product count (can still load offers without category)
     const limitSelect = document.getElementById('limit');
     if (limitSelect) {
-        limitSelect.disabled = true;
+        limitSelect.disabled = false;
     }
     
+    // Clear all loaded offers
+    allLoadedOffers = [];
     currentOffers = [];
     currentOffset = 0;
     pageHistory = [];
-    selectedCategoryId = null;
+    selectedCategoryId = null; // null means "All Categories"
     currentPageNumber = 1; // Reset to first page
     totalProductsSeen = 0;
     updateImportButtons();
@@ -1832,13 +2082,54 @@ async function fetchCategoryName(categoryId) {
 async function displayCategories(categories) {
     const categoriesListEl = document.getElementById('categoriesList');
     
-    if (categories.length === 0) {
+    // Filter categories to only show those with products if we have loaded offers
+    let categoriesToDisplay = categories;
+    if (allLoadedOffers.length > 0) {
+        // Extract unique category IDs from loaded offers
+        const categoryIdsInOffers = new Set();
+        allLoadedOffers.forEach(offer => {
+            let offerCategoryId = null;
+            if (offer.category) {
+                if (typeof offer.category === 'string') {
+                    offerCategoryId = offer.category;
+                } else if (offer.category.id) {
+                    offerCategoryId = offer.category.id;
+                }
+            }
+            if (offerCategoryId) {
+                categoryIdsInOffers.add(String(offerCategoryId));
+            }
+        });
+        
+        // Filter categories to only show those with products
+        categoriesToDisplay = categories.filter(category => {
+            return categoryIdsInOffers.has(String(category.id));
+        });
+        
+        categoriesWithProducts = categoriesToDisplay;
+    } else {
+        // If no offers loaded yet, show all categories
+        categoriesWithProducts = categories;
+    }
+    
+    if (categoriesToDisplay.length === 0 && categories.length > 0) {
+        categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories with products found. Load offers first.</p>';
+        return;
+    } else if (categories.length === 0) {
         categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories found.</p>';
         return;
     }
     
+    // Render "All Categories" option first
+    const allCategoriesSelected = selectedCategoryId === null;
+    let html = `
+        <div class="category-item ${allCategoriesSelected ? 'selected' : ''}" data-category-id="all">
+            <span class="category-item-name">All Categories</span>
+        </div>
+    `;
+    
     // Render categories
-    categoriesListEl.innerHTML = categories.map(category => {
+    html += categoriesToDisplay.map(category => {
         const isSelected = selectedCategoryId === category.id;
         return `
             <div class="category-item ${isSelected ? 'selected' : ''}" data-category-id="${category.id}">
@@ -1847,11 +2138,17 @@ async function displayCategories(categories) {
         `;
     }).join('');
     
+    categoriesListEl.innerHTML = html;
+    
     // Add click listeners
     document.querySelectorAll('.category-item').forEach(item => {
         item.addEventListener('click', () => {
             const categoryId = item.dataset.categoryId;
-            selectCategory(categoryId);
+            if (categoryId === 'all') {
+                selectCategory(null); // null means "All Categories"
+            } else {
+                selectCategory(categoryId);
+            }
         });
     });
 }
@@ -1862,7 +2159,10 @@ function selectCategory(categoryId) {
     
     // Update visual selection
     document.querySelectorAll('.category-item').forEach(item => {
-        if (item.dataset.categoryId === categoryId) {
+        const itemCategoryId = item.dataset.categoryId;
+        if (categoryId === null && itemCategoryId === 'all') {
+            item.classList.add('selected');
+        } else if (categoryId !== null && itemCategoryId === categoryId) {
             item.classList.add('selected');
         } else {
             item.classList.remove('selected');
@@ -1872,7 +2172,7 @@ function selectCategory(categoryId) {
     // Update select dropdown
     const selectedCategorySelect = document.getElementById('selectedCategory');
     if (selectedCategorySelect) {
-        selectedCategorySelect.value = categoryId;
+        selectedCategorySelect.value = categoryId || '';
     }
     
     // Enable product count when category is selected
@@ -1882,7 +2182,37 @@ function selectCategory(categoryId) {
     }
     
     // Filter and re-display existing offers if any are loaded
-    if (currentOffers.length > 0) {
+    if (allLoadedOffers.length > 0) {
+        // Filter offers based on selected category
+        let filteredOffers = allLoadedOffers;
+        if (categoryId !== null) {
+            filteredOffers = allLoadedOffers.filter(offer => {
+                let offerCategoryId = null;
+                if (offer.category) {
+                    if (typeof offer.category === 'string') {
+                        offerCategoryId = offer.category;
+                    } else if (offer.category.id) {
+                        offerCategoryId = offer.category.id;
+                    }
+                }
+                return offerCategoryId && String(offerCategoryId) === String(categoryId);
+            });
+        }
+        
+        // Update current offers and paginate
+        currentOffers = filteredOffers;
+        totalCount = filteredOffers.length;
+        
+        // Reset pagination
+        currentOffset = 0;
+        currentPageNumber = 1;
+        pageHistory = [];
+        totalProductsSeen = 0;
+        
+        // Display first page
+        displayOffersPage();
+    } else if (currentOffers.length > 0) {
+        // Fallback: filter current offers if allLoadedOffers is empty
         displayOffers(currentOffers);
     }
 }
@@ -1933,14 +2263,23 @@ function updateCategorySelect() {
             limitSelect.disabled = !categoryId;
         }
         
-        // If no category selected, clear selection and re-display all products
+        // If no category selected (All Categories), clear selection and re-display all products
         if (!categoryId) {
+            selectedCategoryId = null;
             document.querySelectorAll('.category-item').forEach(item => {
-                item.classList.remove('selected');
+                if (item.dataset.categoryId === 'all') {
+                    item.classList.add('selected');
+                } else {
+                    item.classList.remove('selected');
+                }
             });
             // Re-display existing offers without category filter
-            if (currentOffers.length > 0) {
-                displayOffers(currentOffers);
+            if (allLoadedOffers.length > 0) {
+                currentOffers = allLoadedOffers;
+                currentOffset = 0;
+                currentPageNumber = 1;
+                pageHistory = [];
+                displayOffersPage();
             } else {
                 document.getElementById('offersList').innerHTML = '';
                 document.getElementById('resultsCount').textContent = '0';
@@ -1950,37 +2289,73 @@ function updateCategorySelect() {
         }
         
         // Filter and re-display existing offers if any are loaded
-        if (currentOffers.length > 0) {
-            displayOffers(currentOffers);
+        if (allLoadedOffers.length > 0) {
+            // Filter offers based on selected category
+            currentOffers = allLoadedOffers.filter(offer => {
+                let offerCategoryId = null;
+                if (offer.category) {
+                    if (typeof offer.category === 'string') {
+                        offerCategoryId = offer.category;
+                    } else if (offer.category.id) {
+                        offerCategoryId = offer.category.id;
+                    }
+                }
+                return offerCategoryId && String(offerCategoryId) === String(categoryId);
+            });
+            
+            // Reset pagination
+            currentOffset = 0;
+            currentPageNumber = 1;
+            pageHistory = [];
+            displayOffersPage();
         }
     });
 }
 
 // Clear category selection
 function clearCategorySelection() {
-    selectedCategoryId = null;
-    document.getElementById('selectedCategory').value = '';
+    selectedCategoryId = null; // null means "All Categories"
     
-    // Clear visual selection
-    document.querySelectorAll('.category-item').forEach(item => {
-        item.classList.remove('selected');
-    });
-    
-    // Disable product count when no category selected
-    const limitSelect = document.getElementById('limit');
-    if (limitSelect) {
-        limitSelect.disabled = true;
+    // Update select dropdown
+    const selectedCategorySelect = document.getElementById('selectedCategory');
+    if (selectedCategorySelect) {
+        selectedCategorySelect.value = '';
     }
     
-    // Clear product results
-    document.getElementById('offersList').innerHTML = '';
-    document.getElementById('resultsCount').textContent = '0';
-    document.getElementById('pagination').style.display = 'none';
-    currentOffers = [];
-    currentOffset = 0;
-    pageHistory = [];
-    currentPageNumber = 1; // Reset to first page
-    totalProductsSeen = 0;
+    // Update visual selection - select "All Categories"
+    document.querySelectorAll('.category-item').forEach(item => {
+        if (item.dataset.categoryId === 'all') {
+            item.classList.add('selected');
+        } else {
+            item.classList.remove('selected');
+        }
+    });
+    
+    // Enable product count (can still load offers without category)
+    const limitSelect = document.getElementById('limit');
+    if (limitSelect) {
+        limitSelect.disabled = false;
+    }
+    
+    // If we have loaded offers, show all of them
+    if (allLoadedOffers.length > 0) {
+        currentOffers = allLoadedOffers;
+        currentOffset = 0;
+        currentPageNumber = 1;
+        pageHistory = [];
+        totalProductsSeen = 0;
+        displayOffersPage();
+    } else {
+        // Clear product results if no offers loaded
+        document.getElementById('offersList').innerHTML = '';
+        document.getElementById('resultsCount').textContent = '0';
+        document.getElementById('pagination').style.display = 'none';
+        currentOffers = [];
+        currentOffset = 0;
+        pageHistory = [];
+        currentPageNumber = 1; // Reset to first page
+        totalProductsSeen = 0;
+    }
     updateImportButtons();
 }
 
