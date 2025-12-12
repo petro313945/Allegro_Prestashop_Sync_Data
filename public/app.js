@@ -1183,11 +1183,26 @@ function createOfferCard(product) {
     // Category ID and Name
     // Check multiple possible category structures
     let categoryId = 'N/A';
+    let categoryIdFound = false;
+    
     if (product.category) {
         if (typeof product.category === 'string') {
             categoryId = product.category;
+            categoryIdFound = true;
         } else if (product.category.id) {
             categoryId = product.category.id;
+            categoryIdFound = true;
+        }
+    }
+    
+    // Also check product.category if category is not at root level
+    if (!categoryIdFound && product.product?.category) {
+        if (typeof product.product.category === 'string') {
+            categoryId = product.product.category;
+            categoryIdFound = true;
+        } else if (product.product.category.id) {
+            categoryId = product.product.category.id;
+            categoryIdFound = true;
         }
     }
     
@@ -2082,29 +2097,81 @@ async function fetchCategoryName(categoryId) {
 async function displayCategories(categories) {
     const categoriesListEl = document.getElementById('categoriesList');
     
-    // Filter categories to only show those with products if we have loaded offers
-    let categoriesToDisplay = categories;
+    // Extract unique category IDs and names from loaded offers
+    const categoriesFromOffers = new Map(); // Map<categoryId, {id, name, count}>
+    
     if (allLoadedOffers.length > 0) {
-        // Extract unique category IDs from loaded offers
-        const categoryIdsInOffers = new Set();
         allLoadedOffers.forEach(offer => {
             let offerCategoryId = null;
+            let offerCategoryName = null;
+            
+            // Try multiple ways to extract category
             if (offer.category) {
                 if (typeof offer.category === 'string') {
                     offerCategoryId = offer.category;
                 } else if (offer.category.id) {
                     offerCategoryId = offer.category.id;
+                    offerCategoryName = offer.category.name || null;
                 }
             }
+            
+            // Also check other possible locations
+            if (!offerCategoryId && offer.product?.category) {
+                if (typeof offer.product.category === 'string') {
+                    offerCategoryId = offer.product.category;
+                } else if (offer.product.category.id) {
+                    offerCategoryId = offer.product.category.id;
+                    offerCategoryName = offer.product.category.name || null;
+                }
+            }
+            
             if (offerCategoryId) {
-                categoryIdsInOffers.add(String(offerCategoryId));
+                const catId = String(offerCategoryId);
+                if (!categoriesFromOffers.has(catId)) {
+                    categoriesFromOffers.set(catId, {
+                        id: catId,
+                        name: offerCategoryName || categoryNameCache[catId] || `Category ${catId}`,
+                        count: 0
+                    });
+                }
+                categoriesFromOffers.get(catId).count++;
             }
         });
         
-        // Filter categories to only show those with products
-        categoriesToDisplay = categories.filter(category => {
-            return categoryIdsInOffers.has(String(category.id));
+        console.log(`Found ${categoriesFromOffers.size} unique categories in offers`);
+        console.log('Sample offer structure:', allLoadedOffers[0] ? {
+            hasCategory: !!allLoadedOffers[0].category,
+            categoryType: typeof allLoadedOffers[0].category,
+            categoryValue: allLoadedOffers[0].category
+        } : 'No offers');
+    }
+    
+    // Filter categories to only show those with products if we have loaded offers
+    let categoriesToDisplay = categories;
+    if (categoriesFromOffers.size > 0) {
+        // First, try to match with API categories
+        const matchedCategories = categories.filter(category => {
+            return categoriesFromOffers.has(String(category.id));
         });
+        
+        // If we found matches, use them (they have proper names from API)
+        if (matchedCategories.length > 0) {
+            categoriesToDisplay = matchedCategories;
+            // Update category names from offers if available
+            matchedCategories.forEach(cat => {
+                const offerCat = categoriesFromOffers.get(String(cat.id));
+                if (offerCat && offerCat.name && offerCat.name !== `Category ${cat.id}`) {
+                    cat.name = offerCat.name;
+                }
+            });
+        } else {
+            // No matches with API categories, create categories from offers
+            categoriesToDisplay = Array.from(categoriesFromOffers.values()).map(cat => ({
+                id: cat.id,
+                name: cat.name
+            }));
+            console.log('Created categories from offers:', categoriesToDisplay.length);
+        }
         
         categoriesWithProducts = categoriesToDisplay;
     } else {
@@ -2112,11 +2179,15 @@ async function displayCategories(categories) {
         categoriesWithProducts = categories;
     }
     
-    if (categoriesToDisplay.length === 0 && categories.length > 0) {
+    if (categoriesToDisplay.length === 0 && categories.length > 0 && allLoadedOffers.length === 0) {
         categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories with products found. Load offers first.</p>';
         return;
-    } else if (categories.length === 0) {
+    } else if (categoriesToDisplay.length === 0 && categories.length === 0) {
         categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories found.</p>';
+        return;
+    } else if (categoriesToDisplay.length === 0 && allLoadedOffers.length > 0) {
+        // Offers loaded but no categories found - this shouldn't happen, but show a message
+        categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories found in offers. Offers may not have category information.</p>';
         return;
     }
     
