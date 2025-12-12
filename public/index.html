@@ -44,7 +44,7 @@
             <div class="config-panel">
                 <div class="config-section">
                     <div class="config-header">
-                        <h2>🔵 Allegro API Configuration</h2>
+                        <h2>Allegro API Configuration</h2>
                         <span id="allegroConfigStatus" class="config-status">Not Configured</span>
                     </div>
                     <div class="config-content">
@@ -68,7 +68,7 @@
 
                 <div class="config-section">
                     <div class="config-header">
-                        <h2>🛒 PrestaShop Configuration</h2>
+                        <h2>PrestaShop Configuration</h2>
                         <span id="prestashopConfigStatus" class="config-status">Not Configured</span>
                     </div>
                     <div class="config-content">
@@ -76,19 +76,17 @@
                             <div class="form-group">
                                 <label for="prestashopUrl">Base URL</label>
                                 <input type="text" id="prestashopUrl" placeholder="http://localhost/poland" value="http://localhost/poland" autocomplete="off">
-                                <small>Example: http://localhost/poland</small>
                             </div>
                             <div class="form-group">
                                 <label for="prestashopApiKey">API Key</label>
                                 <input type="password" id="prestashopApiKey" placeholder="Enter PrestaShop API Key" autocomplete="off">
-                                <small>From: Advanced Parameters → Web Service</small>
                             </div>
                         </div>
-                        <div class="form-row">
-                            <div class="form-group" style="flex: 1;">
-                                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <div class="form-row" style="margin-top: -5px; margin-bottom: -5px;">
+                            <div class="form-group" style="flex: 1; margin: 0;">
+                                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin: 0;">
                                     <input type="checkbox" id="disableStockSyncToAllegro" style="width: auto;">
-                                    <span>Disable PrestaShop → Allegro stock updates</span>
+                                    <span style="white-space: nowrap;">Disable PrestaShop → Allegro stock updates</span>
                                 </label>
                             </div>
                         </div>
