@@ -60,15 +60,12 @@
                 <div class="config-section">
                     <div class="config-header">
                         <h2>PrestaShop Configuration</h2>
-                        <span id="prestashopConfigStatus" class="config-status">Not Configured</span>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span id="prestashopConfigStatus" class="config-status">Not Configured</span>
+                            <span id="prestashopSavedConfigInfo" class="config-status success" style="display: none;">Saved</span>
+                        </div>
                     </div>
                     <div class="config-content">
-                        <div id="prestashopSavedConfigInfo" class="saved-config-info" style="display: none;">
-                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding: 10px; background: #e8f5e9; border-radius: 6px; border-left: 3px solid #2e7d32;">
-                                <span style="color: #2e7d32; font-weight: 500;">✓ Saved Configuration:</span>
-                                <span id="prestashopSavedUrl" style="color: #555; font-size: 0.9em;"></span>
-                            </div>
-                        </div>
                         <div class="form-row">
                             <div class="form-group">
                                 <label for="prestashopUrl">Base URL</label>

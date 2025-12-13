@@ -396,6 +396,9 @@ async function clearCredentials() {
     isOAuthConnected = false;
     updateUIState(false);
     
+    // Update config status indicators to show "Not Configured"
+    updateConfigStatuses();
+    
     // Hide disconnect button in Allegro API Configuration section and authorize button in header
     const clearBtn = document.getElementById('clearCredentialsBtn');
     const authorizeBtn = document.getElementById('authorizeAccountBtn');
@@ -2129,10 +2132,8 @@ function loadPrestashopConfig() {
 // Update saved configuration display
 function updatePrestashopSavedConfigDisplay(url) {
     const savedConfigInfo = document.getElementById('prestashopSavedConfigInfo');
-    const savedUrlEl = document.getElementById('prestashopSavedUrl');
-    if (savedConfigInfo && savedUrlEl) {
-        savedUrlEl.textContent = url || 'Not specified';
-        savedConfigInfo.style.display = 'block';
+    if (savedConfigInfo) {
+        savedConfigInfo.style.display = 'inline-block';
     }
 }
 
