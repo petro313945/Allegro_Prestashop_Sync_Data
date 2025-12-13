@@ -71,35 +71,84 @@ function updateConfigStatuses() {
 
 // Update button states based on authentication/configuration status
 function updateButtonStates() {
-    // Update Allegro API Configuration button
+    // Update Allegro API Configuration button and inputs
     const allegroConnectBtn = document.getElementById('saveCredentialsBtn');
+    const clientIdInput = document.getElementById('clientId');
+    const clientSecretInput = document.getElementById('clientSecret');
+    
     if (allegroConnectBtn) {
         if (isAuthenticated) {
             // Connected state: grey, disabled, shows "Connected"
             allegroConnectBtn.textContent = 'Connected';
             allegroConnectBtn.className = 'btn btn-connected';
             allegroConnectBtn.disabled = true;
+            
+            // Make inputs readonly
+            if (clientIdInput) {
+                clientIdInput.readOnly = true;
+            }
+            if (clientSecretInput) {
+                clientSecretInput.readOnly = true;
+            }
         } else {
             // Not connected: blue, enabled, shows "Connect"
             allegroConnectBtn.textContent = 'Connect';
             allegroConnectBtn.className = 'btn btn-primary';
             allegroConnectBtn.disabled = false;
+            
+            // Make inputs editable
+            if (clientIdInput) {
+                clientIdInput.readOnly = false;
+            }
+            if (clientSecretInput) {
+                clientSecretInput.readOnly = false;
+            }
         }
     }
     
-    // Update PrestaShop Configuration button
+    // Update PrestaShop Configuration button and inputs
     const prestashopConnectBtn = document.getElementById('testPrestashopBtn');
+    const prestashopDisconnectBtn = document.getElementById('clearPrestashopBtn');
+    const prestashopUrlInput = document.getElementById('prestashopUrl');
+    const prestashopApiKeyInput = document.getElementById('prestashopApiKey');
+    
     if (prestashopConnectBtn) {
         if (prestashopConfigured && prestashopAuthorized) {
             // Connected state: grey, disabled, shows "Connected"
             prestashopConnectBtn.textContent = 'Connected';
             prestashopConnectBtn.className = 'btn btn-connected';
             prestashopConnectBtn.disabled = true;
+            
+            // Show disconnect button
+            if (prestashopDisconnectBtn) {
+                prestashopDisconnectBtn.style.display = 'block';
+            }
+            
+            // Make inputs readonly
+            if (prestashopUrlInput) {
+                prestashopUrlInput.readOnly = true;
+            }
+            if (prestashopApiKeyInput) {
+                prestashopApiKeyInput.readOnly = true;
+            }
         } else {
             // Not connected: blue, enabled, shows "Connect"
             prestashopConnectBtn.textContent = 'Connect';
             prestashopConnectBtn.className = 'btn btn-primary';
             prestashopConnectBtn.disabled = false;
+            
+            // Hide disconnect button
+            if (prestashopDisconnectBtn) {
+                prestashopDisconnectBtn.style.display = 'none';
+            }
+            
+            // Make inputs editable
+            if (prestashopUrlInput) {
+                prestashopUrlInput.readOnly = false;
+            }
+            if (prestashopApiKeyInput) {
+                prestashopApiKeyInput.readOnly = false;
+            }
         }
     }
 }
@@ -188,6 +237,10 @@ function setupEventListeners() {
     const testPrestashopBtn = document.getElementById('testPrestashopBtn');
     if (testPrestashopBtn) {
         testPrestashopBtn.addEventListener('click', testPrestashopConnection);
+    }
+    const clearPrestashopBtn = document.getElementById('clearPrestashopBtn');
+    if (clearPrestashopBtn) {
+        clearPrestashopBtn.addEventListener('click', clearPrestashopConfig);
     }
     const loadPrestashopCategoriesBtn = document.getElementById('loadPrestashopCategoriesBtn');
     if (loadPrestashopCategoriesBtn) {
@@ -448,6 +501,59 @@ async function clearCredentials() {
         authorizeBtn.style.display = 'none';
     }
     
+}
+
+// Clear PrestaShop configuration
+async function clearPrestashopConfig() {
+    // Clear input fields
+    document.getElementById('prestashopUrl').value = '';
+    document.getElementById('prestashopApiKey').value = '';
+    document.getElementById('disableStockSyncToAllegro').checked = false;
+    
+    // Remove from localStorage
+    localStorage.removeItem('prestashopConfig');
+    
+    // Clear message
+    const messageEl = document.getElementById('prestashopMessage');
+    if (messageEl) {
+        messageEl.style.display = 'none';
+    }
+    
+    // Reset configuration state
+    prestashopConfigured = false;
+    prestashopAuthorized = false;
+    
+    // Hide saved configuration info
+    hidePrestashopSavedConfigDisplay();
+    
+    // Show Save Configuration button
+    const saveBtn = document.getElementById('savePrestashopBtn');
+    if (saveBtn) {
+        saveBtn.style.display = 'block';
+    }
+    
+    // Update config status indicators and button states
+    updateConfigStatuses();
+    
+    // Update UI state
+    updateUIState(true);
+    
+    // Clear backend configuration (optional - you may want to call an API endpoint)
+    try {
+        await fetch(`${API_BASE}/api/prestashop/configure`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                baseUrl: '',
+                apiKey: '',
+                disableStockSyncToAllegro: false
+            })
+        });
+    } catch (error) {
+        console.error('Error clearing PrestaShop configuration:', error);
+    }
+    
+    showToast('PrestaShop configuration cleared', 'success');
 }
 
 // Check if user is authenticated
