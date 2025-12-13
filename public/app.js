@@ -71,10 +71,6 @@ function setupEventListeners() {
     if (clearBtn) {
         clearBtn.addEventListener('click', clearCredentials);
     }
-    const clearBtnHeader = document.getElementById('clearCredentialsBtnHeader');
-    if (clearBtnHeader) {
-        clearBtnHeader.addEventListener('click', clearCredentials);
-    }
     const authorizeAccountBtn = document.getElementById('authorizeAccountBtn');
     if (authorizeAccountBtn) {
         authorizeAccountBtn.addEventListener('click', authorizeAccount);
@@ -278,10 +274,10 @@ async function saveCredentials() {
                 authStatusEl.className = 'status-value success';
             }
             
-            // Show disconnect button in header
-            const clearBtnHeader = document.getElementById('clearCredentialsBtnHeader');
-            if (clearBtnHeader) {
-                clearBtnHeader.style.display = 'block';
+            // Show disconnect button in Allegro API Configuration section
+            const clearBtn = document.getElementById('clearCredentialsBtn');
+            if (clearBtn) {
+                clearBtn.style.display = 'block';
             }
             
             // Update config status indicators
@@ -400,11 +396,11 @@ async function clearCredentials() {
     isOAuthConnected = false;
     updateUIState(false);
     
-    // Hide disconnect button and authorize button in header
-    const clearBtnHeader = document.getElementById('clearCredentialsBtnHeader');
+    // Hide disconnect button in Allegro API Configuration section and authorize button in header
+    const clearBtn = document.getElementById('clearCredentialsBtn');
     const authorizeBtn = document.getElementById('authorizeAccountBtn');
-    if (clearBtnHeader) {
-        clearBtnHeader.style.display = 'none';
+    if (clearBtn) {
+        clearBtn.style.display = 'none';
     }
     if (authorizeBtn) {
         authorizeBtn.style.display = 'none';
@@ -2001,6 +1997,14 @@ async function savePrestashopConfig() {
             prestashopConfigured = true;
             // Note: prestashopAuthorized will be set to true only after successful test connection
             prestashopAuthorized = false;
+            
+            // Show saved configuration info and hide Save button
+            updatePrestashopSavedConfigDisplay(url);
+            const saveBtn = document.getElementById('savePrestashopBtn');
+            if (saveBtn) {
+                saveBtn.style.display = 'none';
+            }
+            
             checkPrestashopStatus();
             updateExportButtonState();
             updateUIState(true); // Update UI state
@@ -2059,6 +2063,14 @@ async function testPrestashopConnection() {
             showToast('✓ ' + testData.message, 'success');
             prestashopConfigured = true;
             prestashopAuthorized = true; // Mark PrestaShop as authorized after successful test
+            
+            // Show saved configuration info and hide Save button
+            updatePrestashopSavedConfigDisplay(url);
+            const saveBtn = document.getElementById('savePrestashopBtn');
+            if (saveBtn) {
+                saveBtn.style.display = 'none';
+            }
+            
             updateConfigStatuses();
             checkPrestashopStatus();
             updateUIState(true); // Update UI to enable Allegro Categories and Load Offers
@@ -2090,16 +2102,50 @@ function loadPrestashopConfig() {
             document.getElementById('prestashopUrl').value = config.url || '';
             document.getElementById('prestashopApiKey').value = config.apiKey || '';
             document.getElementById('disableStockSyncToAllegro').checked = config.disableStockSync || false;
+            
+            // Show saved configuration info
+            updatePrestashopSavedConfigDisplay(config.url);
+            
+            // Hide Save Configuration button if config is saved
+            const saveBtn = document.getElementById('savePrestashopBtn');
+            if (saveBtn) {
+                saveBtn.style.display = 'none';
+            }
         } catch (e) {
             console.error('Error loading PrestaShop config:', e);
             // Fallback to empty if parsing fails
             document.getElementById('prestashopUrl').value = '';
             document.getElementById('prestashopApiKey').value = '';
+            hidePrestashopSavedConfigDisplay();
         }
     } else {
         // No saved config - leave empty so user enters their URL
         document.getElementById('prestashopUrl').value = '';
         document.getElementById('prestashopApiKey').value = '';
+        hidePrestashopSavedConfigDisplay();
+    }
+}
+
+// Update saved configuration display
+function updatePrestashopSavedConfigDisplay(url) {
+    const savedConfigInfo = document.getElementById('prestashopSavedConfigInfo');
+    const savedUrlEl = document.getElementById('prestashopSavedUrl');
+    if (savedConfigInfo && savedUrlEl) {
+        savedUrlEl.textContent = url || 'Not specified';
+        savedConfigInfo.style.display = 'block';
+    }
+}
+
+// Hide saved configuration display
+function hidePrestashopSavedConfigDisplay() {
+    const savedConfigInfo = document.getElementById('prestashopSavedConfigInfo');
+    if (savedConfigInfo) {
+        savedConfigInfo.style.display = 'none';
+    }
+    // Show Save Configuration button when no saved config
+    const saveBtn = document.getElementById('savePrestashopBtn');
+    if (saveBtn) {
+        saveBtn.style.display = 'block';
     }
 }
 
@@ -2122,6 +2168,26 @@ async function checkPrestashopStatus() {
             }
         } else {
             prestashopAuthorized = false;
+        }
+        
+        // Show/hide saved config display based on configured status
+        if (prestashopConfigured) {
+            const saved = localStorage.getItem('prestashopConfig');
+            if (saved) {
+                try {
+                    const config = JSON.parse(saved);
+                    updatePrestashopSavedConfigDisplay(config.url);
+                    // Hide Save Configuration button
+                    const saveBtn = document.getElementById('savePrestashopBtn');
+                    if (saveBtn) {
+                        saveBtn.style.display = 'none';
+                    }
+                } catch (e) {
+                    hidePrestashopSavedConfigDisplay();
+                }
+            }
+        } else {
+            hidePrestashopSavedConfigDisplay();
         }
         
         // Update config panel status (header status removed)
