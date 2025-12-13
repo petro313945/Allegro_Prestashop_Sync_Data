@@ -188,10 +188,10 @@ function setupEventListeners() {
             totalProductsSeen = 0;
             allLoadedOffers = []; // Clear previous offers
             
-            // Load categories first if not already loaded (required for proper functionality)
+            // Load categories from offers first if not already loaded (required for proper functionality)
             if (allCategories.length === 0) {
                 try {
-                    await loadCategories();
+                    await loadCategoriesFromOffers();
                 } catch (error) {
                     // If categories fail to load, still proceed with loading offers
                     console.warn('Categories failed to load, but continuing with offers:', error);
@@ -224,8 +224,7 @@ function setupEventListeners() {
         });
     }
     
-    document.getElementById('loadCategoriesBtn').addEventListener('click', loadCategories);
-    document.getElementById('clearCategoryBtn').addEventListener('click', clearCategorySelection);
+    // Removed loadCategoriesBtn and clearCategoryBtn - categories load automatically after OAuth
     document.getElementById('clearImportedBtn').addEventListener('click', clearImportedProducts);
     document.getElementById('exportToPrestashopBtn').addEventListener('click', exportToPrestashop);
     
@@ -385,8 +384,7 @@ async function saveCredentials() {
             // Check OAuth status
             await checkOAuthStatus();
             
-            // Auto-load categories when authenticated
-            await loadCategories();
+            // Categories will be loaded automatically after OAuth authorization
         } else {
             // Authentication failed - stay on first interface
             throw new Error(authData.error || 'Authentication failed. Please check your credentials.');
@@ -611,20 +609,14 @@ function updateUIState(configured) {
     }
     
     // Disable Allegro Categories and Load Offers until PrestaShop is authorized
-    if (loadCategoriesBtn) {
-        loadCategoriesBtn.disabled = !authenticated || !prestashopAuthorized;
-        if (!prestashopAuthorized && authenticated) {
-            loadCategoriesBtn.title = 'PrestaShop authorization required';
-        } else if (!authenticated) {
-            loadCategoriesBtn.title = 'Authentication required';
-        } else {
-            loadCategoriesBtn.title = '';
-        }
-    }
+    // Removed loadCategoriesBtn - categories load automatically after OAuth
     
     if (loadOffersBtn) {
-        loadOffersBtn.disabled = !authenticated || !prestashopAuthorized;
-        if (!prestashopAuthorized && authenticated) {
+        // Disable Load Offers until OAuth is connected (Authorize Account)
+        loadOffersBtn.disabled = !authenticated || !isOAuthConnected || !prestashopAuthorized;
+        if (!isOAuthConnected && authenticated) {
+            loadOffersBtn.title = 'Account authorization required. Please click "Authorize Account" first.';
+        } else if (!prestashopAuthorized && authenticated) {
             loadOffersBtn.title = 'PrestaShop authorization required';
         } else if (!authenticated) {
             loadOffersBtn.title = 'Authentication required';
@@ -745,13 +737,17 @@ async function authorizeAccount() {
                 clearInterval(checkInterval);
                 // Check OAuth status after popup closes
                 await checkOAuthStatus();
-                // If connected, refresh offers
+                // If connected, load categories from offers and refresh offers
                 if (isOAuthConnected) {
                     showToast('Account authorized successfully!', 'success');
+                    // Load categories from user's offers (only categories with products)
+                    await loadCategoriesFromOffers();
                     // Refresh offers if already loaded
                     if (currentOffers.length > 0 || currentPageNumber > 1) {
                         await fetchOffers(currentOffset, currentLimit);
                     }
+                    // Update UI state to enable Load Offers button
+                    updateUIState(true);
                 }
             }
         }, 500);
@@ -811,8 +807,7 @@ async function testAuthentication() {
             isAuthenticated = true;
             updateUIState(true);
             showToast('Authentication successful', 'success');
-            // Auto-load categories when authenticated
-            await loadCategories();
+            // Categories will be loaded automatically after OAuth authorization
         } else {
             if (authStatusEl) {
                 authStatusEl.textContent = 'Failed';
@@ -2543,25 +2538,21 @@ function clearSearch() {
     updateImportButtons();
 }
 
-// Load categories from API
-async function loadCategories() {
-    if (!validateAuth()) {
+// Load categories from user's offers (only categories that have products)
+async function loadCategoriesFromOffers() {
+    if (!validateAuth() || !isOAuthConnected) {
         return;
     }
     
-    const errorEl = document.getElementById('errorMessage');
     const categoriesListEl = document.getElementById('categoriesList');
-    const loadCategoriesBtn = document.getElementById('loadCategoriesBtn');
+    if (!categoriesListEl) return;
     
-    errorEl.style.display = 'none';
-    categoriesListEl.innerHTML = '<div style="text-align: center; padding: 40px; color: #1a73e8;">Loading categories...</div>';
-    loadCategoriesBtn.disabled = true;
-    loadCategoriesBtn.textContent = 'Loading...';
+    categoriesListEl.innerHTML = '<div style="text-align: center; padding: 40px; color: #1a73e8;">Loading categories from your offers...</div>';
     
     try {
-        const response = await fetch(`${API_BASE}/api/categories`);
+        // Fetch user's offers to extract categories
+        const response = await fetch(`${API_BASE}/api/offers?offset=0&limit=1000`);
         
-        // Check for 401 status before parsing JSON
         if (!response.ok && response.status === 401) {
             throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
         }
@@ -2569,31 +2560,89 @@ async function loadCategories() {
         const result = await response.json();
         
         if (result.success) {
-            // Handle both direct array and wrapped in categories property
-            allCategories = result.data.categories || result.data || [];
-            displayCategories(allCategories);
+            const offers = result.data.offers || [];
+            
+            // Extract unique categories from offers
+            const categoriesFromOffers = new Map();
+            
+            offers.forEach(offer => {
+                let offerCategoryId = null;
+                let offerCategoryName = null;
+                
+                // Try multiple ways to extract category
+                if (offer.category) {
+                    if (typeof offer.category === 'string') {
+                        offerCategoryId = offer.category;
+                    } else if (offer.category.id) {
+                        offerCategoryId = offer.category.id;
+                        offerCategoryName = offer.category.name || null;
+                    }
+                }
+                
+                // Also check product.category
+                if (!offerCategoryId && offer.product?.category) {
+                    if (typeof offer.product.category === 'string') {
+                        offerCategoryId = offer.product.category;
+                    } else if (offer.product.category.id) {
+                        offerCategoryId = offer.product.category.id;
+                        offerCategoryName = offer.product.category.name || null;
+                    }
+                }
+                
+                if (offerCategoryId) {
+                    const catId = String(offerCategoryId);
+                    if (!categoriesFromOffers.has(catId)) {
+                        categoriesFromOffers.set(catId, {
+                            id: catId,
+                            name: offerCategoryName || categoryNameCache[catId] || `Category ${catId}`,
+                            count: 0
+                        });
+                    }
+                    categoriesFromOffers.get(catId).count++;
+                }
+            });
+            
+            // Convert map to array and fetch category names if needed
+            const categoriesArray = Array.from(categoriesFromOffers.values());
+            
+            // Fetch category names for categories without names
+            for (const cat of categoriesArray) {
+                if (cat.name === `Category ${cat.id}` || !cat.name) {
+                    try {
+                        const catName = await fetchCategoryName(cat.id);
+                        if (catName && catName !== 'N/A') {
+                            cat.name = catName;
+                            categoryNameCache[cat.id] = catName;
+                        }
+                    } catch (error) {
+                        console.log(`Failed to fetch category name for ${cat.id}:`, error);
+                    }
+                }
+            }
+            
+            // Store categories
+            allCategories = categoriesArray;
+            categoriesWithProducts = categoriesArray;
+            
+            // Display categories
+            displayCategories(categoriesArray);
             updateCategorySelect();
+            
+            if (categoriesArray.length === 0) {
+                categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #666;">No categories found in your offers. Load offers to see categories.</p>';
+            }
         } else {
-            throw new Error(result.error?.message || 'Failed to fetch categories');
+            throw new Error(result.error?.message || 'Failed to fetch offers');
         }
     } catch (error) {
-        // Show user-friendly error message
-        let errorMessage = error.message || 'Failed to fetch categories';
-        if (errorMessage.includes('status code')) {
-            errorMessage = 'Invalid credentials. Please check your Client ID and Client Secret.';
-        }
-        const errorContentEl = errorEl.querySelector('.error-message-content');
-        if (errorContentEl) {
-            errorContentEl.textContent = `Failed to fetch categories: ${errorMessage}`;
-        } else {
-            errorEl.innerHTML = `<div class="error-message-content">Failed to fetch categories: ${errorMessage}</div><button class="error-message-close" onclick="closeErrorMessage()" title="Close">×</button>`;
-        }
-        errorEl.style.display = 'flex';
+        console.error('Error loading categories from offers:', error);
         categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #c5221f;">Failed to load categories. Please try again.</p>';
-    } finally {
-        loadCategoriesBtn.disabled = false;
-        loadCategoriesBtn.textContent = 'Reload';
     }
+}
+
+// Legacy function - kept for backward compatibility but redirects to loadCategoriesFromOffers
+async function loadCategories() {
+    await loadCategoriesFromOffers();
 }
 
 // Fetch category name by ID
