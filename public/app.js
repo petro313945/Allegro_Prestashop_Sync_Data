@@ -491,7 +491,7 @@ async function clearCredentials() {
     // Update config status indicators to show "Not Configured" and update button states
     updateConfigStatuses();
     
-    // Hide disconnect button in Allegro API Configuration section and authorize button in header
+    // Hide disconnect button and authorize button in Allegro API Configuration section
     const clearBtn = document.getElementById('clearCredentialsBtn');
     const authorizeBtn = document.getElementById('authorizeAccountBtn');
     if (clearBtn) {
