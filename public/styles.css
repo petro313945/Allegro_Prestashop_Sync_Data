@@ -155,50 +155,20 @@ body {
     background: #ffffff;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
-    padding: 0;
+    padding: 20px;
     margin-bottom: 20px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-    display: flex;
-    flex-direction: column;
-}
-
-.section-card:first-child {
-    border-radius: 8px 8px 0 0;
-}
-
-.section-card:last-child {
-    margin-bottom: 0;
-    border-radius: 0 0 8px 8px;
 }
 
 .section-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0;
-    padding: 20px 20px 15px 20px;
+    margin-bottom: 20px;
+    padding-bottom: 15px;
     border-bottom: 1px solid #e0e0e0;
     flex-wrap: wrap;
     gap: 15px;
-}
-
-/* Add padding to content inside section-card (except header) */
-.section-card > .offers-grid,
-.section-card > .imported-list,
-.section-card > .pagination,
-.section-card > .loading,
-.section-card > .error-message,
-.section-card > .auth-required-message {
-    padding: 0 20px 20px 20px;
-}
-
-.section-card > .offers-grid:first-of-type,
-.section-card > .imported-list:first-of-type,
-.section-card > .pagination:first-of-type,
-.section-card > .loading:first-of-type,
-.section-card > .error-message:first-of-type,
-.section-card > .auth-required-message:first-of-type {
-    padding-top: 20px;
 }
 
 .section-header h2 {
@@ -445,6 +415,7 @@ body {
     padding: 20px;
     gap: 20px;
     overflow-y: auto;
+    align-items: flex-start;
 }
 
 /* Left Sidebar - Categories */
@@ -453,23 +424,23 @@ body {
     background: #ffffff;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
-    padding: 0;
+    padding: 20px;
     height: fit-content;
+    align-self: flex-start;
     display: flex;
     flex-direction: column;
-    align-self: flex-start;
 }
 
 .sidebar-header {
-    padding: 20px 20px 15px 20px;
+    margin-bottom: 20px;
+    padding-bottom: 15px;
     border-bottom: 1px solid #e0e0e0;
-    margin-bottom: 0;
 }
 
 .sidebar-header h2 {
     font-size: 1.2em;
     color: #333;
-    margin: 0;
+    margin-bottom: 12px;
     font-weight: 500;
 }
 
@@ -484,8 +455,7 @@ body {
     gap: 8px;
     overflow-y: auto;
     flex: 1;
-    padding: 20px;
-    padding-top: 15px;
+    padding-right: 5px;
 }
 
 .category-item {
@@ -539,9 +509,8 @@ body {
     background: #ffffff;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
+    padding: 30px;
+    align-self: flex-start;
 }
 
 .search-section {
