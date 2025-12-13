@@ -35,6 +35,8 @@ document.addEventListener('DOMContentLoaded', () => {
     checkPrestashopStatus();
     // Initially disable all actions until authenticated
     updateUIState(false);
+    // Update button states on initialization
+    updateButtonStates();
 });
 
 // Update config status indicators
@@ -60,6 +62,44 @@ function updateConfigStatuses() {
         } else {
             prestashopStatusEl.textContent = 'Not Configured';
             prestashopStatusEl.className = 'config-status error';
+        }
+    }
+    
+    // Update button states
+    updateButtonStates();
+}
+
+// Update button states based on authentication/configuration status
+function updateButtonStates() {
+    // Update Allegro API Configuration button
+    const allegroConnectBtn = document.getElementById('saveCredentialsBtn');
+    if (allegroConnectBtn) {
+        if (isAuthenticated) {
+            // Connected state: grey, disabled, shows "Connected"
+            allegroConnectBtn.textContent = 'Connected';
+            allegroConnectBtn.className = 'btn btn-connected';
+            allegroConnectBtn.disabled = true;
+        } else {
+            // Not connected: blue, enabled, shows "Connect"
+            allegroConnectBtn.textContent = 'Connect';
+            allegroConnectBtn.className = 'btn btn-primary';
+            allegroConnectBtn.disabled = false;
+        }
+    }
+    
+    // Update PrestaShop Configuration button
+    const prestashopConnectBtn = document.getElementById('testPrestashopBtn');
+    if (prestashopConnectBtn) {
+        if (prestashopConfigured && prestashopAuthorized) {
+            // Connected state: grey, disabled, shows "Connected"
+            prestashopConnectBtn.textContent = 'Connected';
+            prestashopConnectBtn.className = 'btn btn-connected';
+            prestashopConnectBtn.disabled = true;
+        } else {
+            // Not connected: blue, enabled, shows "Connect"
+            prestashopConnectBtn.textContent = 'Connect';
+            prestashopConnectBtn.className = 'btn btn-primary';
+            prestashopConnectBtn.disabled = false;
         }
     }
 }
@@ -225,7 +265,7 @@ async function saveCredentials() {
     
     // Disable button during authentication
     connectBtn.disabled = true;
-    connectBtn.textContent = 'CONNECTING...';
+    connectBtn.textContent = 'Connecting...';
     
     try {
         // Step 1: Send credentials to backend
@@ -280,7 +320,7 @@ async function saveCredentials() {
                 clearBtn.style.display = 'block';
             }
             
-            // Update config status indicators
+            // Update config status indicators and button states
             updateConfigStatuses();
             
             // Update UI state
@@ -308,9 +348,8 @@ async function saveCredentials() {
         hideMainInterface();
         updateUIState(false);
     } finally {
-        // Re-enable button
-        connectBtn.disabled = false;
-        connectBtn.textContent = 'CONNECT';
+        // Update button state based on authentication status
+        updateButtonStates();
     }
 }
 
@@ -396,7 +435,7 @@ async function clearCredentials() {
     isOAuthConnected = false;
     updateUIState(false);
     
-    // Update config status indicators to show "Not Configured"
+    // Update config status indicators to show "Not Configured" and update button states
     updateConfigStatuses();
     
     // Hide disconnect button in Allegro API Configuration section and authorize button in header
@@ -2008,6 +2047,8 @@ async function savePrestashopConfig() {
                 saveBtn.style.display = 'none';
             }
             
+            // Update config statuses and button states
+            updateConfigStatuses();
             checkPrestashopStatus();
             updateExportButtonState();
             updateUIState(true); // Update UI state
@@ -2036,7 +2077,7 @@ async function testPrestashopConnection() {
     const testBtn = document.getElementById('testPrestashopBtn');
     const originalText = testBtn.textContent;
     testBtn.disabled = true;
-    testBtn.textContent = 'Testing...';
+    testBtn.textContent = 'Connecting...';
     
     try {
         // Save temporarily for test
@@ -2074,6 +2115,7 @@ async function testPrestashopConnection() {
                 saveBtn.style.display = 'none';
             }
             
+            // Update config statuses and button states
             updateConfigStatuses();
             checkPrestashopStatus();
             updateUIState(true); // Update UI to enable Allegro Categories and Load Offers
@@ -2191,7 +2233,7 @@ async function checkPrestashopStatus() {
             hidePrestashopSavedConfigDisplay();
         }
         
-        // Update config panel status (header status removed)
+        // Update config panel status (header status removed) and button states
         updateConfigStatuses();
         updateExportButtonState();
         updateUIState(true); // Update UI state to reflect PrestaShop authorization status

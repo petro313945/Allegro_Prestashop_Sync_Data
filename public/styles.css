@@ -622,6 +622,20 @@ body {
     color: #ffffff;
 }
 
+.btn-connected {
+    background: #6c757d;
+    color: #ffffff;
+    border-color: #6c757d;
+    cursor: not-allowed;
+}
+
+.btn-connected:hover {
+    background: #6c757d;
+    color: #ffffff;
+    transform: none;
+    box-shadow: none;
+}
+
 .btn-success {
     background: #1a73e8;
     color: #ffffff;
