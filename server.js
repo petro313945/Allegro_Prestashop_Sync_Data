@@ -1325,7 +1325,7 @@ app.get('/api/prestashop/test', async (req, res) => {
             
             res.json({
               success: true,
-              message: 'PrestaShop connection successful! ✓\nAPI is accessible and authentication works.'
+              message: 'PrestaShop connection established successfully.\nAPI access and authentication verified.'
             });
           } catch (authError) {
             console.error('Authentication test error:', authError.message);
@@ -1347,7 +1347,7 @@ app.get('/api/prestashop/test', async (req, res) => {
             
             res.json({
               success: true,
-              message: 'PrestaShop connection successful! ✓\nAPI is accessible and authentication works.'
+              message: 'PrestaShop connection established successfully.\nAPI access and authentication verified.'
             });
           } catch (authError) {
             console.error('Authentication test error:', authError.message);
