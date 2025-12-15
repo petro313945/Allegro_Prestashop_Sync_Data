@@ -1822,6 +1822,10 @@ function createOfferCard(product) {
                             <span class="delivery-info-icon" title="Delivery details">i</span>
                         </div>
                     ` : ''}
+                    ${!paymentInfo && !deliveryInfo && !stockInfo && !statsInfo ? '<div class="no-data-text">none yet</div>' : ''}
+                </div>
+                
+                <div class="offer-info">
                     ${(stockInfo || statsInfo) ? `
                         <div class="offer-metrics">
                             ${stockInfo ? `
@@ -1848,10 +1852,6 @@ function createOfferCard(product) {
                             ` : ''}
                         </div>
                     ` : ''}
-                    ${!paymentInfo && !deliveryInfo && !stockInfo && !statsInfo ? '<div class="no-data-text">none yet</div>' : ''}
-                </div>
-                
-                <div class="offer-info">
                     <div class="offer-info-row">
                         <span class="info-label">Product ID:</span>
                         <span class="info-value product-id">${productId.substring(0, 8)}...</span>
@@ -2628,59 +2628,14 @@ function loadImportedOffers() {
     }
 }
 
-// Clear search
+// Clear selection - unselect all products (checkboxes)
 function clearSearch() {
-    const selectedCategorySelect = document.getElementById('selectedCategory');
-    if (selectedCategorySelect) {
-        selectedCategorySelect.value = '';
-    }
-    const offersListEl = document.getElementById('offersList');
-    const resultsCountEl = document.getElementById('resultsCount');
-    const paginationEl = document.getElementById('pagination');
-    const errorEl = document.getElementById('errorMessage');
-    if (offersListEl) offersListEl.innerHTML = '';
-    if (resultsCountEl) resultsCountEl.textContent = '0';
-    if (paginationEl) paginationEl.style.display = 'none';
-    if (errorEl) errorEl.style.display = 'none';
-    
-    // Clear visual selection - select "All Categories"
-    document.querySelectorAll('.category-item').forEach(item => {
-        if (item.dataset.categoryId === 'all') {
-            item.classList.add('selected');
-        } else {
-            item.classList.remove('selected');
-        }
-    });
-
-    // Reset category search text and dropdown
-    const categorySearchInputEl = document.getElementById('categorySearchInput');
-    const categoryDropdownEl = document.getElementById('categoryDropdown');
-    if (categorySearchInputEl) {
-        categorySearchInputEl.value = '';
-    }
-    if (categoryDropdownEl) {
-        categoryDropdownEl.value = '';
-    }
-
     // Uncheck any selected offer checkboxes
     document.querySelectorAll('.offer-checkbox').forEach(cb => {
         cb.checked = false;
     });
-    
-    // Enable product count (can still load offers without category)
-    const limitSelect = document.getElementById('limit');
-    if (limitSelect) {
-        limitSelect.disabled = false;
-    }
-    
-    // Clear all loaded offers & pagination state
-    allLoadedOffers = [];
-    currentOffers = [];
-    currentOffset = 0;
-    pageHistory = [];
-    selectedCategoryId = null; // null means "All Categories"
-    currentPageNumber = 1; // Reset to first page
-    totalProductsSeen = 0;
+
+    // After unselecting, update import buttons state
     updateImportButtons();
 }
 
@@ -2825,7 +2780,6 @@ async function fetchCategoryName(categoryId) {
 // Display categories
 async function displayCategories(categories) {
     const categoriesListEl = document.getElementById('categoriesList');
-    const categoryDropdownEl = document.getElementById('categoryDropdown');
     const categorySearchInputEl = document.getElementById('categorySearchInput');
     
     // Extract unique category IDs and names from loaded offers
@@ -2953,20 +2907,6 @@ async function displayCategories(categories) {
     
     categoriesListEl.innerHTML = html;
     
-    // Keep dropdown in sync with visible categories
-    if (categoryDropdownEl) {
-        // Rebuild dropdown options once based on filtered categories
-        categoryDropdownEl.innerHTML = '<option value="">All categories</option>';
-        categoriesToDisplay.forEach(category => {
-            const opt = document.createElement('option');
-            opt.value = category.id;
-            opt.textContent = category.name || `Category ${category.id}`;
-            categoryDropdownEl.appendChild(opt);
-        });
-        // Restore current selection
-        categoryDropdownEl.value = selectedCategoryId || '';
-    }
-    
     // Add click listeners for sidebar items
     document.querySelectorAll('.category-item').forEach(item => {
         item.addEventListener('click', () => {
@@ -2985,15 +2925,6 @@ async function displayCategories(categories) {
         categorySearchInputEl.addEventListener('input', () => {
             // Re-render using same base categories but with new filter text
             displayCategories(categories);
-        });
-    }
-
-    // Wire up dropdown once
-    if (categoryDropdownEl && !categoryDropdownEl.dataset.bound) {
-        categoryDropdownEl.dataset.bound = 'true';
-        categoryDropdownEl.addEventListener('change', e => {
-            const value = e.target.value || null;
-            selectCategory(value);
         });
     }
 }
