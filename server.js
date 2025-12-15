@@ -532,6 +532,17 @@ function buildStockAvailableXml(stockAvailable) {
   <stock_available>
     <id>${xmlEscape(stockAvailable.id || '')}</id>
     <id_product>${xmlEscape(stockAvailable.id_product)}</id_product>
+    <id_product_attribute>${xmlEscape(
+      stockAvailable.id_product_attribute !== undefined
+        ? stockAvailable.id_product_attribute
+        : 0
+    )}</id_product_attribute>
+    <id_shop>${xmlEscape(
+      stockAvailable.id_shop !== undefined ? stockAvailable.id_shop : 1
+    )}</id_shop>
+    <id_shop_group>${xmlEscape(
+      stockAvailable.id_shop_group !== undefined ? stockAvailable.id_shop_group : 0
+    )}</id_shop_group>
     <quantity>${xmlEscape(stockAvailable.quantity)}</quantity>
   </stock_available>
 </prestashop>`;
