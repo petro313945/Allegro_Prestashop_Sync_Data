@@ -459,6 +459,22 @@ function xmlEscape(value) {
 }
 
 /**
+ * Generate a PrestaShop-friendly slug (link_rewrite)
+ */
+function prestashopSlug(value) {
+  if (!value) return 'product';
+  let slug = String(value)
+    .toLowerCase()
+    // Remove accents
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    // Keep only letters, numbers and dashes
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!slug) slug = 'product';
+  return slug;
+}
+
+/**
  * Build PrestaShop XML for a localized field array
  * Example input:
  *   [{ id: 1, value: 'Name PL' }, { id: 2, value: 'Name EN' }]
@@ -482,6 +498,7 @@ function buildProductXml(product) {
   const nameXml = buildLocalizedFieldXml('name', product.name);
   const descriptionXml = buildLocalizedFieldXml('description', product.description);
   const shortDescXml = buildLocalizedFieldXml('description_short', product.description_short);
+  const linkRewriteXml = buildLocalizedFieldXml('link_rewrite', product.link_rewrite || []);
 
   const categoriesXml = product.associations && product.associations.categories
     ? `<associations><categories>${product.associations.categories.category
@@ -493,11 +510,15 @@ function buildProductXml(product) {
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
   <product>
     <id_shop_default>${xmlEscape(product.id_shop_default)}</id_shop_default>
+    <id_tax_rules_group>${xmlEscape(
+      product.id_tax_rules_group !== undefined ? product.id_tax_rules_group : 0
+    )}</id_tax_rules_group>
     <id_category_default>${xmlEscape(product.id_category_default)}</id_category_default>
     <reference>${xmlEscape(product.reference)}</reference>
     ${nameXml}
     ${descriptionXml}
     ${shortDescXml}
+    ${linkRewriteXml}
     <price>${xmlEscape(product.price)}</price>
     <active>${xmlEscape(product.active)}</active>
     ${categoriesXml}
@@ -1674,30 +1695,38 @@ app.post('/api/prestashop/products', async (req, res) => {
     }
 
     // Build product data for PrestaShop
-  const productData = {
-    id_shop_default: 1,
-    id_category_default: finalCategoryId,
-    reference: offer.id.toString(),
-    name: [
-      { id: 1, value: offer.name }, // Polish
-      { id: 2, value: offer.name }  // English
-    ],
-    description: [
-      { id: 1, value: description },
-      { id: 2, value: description }
-    ],
-    description_short: [
-      { id: 1, value: description.substring(0, 800) },
-      { id: 2, value: description.substring(0, 800) }
-    ],
-    price: parseFloat(price),
-    active: 1,
-    associations: {
-      categories: {
-        category: [{ id: finalCategoryId }]
+    const baseName = offer.name || 'Imported product';
+    const slug = prestashopSlug(baseName);
+
+    const productData = {
+      id_shop_default: 1,
+      id_category_default: finalCategoryId,
+      id_tax_rules_group: 0,
+      reference: offer.id.toString(),
+      name: [
+        { id: 1, value: baseName }, // Language 1
+        { id: 2, value: baseName }  // Language 2
+      ],
+      description: [
+        { id: 1, value: description },
+        { id: 2, value: description }
+      ],
+      description_short: [
+        { id: 1, value: description.substring(0, 800) },
+        { id: 2, value: description.substring(0, 800) }
+      ],
+      link_rewrite: [
+        { id: 1, value: slug },
+        { id: 2, value: slug }
+      ],
+      price: parseFloat(price),
+      active: 1,
+      associations: {
+        categories: {
+          category: [{ id: finalCategoryId }]
+        }
       }
-    }
-  };
+    };
 
   // Create product (send XML body)
   const productXml = buildProductXml(productData);
