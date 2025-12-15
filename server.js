@@ -14,6 +14,11 @@ const CREDENTIALS_STORAGE_FILE = path.join(__dirname, '.credentials.json');
 const PRESTASHOP_CREDENTIALS_FILE = path.join(__dirname, '.prestashop.json');
 const PRODUCT_MAPPINGS_FILE = path.join(__dirname, '.product_mappings.json');
 
+// CSV export paths (Windows - adjust if needed)
+const CSV_DOWNLOADS_DIR = 'C:\\Users\\Namo\\Downloads';
+const CATEGORIES_CSV_PATH = path.join(CSV_DOWNLOADS_DIR, 'categories_import.csv');
+const PRODUCTS_CSV_PATH = path.join(CSV_DOWNLOADS_DIR, 'products_import.csv');
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -703,6 +708,35 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
     // Generic error
     throw new Error(`PrestaShop connection error: ${error.message}`);
   }
+}
+
+/**
+ * Helpers for CSV export
+ */
+function ensureDirectoryExists(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+  } catch (err) {
+    console.error('Error ensuring directory exists:', dirPath, err.message);
+    throw err;
+  }
+}
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  // Escape quotes by doubling them, wrap in quotes if contains special chars
+  const escaped = str.replace(/"/g, '""');
+  if (/[",;\n\r]/.test(escaped)) {
+    return `"${escaped}"`;
+  }
+  return escaped;
+}
+
+function toCsvRow(values, delimiter = ';') {
+  return values.map(v => csvEscape(v)).join(delimiter) + '\r\n';
 }
 
 /**
@@ -1948,6 +1982,156 @@ app.post('/api/prestashop/sync/stock', async (req, res) => {
     res.status(error.response?.status || 500).json({
       success: false,
       error: error.message
+    });
+  }
+});
+
+/**
+ * Export imported offers and related categories to CSV files
+ * Writes:
+ *  - categories_import.csv
+ *  - products_import.csv
+ * into the configured Downloads directory.
+ *
+ * NOTE: This uses a generic PrestaShop-friendly structure. If your
+ * existing CSV templates differ, we can tweak the headers/fields.
+ */
+app.post('/api/export/csv', async (req, res) => {
+  try {
+    const { offers } = req.body || {};
+
+    if (!Array.isArray(offers) || offers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No offers provided for export'
+      });
+    }
+
+    // Ensure target directory exists
+    ensureDirectoryExists(CSV_DOWNLOADS_DIR);
+
+    // ------- Build categories CSV -------
+    const categoryMap = new Map();
+
+    offers.forEach(offer => {
+      if (!offer || !offer.category) return;
+
+      let allegroCategoryId = null;
+      let allegroCategoryName = '';
+
+      if (typeof offer.category === 'string') {
+        allegroCategoryId = offer.category;
+      } else if (typeof offer.category === 'object') {
+        allegroCategoryId = offer.category.id || offer.categoryId || null;
+        allegroCategoryName = offer.category.name || '';
+      }
+
+      if (!allegroCategoryId) return;
+
+      if (!categoryMap.has(allegroCategoryId)) {
+        categoryMap.set(allegroCategoryId, {
+          id: allegroCategoryId,
+          name: allegroCategoryName || `Category ${allegroCategoryId}`,
+          parent: 'Home', // Generic parent; adjust to your structure
+          active: 1
+        });
+      }
+    });
+
+    // Generic PrestaShop-like headers for categories
+    const categoryHeaders = [
+      'ID',
+      'Active',
+      'Name',
+      'Parent category'
+    ];
+
+    let categoriesCsv = toCsvRow(categoryHeaders);
+    for (const category of categoryMap.values()) {
+      categoriesCsv += toCsvRow([
+        category.id,
+        category.active,
+        category.name,
+        category.parent
+      ]);
+    }
+
+    fs.writeFileSync(CATEGORIES_CSV_PATH, categoriesCsv, 'utf8');
+
+    // ------- Build products CSV -------
+    // A compact but PrestaShop-friendly product structure
+    const productHeaders = [
+      'ID',
+      'Active',
+      'Name',
+      'Categories',
+      'Price',
+      'Quantity',
+      'Description',
+      'Short description',
+      'Reference',
+      'URL rewrite'
+    ];
+
+    let productsCsv = toCsvRow(productHeaders);
+
+    offers.forEach(offer => {
+      if (!offer) return;
+
+      const id = offer.id || '';
+      const name = offer.name || '';
+      const price =
+        offer.sellingMode?.price?.amount ||
+        offer.price ||
+        0;
+      const quantity = offer.stock?.available ?? 0;
+      const description =
+        offer.description ||
+        offer.name ||
+        '';
+      const shortDescription = String(description).substring(0, 800);
+
+      let categoryId = '';
+      if (offer.category) {
+        if (typeof offer.category === 'string') {
+          categoryId = offer.category;
+        } else if (typeof offer.category === 'object') {
+          categoryId = offer.category.id || offer.categoryId || '';
+        }
+      }
+
+      // Simple slug for URL rewrite
+      const slug = prestashopSlug(name);
+
+      productsCsv += toCsvRow([
+        id,
+        1, // active
+        name,
+        categoryId,
+        price,
+        quantity,
+        description,
+        shortDescription,
+        id, // reference
+        slug
+      ]);
+    });
+
+    fs.writeFileSync(PRODUCTS_CSV_PATH, productsCsv, 'utf8');
+
+    res.json({
+      success: true,
+      message: 'CSV export completed',
+      files: {
+        categories: CATEGORIES_CSV_PATH,
+        products: PRODUCTS_CSV_PATH
+      }
+    });
+  } catch (error) {
+    console.error('CSV export error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to export CSV files'
     });
   }
 });

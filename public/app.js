@@ -2658,13 +2658,32 @@ async function exportToPrestashop() {
     }
     
     const autoCreateCategories = document.getElementById('autoCreateCategories')?.checked || false;
-    
-    // Confirm before export
-    if (!confirm(`Export ${importedOffers.length} product(s) to PrestaShop?`)) {
+
+    // First, export CSV files (categories + products)
+    try {
+        const csvResponse = await fetch(`${API_BASE}/api/export/csv`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ offers: importedOffers })
+        });
+        const csvData = await csvResponse.json();
+
+        if (csvData.success) {
+            showToast('CSV files exported to your Downloads folder', 'success', 7000);
+        } else {
+            showToast(`CSV export failed: ${csvData.error || 'Unknown error'}`, 'error', 8000);
+        }
+    } catch (csvError) {
+        console.error('CSV export error:', csvError);
+        showToast(`CSV export error: ${csvError.message || csvError}`, 'error', 8000);
+    }
+
+    // Confirm before also creating products directly in PrestaShop
+    if (!confirm(`Also create ${importedOffers.length} product(s) directly in PrestaShop now?`)) {
         return;
     }
     
-    showToast('Starting export to PrestaShop...', 'info');
+    showToast('Starting export to PrestaShop (API)...', 'info');
     
     let successCount = 0;
     let errorCount = 0;
