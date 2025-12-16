@@ -754,6 +754,7 @@ function buildProductXml(product) {
     ${linkRewriteXml}
     <price>${xmlEscape(product.price)}</price>
     <active>${xmlEscape(product.active)}</active>
+    <state>${xmlEscape(product.state !== undefined ? product.state : 1)}</state>
     <visibility>${xmlEscape(product.visibility !== undefined ? product.visibility : 'both')}</visibility>
     <available_for_order>${xmlEscape(product.available_for_order !== undefined ? product.available_for_order : 1)}</available_for_order>
     <show_price>${xmlEscape(product.show_price !== undefined ? product.show_price : 1)}</show_price>
@@ -2290,6 +2291,7 @@ app.post('/api/prestashop/products', async (req, res) => {
         ],
         price: parseFloat(price),
         active: 1,
+        state: 1, // Required for product to appear in admin grid (ps_product_shop.state = 1)
         visibility: 'both', // 'both' = visible in catalog and search, 'catalog' = catalog only, 'search' = search only, 'none' = not visible
         available_for_order: 1, // Allow customers to order this product
         show_price: 1, // Show price on product page
