@@ -1798,10 +1798,16 @@ app.get('/api/prestashop/test', async (req, res) => {
  */
 async function findCategoryByName(categoryName) {
   try {
-    const normalizedName = categoryName.trim().toLowerCase();
+    // Normalize category name (remove accents, collapse spaces, lowercase)
+    const normalizedName = categoryName
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
     // Always check database to ensure we find existing categories
     // This guarantees we compare against real PrestaShop categories
-    console.log(`Checking PrestaShop for category "${categoryName}"...`);
+    console.log(`Checking PrestaShop for category "${categoryName}" (normalized: "${normalizedName}")...`);
     
     // Fetch all categories (with pagination support)
     let allCategories = [];
@@ -1813,7 +1819,11 @@ async function findCategoryByName(categoryName) {
     // Fetch categories in batches to handle pagination
     while (hasMore) {
       try {
-        const data = await prestashopApiRequest(`categories?limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`, 'GET');
+        // Request at least id + name so we can reliably compare by text
+        const data = await prestashopApiRequest(
+          `categories?display=[id,name]&limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`,
+          'GET'
+        );
         
         // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
         let categories = [];
@@ -1873,20 +1883,32 @@ async function findCategoryByName(categoryName) {
           nameArray = [category.name];
         } else if (typeof category.name === 'string') {
           // Direct string name
-          if (category.name.trim().toLowerCase() === normalizedName) {
+          const candidateName = category.name
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (candidateName === normalizedName) {
             const categoryId = category.id || category.category?.id;
             if (categoryId) {
-              categoryCache.set(normalizedName, categoryId);
+              return categoryId;
             }
-            return categoryId;
           }
         }
         
         // Check if any language version matches the category name
         for (const nameEntry of nameArray) {
           if (!nameEntry) continue;
-          const nameValue = nameEntry.value || (typeof nameEntry === 'string' ? nameEntry : null);
-          if (nameValue && typeof nameValue === 'string' && nameValue.trim().toLowerCase() === normalizedName) {
+          const rawValue = nameEntry.value || (typeof nameEntry === 'string' ? nameEntry : null);
+          if (!rawValue || typeof rawValue !== 'string') continue;
+          const candidateName = rawValue
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (candidateName === normalizedName) {
             const categoryId = category.id || category.category?.id;
             if (categoryId) {
               return categoryId;
@@ -2036,8 +2058,8 @@ app.post('/api/prestashop/categories', async (req, res) => {
       id_parent: idParent,
       active: active,
       link_rewrite: [
-        { id: 1, value: name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') },
-        { id: 2, value: name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') }
+        { id: 1, value: name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') },
+        { id: 2, value: name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') }
       ]
     };
 
@@ -2112,7 +2134,12 @@ app.post('/api/prestashop/products', async (req, res) => {
         
         // Use real category name from available source, fallback to default if not available
         categoryName = categoryName || allegroCategory?.name || 'Imported Category';
-        const normalizedCategoryName = categoryName.trim().toLowerCase();
+        const normalizedCategoryName = categoryName
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/\s+/g, ' ')
+          .trim();
         
         // Always check existing categories directly in PrestaShop by name
         let existingCategoryId = await findCategoryByName(categoryName);
