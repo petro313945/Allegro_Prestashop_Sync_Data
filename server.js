@@ -3,6 +3,7 @@ const cors = require('cors');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const FormData = require('form-data');
 require('dotenv').config(); 
 
 const app = express();
@@ -454,6 +455,177 @@ function prestashopSlug(value) {
     .replace(/^-+|-+$/g, '');
   if (!slug) slug = 'product';
   return slug;
+}
+
+/**
+ * Extract short description from full description
+ * Strips HTML tags and gets first meaningful text (up to 800 chars)
+ */
+function extractShortDescription(description, maxLength = 800) {
+  if (!description) return '';
+  
+  // If it's HTML, strip tags and decode entities
+  let text = description
+    .replace(/<[^>]*>/g, ' ') // Remove HTML tags
+    .replace(/&nbsp;/g, ' ') // Replace &nbsp; with space
+    .replace(/&amp;/g, '&') // Decode &amp;
+    .replace(/&lt;/g, '<') // Decode &lt;
+    .replace(/&gt;/g, '>') // Decode &gt;
+    .replace(/&quot;/g, '"') // Decode &quot;
+    .replace(/&#39;/g, "'") // Decode &#39;
+    .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+    .trim();
+  
+  // Get first sentence or first meaningful chunk
+  const sentences = text.split(/[.!?]\s+/);
+  if (sentences.length > 0 && sentences[0].length <= maxLength) {
+    text = sentences[0];
+  }
+  
+  // Truncate to max length if needed, but try to break at word boundary
+  if (text.length > maxLength) {
+    text = text.substring(0, maxLength);
+    const lastSpace = text.lastIndexOf(' ');
+    if (lastSpace > maxLength * 0.8) { // Only break at word if we're not too close to start
+      text = text.substring(0, lastSpace);
+    }
+    text += '...';
+  }
+  
+  return text;
+}
+
+/**
+ * Download image from URL and return as buffer
+ */
+async function downloadImage(url) {
+  try {
+    const response = await axios({
+      method: 'GET',
+      url: url,
+      responseType: 'arraybuffer',
+      timeout: 30000, // 30 second timeout for image downloads
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    return Buffer.from(response.data, 'binary');
+  } catch (error) {
+    console.error(`Failed to download image from ${url}:`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Upload image to PrestaShop product
+ */
+async function uploadProductImage(productId, imageBuffer, imageName = 'image.jpg') {
+  try {
+    if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
+      throw new Error('PrestaShop credentials not configured');
+    }
+
+    // Ensure baseUrl ends with /api/
+    let apiUrl = prestashopCredentials.baseUrl.trim();
+    apiUrl = apiUrl.replace(/\/+$/, '');
+    if (!apiUrl.endsWith('/api')) {
+      apiUrl += '/api';
+    }
+    apiUrl += '/';
+    
+    const url = `${apiUrl}images/products/${productId}?output_format=JSON`;
+    
+    // PrestaShop uses Basic Auth with API key as password
+    const auth = Buffer.from(`${prestashopCredentials.apiKey}:`).toString('base64');
+    
+    // Use FormData for multipart/form-data upload
+    const form = new FormData();
+    form.append('image', imageBuffer, {
+      filename: imageName,
+      contentType: 'image/jpeg'
+    });
+    
+    const response = await axios({
+      method: 'POST',
+      url: url,
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Output-Format': 'JSON',
+        'Accept': 'application/json',
+        ...form.getHeaders()
+      },
+      data: form,
+      timeout: 30000,
+      validateStatus: function (status) {
+        return status >= 200 && status < 600;
+      }
+    });
+    
+    if (response.status >= 400) {
+      throw new Error(`PrestaShop image upload returned status ${response.status}`);
+    }
+    
+    return response.data;
+  } catch (error) {
+    console.error('PrestaShop image upload error:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Upload image to PrestaShop category
+ */
+async function uploadCategoryImage(categoryId, imageBuffer, imageName = 'image.jpg') {
+  try {
+    if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
+      throw new Error('PrestaShop credentials not configured');
+    }
+
+    // Ensure baseUrl ends with /api/
+    let apiUrl = prestashopCredentials.baseUrl.trim();
+    apiUrl = apiUrl.replace(/\/+$/, '');
+    if (!apiUrl.endsWith('/api')) {
+      apiUrl += '/api';
+    }
+    apiUrl += '/';
+    
+    const url = `${apiUrl}images/categories/${categoryId}?output_format=JSON`;
+    
+    // PrestaShop uses Basic Auth with API key as password
+    const auth = Buffer.from(`${prestashopCredentials.apiKey}:`).toString('base64');
+    
+    // Use FormData for multipart/form-data upload
+    const form = new FormData();
+    form.append('image', imageBuffer, {
+      filename: imageName,
+      contentType: 'image/jpeg'
+    });
+    
+    const response = await axios({
+      method: 'POST',
+      url: url,
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Output-Format': 'JSON',
+        'Accept': 'application/json',
+        ...form.getHeaders()
+      },
+      data: form,
+      timeout: 30000,
+      validateStatus: function (status) {
+        return status >= 200 && status < 600;
+      }
+    });
+    
+    if (response.status >= 400) {
+      throw new Error(`PrestaShop image upload returned status ${response.status}`);
+    }
+    
+    return response.data;
+  } catch (error) {
+    console.error('PrestaShop category image upload error:', error.message);
+    throw error;
+  }
 }
 
 /**
@@ -1617,6 +1789,8 @@ app.post('/api/prestashop/products', async (req, res) => {
     const price = offer.sellingMode?.price?.amount || offer.price || 0;
     const stock = offer.stock?.available || 0;
     const description = offer.description || offer.name || '';
+    // Check for separate short description field (if Allegro provides it)
+    const shortDescription = offer.shortDescription || offer.summary || offer.description_short || null;
     
     // Handle category
     let finalCategoryId = categoryId || 2; // Default to Home category (id: 2)
@@ -1692,8 +1866,25 @@ app.post('/api/prestashop/products', async (req, res) => {
         
         console.log(`Created category "${categoryName}" (ID: ${finalCategoryId}) from Allegro category ID: ${offer.category.id}`);
         
-        // Note: Category images would need to be uploaded separately via /api/images/categories/{id}
-        // if Allegro provides category image URLs, but typically Allegro categories don't have images
+        // Handle category image if Allegro provides it
+        if (allegroCategory && (allegroCategory.image || allegroCategory.imageUrl || allegroCategory.photo)) {
+          try {
+            const categoryImageUrl = allegroCategory.image || allegroCategory.imageUrl || allegroCategory.photo;
+            console.log(`Downloading category image from: ${categoryImageUrl}`);
+            
+            const imageBuffer = await downloadImage(categoryImageUrl);
+            const urlPath = new URL(categoryImageUrl).pathname;
+            const extension = urlPath.match(/\.(jpg|jpeg|png|gif|webp)$/i)?.[1] || 'jpg';
+            const imageName = `category-${finalCategoryId}.${extension}`;
+            
+            console.log(`Uploading category image to PrestaShop category ${finalCategoryId}...`);
+            await uploadCategoryImage(finalCategoryId, imageBuffer, imageName);
+            console.log(`Successfully uploaded category image`);
+          } catch (categoryImageError) {
+            console.error(`Failed to upload category image:`, categoryImageError.message);
+            // Continue even if category image upload fails
+          }
+        }
       } catch (error) {
         console.error('Failed to fetch category from Allegro or create category in PrestaShop:', error.message);
         if (error.response?.data) {
@@ -1720,8 +1911,14 @@ app.post('/api/prestashop/products', async (req, res) => {
         { id: 2, value: description }
       ],
       description_short: [
-        { id: 1, value: description.substring(0, 800) },
-        { id: 2, value: description.substring(0, 800) }
+        { 
+          id: 1, 
+          value: shortDescription || extractShortDescription(description, 800)
+        },
+        { 
+          id: 2, 
+          value: shortDescription || extractShortDescription(description, 800)
+        }
       ],
       link_rewrite: [
         { id: 1, value: slug },
@@ -1735,8 +1932,6 @@ app.post('/api/prestashop/products', async (req, res) => {
         }
       }
     };
-    console.log(productData,offer.name, 'productData=====================================');
-    return;
 
   // Create product (send XML body)
   const productXml = buildProductXml(productData);
@@ -1784,14 +1979,49 @@ app.post('/api/prestashop/products', async (req, res) => {
       // Continue even if stock update fails
     }
 
-    // Handle images
-    let images = [];
+    // Handle images - upload to PrestaShop
+    let uploadedImages = [];
+    let imageUrls = [];
+    
+    // Collect image URLs from Allegro
     if (offer.primaryImage && offer.primaryImage.url) {
-      images.push(offer.primaryImage.url);
+      imageUrls.push(offer.primaryImage.url);
     } else if (offer.images && Array.isArray(offer.images)) {
-      images = offer.images.slice(0, 5).map(img => 
+      imageUrls = offer.images.slice(0, 5).map(img => 
         typeof img === 'string' ? img : (img.url || img.uri || img.path || '')
       ).filter(url => url);
+    }
+    
+    // Upload images to PrestaShop (up to 5 images)
+    if (imageUrls.length > 0 && prestashopProductId) {
+      for (let i = 0; i < Math.min(imageUrls.length, 5); i++) {
+        try {
+          const imageUrl = imageUrls[i];
+          console.log(`Downloading image ${i + 1}/${imageUrls.length} from: ${imageUrl}`);
+          
+          // Download image
+          const imageBuffer = await downloadImage(imageUrl);
+          
+          // Determine file extension from URL or content type
+          const urlPath = new URL(imageUrl).pathname;
+          const extension = urlPath.match(/\.(jpg|jpeg|png|gif|webp)$/i)?.[1] || 'jpg';
+          const imageName = `product-${prestashopProductId}-${i + 1}.${extension}`;
+          
+          // Upload to PrestaShop
+          console.log(`Uploading image ${i + 1} to PrestaShop product ${prestashopProductId}...`);
+          await uploadProductImage(prestashopProductId, imageBuffer, imageName);
+          uploadedImages.push(imageUrl);
+          console.log(`Successfully uploaded image ${i + 1}`);
+          
+          // Small delay between uploads to avoid overwhelming the server
+          if (i < imageUrls.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+        } catch (imageError) {
+          console.error(`Failed to upload image ${i + 1} (${imageUrls[i]}):`, imageError.message);
+          // Continue with other images even if one fails
+        }
+      }
     }
 
     // Store product mapping
@@ -1809,8 +2039,12 @@ app.post('/api/prestashop/products', async (req, res) => {
         prestashopProductId: prestashopProductId,
         allegroOfferId: offer.id
       },
-      images: images,
-      message: 'Product created successfully in PrestaShop'
+      images: {
+        urls: imageUrls,
+        uploaded: uploadedImages.length,
+        total: imageUrls.length
+      },
+      message: `Product created successfully in PrestaShop${uploadedImages.length > 0 ? ` with ${uploadedImages.length} image(s)` : ''}`
     });
   } catch (error) {
     res.status(error.response?.status || 500).json({
