@@ -97,6 +97,10 @@ let userCredentials = {
 let accessToken = null;
 let tokenExpiry = null;
 
+// Category cache to prevent duplicate creation during export sessions
+// Maps category name (lowercase) to category ID
+const categoryCache = new Map();
+
 // Store user OAuth tokens (for user-level authentication)
 let userOAuthTokens = {
   accessToken: null,
@@ -1703,29 +1707,59 @@ app.get('/api/prestashop/test', async (req, res) => {
 /**
  * Find existing category by name in PrestaShop
  * Returns category ID if found, null otherwise
+ * Uses cache to avoid duplicate API calls and prevent race conditions
  */
 async function findCategoryByName(categoryName) {
   try {
-    // Fetch all categories (with a reasonable limit)
-    const data = await prestashopApiRequest('categories?limit=1000', 'GET');
+    const normalizedName = categoryName.trim().toLowerCase();
     
-    // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
-    let categories = [];
-    if (data.categories) {
-      if (Array.isArray(data.categories)) {
-        categories = data.categories.map(item => item.category || item);
-      } else if (data.categories.category) {
-        categories = Array.isArray(data.categories.category) 
-          ? data.categories.category 
-          : [data.categories.category];
+    // First check the in-memory cache
+    if (categoryCache.has(normalizedName)) {
+      const cachedId = categoryCache.get(normalizedName);
+      console.log(`Category "${categoryName}" found in cache (ID: ${cachedId})`);
+      return cachedId;
+    }
+    
+    // Fetch all categories (with pagination support)
+    let allCategories = [];
+    let limit = 1000;
+    let offset = 0;
+    let hasMore = true;
+    
+    // Fetch categories in batches to handle pagination
+    while (hasMore) {
+      const data = await prestashopApiRequest(`categories?limit=${limit}&offset=${offset}`, 'GET');
+      
+      // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
+      let categories = [];
+      if (data.categories) {
+        if (Array.isArray(data.categories)) {
+          categories = data.categories.map(item => item.category || item);
+        } else if (data.categories.category) {
+          categories = Array.isArray(data.categories.category) 
+            ? data.categories.category 
+            : [data.categories.category];
+        }
+      } else if (data.category) {
+        categories = Array.isArray(data.category) ? data.category : [data.category];
       }
-    } else if (data.category) {
-      categories = Array.isArray(data.category) ? data.category : [data.category];
+      
+      if (categories.length === 0) {
+        hasMore = false;
+      } else {
+        allCategories = allCategories.concat(categories);
+        // If we got fewer categories than the limit, we've reached the end
+        if (categories.length < limit) {
+          hasMore = false;
+        } else {
+          offset += limit;
+        }
+      }
     }
     
     // Search for category with matching name
     // PrestaShop category names are stored as arrays: [{ id: 1, value: "Name PL" }, { id: 2, value: "Name EN" }]
-    for (const category of categories) {
+    for (const category of allCategories) {
       if (category.name) {
         // Handle both array format and object format
         const nameArray = Array.isArray(category.name) ? category.name : 
@@ -1734,8 +1768,13 @@ async function findCategoryByName(categoryName) {
         // Check if any language version matches the category name
         for (const nameEntry of nameArray) {
           const nameValue = nameEntry.value || nameEntry;
-          if (nameValue && nameValue.trim().toLowerCase() === categoryName.trim().toLowerCase()) {
-            return category.id || category.category?.id;
+          if (nameValue && nameValue.trim().toLowerCase() === normalizedName) {
+            const categoryId = category.id || category.category?.id;
+            // Cache the result for future lookups
+            if (categoryId) {
+              categoryCache.set(normalizedName, categoryId);
+            }
+            return categoryId;
           }
         }
       }
@@ -1859,6 +1898,37 @@ app.post('/api/prestashop/categories', async (req, res) => {
       });
     }
 
+    // Check if category already exists before creating
+    const normalizedName = name.trim().toLowerCase();
+    let existingCategoryId = categoryCache.get(normalizedName);
+    
+    // If cache has 'creating' marker, wait a bit and check again
+    if (existingCategoryId === 'creating') {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      existingCategoryId = categoryCache.get(normalizedName);
+      if (existingCategoryId === 'creating') {
+        existingCategoryId = await findCategoryByName(name);
+      }
+    }
+    
+    if (!existingCategoryId || existingCategoryId === 'creating') {
+      existingCategoryId = await findCategoryByName(name);
+    }
+    
+    // Only proceed if we have a valid numeric ID (not 'creating' marker)
+    if (existingCategoryId && existingCategoryId !== 'creating' && !isNaN(existingCategoryId)) {
+      // Category already exists, return the existing one
+      return res.json({
+        success: true,
+        category: { id: existingCategoryId },
+        message: 'Category already exists',
+        existing: true
+      });
+    }
+
+    // Mark in cache to prevent concurrent creation
+    categoryCache.set(normalizedName, 'creating');
+
     const categoryData = {
       name: [
         { id: 1, value: name }, // Polish (id: 1)
@@ -1872,8 +1942,27 @@ app.post('/api/prestashop/categories', async (req, res) => {
       ]
     };
 
+    // Final check right before creating - double protection against race conditions
+    const finalCheck = await findCategoryByName(name);
+    if (finalCheck && finalCheck !== 'creating' && !isNaN(finalCheck)) {
+      // Category was created by another request while we were preparing
+      categoryCache.set(normalizedName, finalCheck);
+      return res.json({
+        success: true,
+        category: { id: finalCheck },
+        message: 'Category already exists (created by another request)',
+        existing: true
+      });
+    }
+
     const xmlBody = buildCategoryXml(categoryData);
     const data = await prestashopApiRequest('categories', 'POST', xmlBody);
+    const newCategoryId = data.category?.id || data.id;
+    
+    // Update cache with the actual category ID
+    if (newCategoryId) {
+      categoryCache.set(normalizedName, newCategoryId);
+    }
     
     res.json({
       success: true,
@@ -1943,17 +2032,50 @@ app.post('/api/prestashop/products', async (req, res) => {
         
         // Use real category name from available source, fallback to default if not available
         categoryName = categoryName || allegroCategory?.name || 'Imported Category';
+        const normalizedCategoryName = categoryName.trim().toLowerCase();
         
-        // Check if category already exists in PrestaShop before creating
-        const existingCategoryId = await findCategoryByName(categoryName);
+        // Check cache first (fastest check)
+        let existingCategoryId = categoryCache.get(normalizedCategoryName);
+        
+        // If cache has 'creating' marker, wait a bit and check again
+        if (existingCategoryId === 'creating') {
+          // Wait for the other request to finish creating
+          await new Promise(resolve => setTimeout(resolve, 500));
+          existingCategoryId = categoryCache.get(normalizedCategoryName);
+          // If still 'creating', check the database
+          if (existingCategoryId === 'creating') {
+            existingCategoryId = await findCategoryByName(categoryName);
+          }
+        }
+        
+        // If not in cache or was 'creating', check PrestaShop database
+        if (!existingCategoryId || existingCategoryId === 'creating') {
+          existingCategoryId = await findCategoryByName(categoryName);
+        }
+        
+        // Double-check: if still not found, do one more lookup right before creating
+        // This prevents race conditions when multiple products are exported simultaneously
+        if (!existingCategoryId || existingCategoryId === 'creating') {
+          // Small delay to allow any concurrent requests to complete
+          await new Promise(resolve => setTimeout(resolve, 100));
+          // Check one more time
+          existingCategoryId = await findCategoryByName(categoryName);
+        }
+        
         let isNewCategory = false;
         
-        if (existingCategoryId) {
+        // Only proceed if we have a valid numeric ID (not 'creating' marker)
+        if (existingCategoryId && existingCategoryId !== 'creating' && !isNaN(existingCategoryId)) {
           // Category already exists, use the existing one
           finalCategoryId = existingCategoryId;
+          // Ensure it's in cache
+          categoryCache.set(normalizedCategoryName, existingCategoryId);
           console.log(`Category "${categoryName}" already exists in PrestaShop (ID: ${finalCategoryId}), using existing category`);
         } else {
           // Category doesn't exist, create it
+          // Mark in cache immediately to prevent concurrent creation
+          // We'll update with the actual ID after creation
+          categoryCache.set(normalizedCategoryName, 'creating');
           isNewCategory = true;
           // Build category description from available Allegro category data
           let categoryDescription = '';
@@ -1981,18 +2103,32 @@ app.post('/api/prestashop/products', async (req, res) => {
             ]
           };
           
-          // Add description if available
-          if (categoryDescription) {
-            categoryData.description = [
-              { id: 1, value: categoryDescription },
-              { id: 2, value: categoryDescription }
-            ];
+          // Final check right before creating - double protection against race conditions
+          const finalCheck = await findCategoryByName(categoryName);
+          if (finalCheck && finalCheck !== 'creating' && !isNaN(finalCheck)) {
+            // Category was created by another request while we were preparing
+            finalCategoryId = finalCheck;
+            categoryCache.set(normalizedCategoryName, finalCategoryId);
+            console.log(`Category "${categoryName}" was created by another request (ID: ${finalCategoryId}), using existing category`);
+            isNewCategory = false;
+          } else {
+            // Safe to create - no duplicate exists
+            // Add description if available
+            if (categoryDescription) {
+              categoryData.description = [
+                { id: 1, value: categoryDescription },
+                { id: 2, value: categoryDescription }
+              ];
+            }
+            const categoryXml = buildCategoryXml(categoryData);
+            const categoryRes = await prestashopApiRequest('categories', 'POST', categoryXml);
+            finalCategoryId = categoryRes.category?.id || categoryRes.id || 2;
+            
+            // Update cache with the actual category ID
+            categoryCache.set(normalizedCategoryName, finalCategoryId);
+            
+            console.log(`Created new category "${categoryName}" (ID: ${finalCategoryId}) from Allegro category ID: ${offer.category.id}`);
           }
-          const categoryXml = buildCategoryXml(categoryData);
-          const categoryRes = await prestashopApiRequest('categories', 'POST', categoryXml);
-          finalCategoryId = categoryRes.category?.id || categoryRes.id || 2;
-          
-          console.log(`Created new category "${categoryName}" (ID: ${finalCategoryId}) from Allegro category ID: ${offer.category.id}`);
         }
         
         // Handle category image if Allegro provides it (only for newly created categories)
