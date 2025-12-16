@@ -622,12 +622,15 @@ async function uploadCategoryImage(categoryId, imageBuffer, imageName = 'image.j
     });
     
     if (response.status >= 400) {
-      throw new Error(`PrestaShop image upload returned status ${response.status}`);
+      const error = new Error(`PrestaShop category image upload returned status ${response.status}`);
+      error.response = response;
+      throw error;
     }
     
     return response.data;
   } catch (error) {
-    console.error('PrestaShop category image upload error:', error.message);
+    // Don't log as error - category images are optional and may not be supported
+    // The calling code will handle this gracefully
     throw error;
   }
 }
@@ -815,13 +818,18 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
     
     return response.data;
   } catch (error) {
-    console.error('PrestaShop API Error:', {
-      code: error.code,
-      message: error.message,
-      status: error.response?.status,
-      url: error.config?.url,
-      data: error.response?.data
-    });
+    // Only log errors that aren't from category image uploads (which are optional)
+    // Category image uploads use axios directly and handle their own errors
+    const isCategoryImageError = error.config?.url?.includes('/images/categories/');
+    if (!isCategoryImageError) {
+      console.error('PrestaShop API Error:', {
+        code: error.code,
+        message: error.message,
+        status: error.response?.status,
+        url: error.config?.url,
+        data: error.response?.data
+      });
+    }
     
     // Provide user-friendly error messages
     if (error.code === 'ECONNREFUSED') {
@@ -1734,34 +1742,51 @@ async function findCategoryByName(categoryName) {
     let limit = 1000;
     let offset = 0;
     let hasMore = true;
+    let paginationSupported = true;
     
     // Fetch categories in batches to handle pagination
     while (hasMore) {
-      const data = await prestashopApiRequest(`categories?limit=${limit}&offset=${offset}`, 'GET');
-      
-      // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
-      let categories = [];
-      if (data.categories) {
-        if (Array.isArray(data.categories)) {
-          categories = data.categories.map(item => item.category || item);
-        } else if (data.categories.category) {
-          categories = Array.isArray(data.categories.category) 
-            ? data.categories.category 
-            : [data.categories.category];
+      try {
+        const data = await prestashopApiRequest(`categories?limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`, 'GET');
+        
+        // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
+        let categories = [];
+        if (data.categories) {
+          if (Array.isArray(data.categories)) {
+            categories = data.categories.map(item => item.category || item);
+          } else if (data.categories.category) {
+            categories = Array.isArray(data.categories.category) 
+              ? data.categories.category 
+              : [data.categories.category];
+          }
+        } else if (data.category) {
+          categories = Array.isArray(data.category) ? data.category : [data.category];
         }
-      } else if (data.category) {
-        categories = Array.isArray(data.category) ? data.category : [data.category];
-      }
-      
-      if (categories.length === 0) {
-        hasMore = false;
-      } else {
-        allCategories = allCategories.concat(categories);
-        // If we got fewer categories than the limit, we've reached the end
-        if (categories.length < limit) {
+        
+        if (categories.length === 0) {
           hasMore = false;
         } else {
-          offset += limit;
+          allCategories = allCategories.concat(categories);
+          // If we got fewer categories than the limit, we've reached the end
+          if (categories.length < limit) {
+            hasMore = false;
+          } else if (paginationSupported) {
+            offset += limit;
+          } else {
+            // Pagination not supported, stop after first batch
+            hasMore = false;
+          }
+        }
+      } catch (paginationError) {
+        // If pagination fails (404), PrestaShop may not support offset parameter
+        // Just use the categories we've fetched so far
+        if (paginationError.response?.status === 404 && offset > 0) {
+          paginationSupported = false;
+          hasMore = false;
+          // Don't log this as an error - it's expected for some PrestaShop versions
+        } else {
+          // Re-throw if it's a different error or first page fails
+          throw paginationError;
         }
       }
     }
@@ -2173,8 +2198,14 @@ app.post('/api/prestashop/products', async (req, res) => {
             await uploadCategoryImage(finalCategoryId, imageBuffer, imageName);
             console.log(`Successfully uploaded category image`);
           } catch (categoryImageError) {
-            console.error(`Failed to upload category image:`, categoryImageError.message);
-            // Continue even if category image upload fails
+            // Category image upload is optional - PrestaShop may not support it via API
+            // Suppress 404 errors for category images as they're not critical
+            if (categoryImageError.response?.status === 404) {
+              console.log(`Category image upload not supported for category ${finalCategoryId} (404 - endpoint may not be available in this PrestaShop version)`);
+            } else {
+              console.warn(`Failed to upload category image:`, categoryImageError.message);
+            }
+            // Continue even if category image upload fails - this is optional
           }
         }
       } catch (error) {

@@ -169,28 +169,24 @@
                         <div class="section-header">
                             <h2>Imported Products <span id="importedCount" class="count-badge">0</span></h2>
                             <div class="section-actions">
+                                <label style="display: flex; align-items: center; gap: 8px; font-size: 14px; margin-right: 10px; cursor: pointer;">
+                                    <span class="info-icon-wrapper" style="position: relative; display: inline-flex; align-items: center;">
+                                        <svg class="info-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="cursor: help;">
+                                            <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5" fill="none"/>
+                                            <path d="M8 6V8M8 10H8.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                        </svg>
+                                        <div class="info-tooltip">
+                                            When enabled, categories will be automatically created in PrestaShop if they don't already exist. The system checks for duplicates to prevent creating the same category twice.
+                                        </div>
+                                    </span>
+                                    <input type="checkbox" id="autoCreateCategories" checked style="margin: 0;">
+                                    <span>Auto-create categories if not found</span>
+                                </label>
                                 <button id="clearImportedBtn" class="btn btn-secondary btn-small" disabled>Clear</button>
                                 <button id="exportToPrestashopBtn" class="btn btn-success btn-small" disabled>Export to PrestaShop</button>
                             </div>
                         </div>
                         <div id="importedList" class="imported-list"></div>
-                    </div>
-
-                    <!-- Category Settings Section -->
-                    <div class="section-card" id="prestashopCategoriesSection">
-                        <div class="section-header">
-                            <h2>Category Settings</h2>
-                            <div class="section-actions">
-                                <label style="display: flex; align-items: center; gap: 10px; font-size: 14px;">
-                                    <input type="checkbox" id="autoCreateCategories" checked>
-                                    Auto-create categories if not found
-                                </label>
-                            </div>
-                        </div>
-                        <p style="padding: 10px 20px; color: #666; font-size: 14px; margin: 0;">
-                            When enabled, categories will be automatically created in PrestaShop if they don't already exist. 
-                            The system checks for duplicates to prevent creating the same category twice.
-                        </p>
                     </div>
                 </main>
             </div>

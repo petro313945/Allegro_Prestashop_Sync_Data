@@ -178,6 +178,61 @@ body {
     font-weight: 600;
 }
 
+/* Info Icon and Tooltip Styles */
+.info-icon-wrapper {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.info-icon {
+    color: #666;
+    transition: color 0.2s ease;
+}
+
+.info-icon:hover {
+    color: #1a73e8;
+}
+
+.info-tooltip {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    background: #333;
+    color: #fff;
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.4;
+    white-space: normal;
+    width: 280px;
+    max-width: 90vw;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    word-wrap: break-word;
+}
+
+.info-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #333;
+}
+
+.info-icon-wrapper:hover .info-tooltip {
+    opacity: 1;
+    visibility: visible;
+}
+
 .section-actions {
     display: flex;
     align-items: center;
