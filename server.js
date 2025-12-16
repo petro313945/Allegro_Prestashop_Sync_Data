@@ -1890,6 +1890,7 @@ async function findCategoryByName(categoryName) {
             const categoryId = category.id || category.category?.id;
             if (categoryId) {
               return categoryId;
+            }
           }
         }
       }
