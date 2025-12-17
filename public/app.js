@@ -2590,9 +2590,28 @@ async function exportToPrestashop() {
     if (!confirm(`Export ${importedOffers.length} product(s) to PrestaShop?`)) {
         return;
     }
-    
+
+    const exportBtn = document.getElementById('exportToPrestashopBtn');
+    const clearImportedBtn = document.getElementById('clearImportedBtn');
+    const importSelectedBtn = document.getElementById('importSelectedBtn');
+    const progressContainer = document.getElementById('exportProgress');
+    const progressBarFill = document.getElementById('exportProgressBarFill');
+    const progressText = document.getElementById('exportProgressText');
+
+    // Disable actions while export is running
+    if (exportBtn) exportBtn.disabled = true;
+    if (clearImportedBtn) clearImportedBtn.disabled = true;
+    if (importSelectedBtn) importSelectedBtn.disabled = true;
+
+    // Initialise and show progress UI
+    if (progressContainer && progressBarFill && progressText) {
+        progressContainer.style.display = 'flex';
+        progressBarFill.style.width = '0%';
+        progressText.textContent = `Starting export (0/${importedOffers.length})…`;
+    }
+
     showToast('Starting export to PrestaShop...', 'info');
-    
+
     let successCount = 0;
     let errorCount = 0;
     const errors = [];
@@ -2643,6 +2662,14 @@ async function exportToPrestashop() {
         
         // Small delay to avoid overwhelming the API
         await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Update progress bar
+        if (progressBarFill && progressText) {
+            const completed = i + 1;
+            const percent = Math.round((completed / importedOffers.length) * 100);
+            progressBarFill.style.width = `${percent}%`;
+            progressText.textContent = `Exporting products… ${completed}/${importedOffers.length} (${percent}%)`;
+        }
     }
     
     // Show final results
@@ -2651,6 +2678,27 @@ async function exportToPrestashop() {
         console.error('Export errors:', errors);
     } else {
         showToast(`Successfully exported ${successCount} product(s) to PrestaShop!`, 'success', 10000);
+    }
+
+    // Hide progress UI after a short delay
+    if (progressContainer) {
+        setTimeout(() => {
+            progressContainer.style.display = 'none';
+        }, 1500);
+    }
+
+    // Re-enable buttons based on current state
+    if (clearImportedBtn) {
+        clearImportedBtn.disabled = importedOffers.length === 0;
+    }
+    // Export button state depends on imported offers and PrestaShop config
+    updateExportButtonState();
+    // Import selected button state is controlled by auth + selection
+    if (typeof updateUIState === 'function') {
+        updateUIState();
+    } else if (importSelectedBtn) {
+        const selectedCheckboxes = document.querySelectorAll('.offer-checkbox:checked');
+        importSelectedBtn.disabled = !authenticated || selectedCheckboxes.length === 0;
     }
 }
 
