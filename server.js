@@ -903,6 +903,19 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
         url: error.config?.url,
         data: error.response?.data
       });
+
+      // Also log full raw error payload for easier debugging (e.g. 500 errors)
+      if (error.response?.data) {
+        try {
+          console.error(
+            'PrestaShop API raw error:',
+            JSON.stringify(error.response.data, null, 2)
+          );
+        } catch (stringifyError) {
+          // Fallback if response.data contains circular structures
+          console.error('PrestaShop API raw error (non-JSON):', error.response.data);
+        }
+      }
     }
     
     // Provide user-friendly error messages
