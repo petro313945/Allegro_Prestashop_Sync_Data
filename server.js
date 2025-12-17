@@ -764,7 +764,6 @@ function buildProductXml(product) {
     <available_for_order>${xmlEscape(product.available_for_order !== undefined ? product.available_for_order : 1)}</available_for_order>
     <show_price>${xmlEscape(product.show_price !== undefined ? product.show_price : 1)}</show_price>
     <indexed>${xmlEscape(product.indexed !== undefined ? product.indexed : 1)}</indexed>
-    <manufacturer_name>${xmlEscape(product.manufacturer_name || '')}</manufacturer_name>
     <on_sale>${xmlEscape(product.on_sale !== undefined ? product.on_sale : 0)}</on_sale>
     <online_only>${xmlEscape(product.online_only !== undefined ? product.online_only : 0)}</online_only>
     <is_virtual>${xmlEscape(product.is_virtual !== undefined ? product.is_virtual : 0)}</is_virtual>
@@ -2330,10 +2329,6 @@ app.post('/api/prestashop/products', async (req, res) => {
       isNewProduct = true;
       // Build product data for PrestaShop
       const baseName = offer.name || 'Imported product';
-      const manufacturerName =
-        (offer.producer && String(offer.producer).trim()) ||
-        (offer.manufacturer && String(offer.manufacturer).trim()) ||
-        '';
       const slug = prestashopSlug(baseName);
 
       const productData = {
@@ -2379,7 +2374,6 @@ app.post('/api/prestashop/products', async (req, res) => {
         indexed: '1',
 
         // Extra safe defaults to match PrestaShop expectations
-        manufacturer_name: manufacturerName,
         on_sale: '0',
         online_only: '0',
         is_virtual: '0',
