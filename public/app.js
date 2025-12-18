@@ -1694,6 +1694,47 @@ async function fetchProductDetails(productId) {
                 imageUrl = firstImage.url || firstImage.uri || firstImage.path || firstImage.src || '';
             }
             
+            // Count total images for the product
+            const imageUrls = new Set();
+            
+            // Count primaryImage
+            if (product.primaryImage && product.primaryImage.url) {
+                imageUrls.add(product.primaryImage.url);
+            }
+            
+            // Count images array
+            if (product.images) {
+                if (Array.isArray(product.images)) {
+                    product.images.forEach(img => {
+                        if (typeof img === 'object' && img !== null) {
+                            const url = img.url || img.uri || img.path || img.src || img.link;
+                            if (url) imageUrls.add(url);
+                        } else if (typeof img === 'string' && img.startsWith('http')) {
+                            imageUrls.add(img);
+                        }
+                    });
+                } else if (typeof product.images === 'string' && product.images.startsWith('http')) {
+                    imageUrls.add(product.images);
+                } else if (typeof product.images === 'object' && product.images !== null) {
+                    const url = product.images.url || product.images.uri || product.images.path || product.images.src;
+                    if (url) imageUrls.add(url);
+                }
+            }
+            
+            // Count alternative image locations
+            const altImage = product.image || product.imageUrl || product.photo || product.thumbnail;
+            if (altImage) imageUrls.add(altImage);
+            
+            // Count media.images
+            if (product.media && product.media.images && Array.isArray(product.media.images)) {
+                product.media.images.forEach(img => {
+                    const url = typeof img === 'string' ? img : (img.url || img.uri || img);
+                    if (url) imageUrls.add(url);
+                });
+            }
+            
+            const imageCount = imageUrls.size;
+            
             // Update the card if we found an image
             if (imageUrl) {
                 const imageWrapper = card.querySelector('.offer-image-wrapper');
@@ -1705,6 +1746,12 @@ async function fetchProductDetails(productId) {
                         <div class="offer-image-placeholder" style="display: none;">
                             <span>No Image</span>
                         </div>
+                        ${imageCount > 1 ? `
+                            <div class="offer-image-count-badge" title="${imageCount} images">
+                                <span class="offer-image-count-icon">📷</span>
+                                <span class="offer-image-count-number">${imageCount}</span>
+                            </div>
+                        ` : ''}
                     `;
                 }
             }
@@ -1759,6 +1806,48 @@ function createOfferCard(product) {
             }
         }
     }
+    
+    // Count total images for the product
+    let imageCount = 0;
+    const imageUrls = new Set();
+    
+    // Count primaryImage
+    if (product.primaryImage && product.primaryImage.url) {
+        imageUrls.add(product.primaryImage.url);
+    }
+    
+    // Count images array
+    if (product.images) {
+        if (Array.isArray(product.images)) {
+            product.images.forEach(img => {
+                if (typeof img === 'object' && img !== null) {
+                    const url = img.url || img.uri || img.path || img.src || img.link;
+                    if (url) imageUrls.add(url);
+                } else if (typeof img === 'string' && img.startsWith('http')) {
+                    imageUrls.add(img);
+                }
+            });
+        } else if (typeof product.images === 'string' && product.images.startsWith('http')) {
+            imageUrls.add(product.images);
+        } else if (typeof product.images === 'object' && product.images !== null) {
+            const url = product.images.url || product.images.uri || product.images.path || product.images.src;
+            if (url) imageUrls.add(url);
+        }
+    }
+    
+    // Count alternative image locations
+    const altImage = product.image || product.imageUrl || product.photo || product.thumbnail;
+    if (altImage) imageUrls.add(altImage);
+    
+    // Count media.images
+    if (product.media && product.media.images && Array.isArray(product.media.images)) {
+        product.media.images.forEach(img => {
+            const url = typeof img === 'string' ? img : (img.url || img.uri || img);
+            if (url) imageUrls.add(url);
+        });
+    }
+    
+    imageCount = imageUrls.size;
 
     // Extract badges from product data
     const badges = [];
@@ -2019,6 +2108,12 @@ function createOfferCard(product) {
                         <div class="offer-image-placeholder" style="display: none;">
                             <span>No Image</span>
                         </div>
+                        ${imageCount > 1 ? `
+                            <div class="offer-image-count-badge" title="${imageCount} images">
+                                <span class="offer-image-count-icon">📷</span>
+                                <span class="offer-image-count-number">${imageCount}</span>
+                            </div>
+                        ` : ''}
                     ` : `
                         <div class="offer-image-placeholder">
                             <span>No Image</span>
