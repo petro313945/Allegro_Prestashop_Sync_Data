@@ -5,3 +5,13 @@ node_modules/
 dist/
 build/
 
+# Data files (should not be committed)
+.product_mappings.json
+.category_cache.json
+
+# Configuration files (keep local, but don't commit sensitive data)
+# Uncomment these if you want to ignore credentials in git:
+# .tokens.json
+# .credentials.json
+# .prestashop.json
+
