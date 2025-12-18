@@ -1682,17 +1682,36 @@ async function fetchProductDetails(productId) {
             const card = document.querySelector(`[data-product-id="${productId}"]`);
             if (!card) return;
             
+            // Count ALL available images from Allegro (same logic as createOfferCard)
+            let imageUrls = [];
             let imageUrl = '';
             
             // Check primaryImage first (Allegro /sale/offers format)
             if (product.primaryImage && product.primaryImage.url) {
+                imageUrls.push(product.primaryImage.url);
                 imageUrl = product.primaryImage.url;
             }
+            
             // Check images array
-            else if (product.images && Array.isArray(product.images) && product.images.length > 0) {
-                const firstImage = product.images[0];
-                imageUrl = firstImage.url || firstImage.uri || firstImage.path || firstImage.src || '';
+            if (product.images && Array.isArray(product.images)) {
+                product.images.forEach(img => {
+                    let imgUrl = '';
+                    if (typeof img === 'object' && img !== null) {
+                        imgUrl = img.url || img.uri || img.path || img.src || img.link || '';
+                    } else if (typeof img === 'string' && img.startsWith('http')) {
+                        imgUrl = img;
+                    }
+                    if (imgUrl && !imageUrls.includes(imgUrl)) {
+                        imageUrls.push(imgUrl);
+                    }
+                });
+                if (!imageUrl && imageUrls.length > 0) {
+                    imageUrl = imageUrls[0];
+                }
             }
+            
+            // Count total images (limit to 5 as per backend logic)
+            const totalImageCount = Math.min(imageUrls.length, 5);
             
             // Update the card if we found an image
             if (imageUrl) {
@@ -1702,6 +1721,12 @@ async function fetchProductDetails(productId) {
                         <img src="${imageUrl}" alt="${escapeHtml(product.name || 'Product')}" class="offer-image" 
                              loading="lazy"
                              onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                        ${totalImageCount > 1 ? `
+                            <div class="offer-image-count-badge" title="${totalImageCount} images available from Allegro">
+                                <span class="offer-image-count-icon">📷</span>
+                                <span class="offer-image-count-number">${totalImageCount}</span>
+                            </div>
+                        ` : ''}
                         <div class="offer-image-placeholder" style="display: none;">
                             <span>No Image</span>
                         </div>
@@ -1719,46 +1744,84 @@ async function fetchProductDetails(productId) {
 
 // Create offer card HTML (for products from /sale/products endpoint)
 function createOfferCard(product) {
-    // Extract product image - check multiple possible locations
+    // Count ALL available images from Allegro (same logic as backend)
+    let imageUrls = [];
     let mainImage = '';
     
     // Method 1: Check primaryImage.url (Allegro /sale/offers API format)
     if (product.primaryImage && product.primaryImage.url) {
+        imageUrls.push(product.primaryImage.url);
         mainImage = product.primaryImage.url;
     }
+    
     // Method 2: Check product.images array (standard Allegro API format)
-    else if (product.images) {
+    if (product.images) {
         if (Array.isArray(product.images) && product.images.length > 0) {
-            const firstImage = product.images[0];
-            if (typeof firstImage === 'object' && firstImage !== null) {
-                // Try common image URL properties
-                mainImage = firstImage.url || firstImage.uri || firstImage.path || firstImage.src || firstImage.link || '';
-            } else if (typeof firstImage === 'string' && firstImage.startsWith('http')) {
-                mainImage = firstImage;
+            product.images.forEach(img => {
+                let imgUrl = '';
+                if (typeof img === 'object' && img !== null) {
+                    imgUrl = img.url || img.uri || img.path || img.src || img.link || '';
+                } else if (typeof img === 'string' && img.startsWith('http')) {
+                    imgUrl = img;
+                }
+                if (imgUrl && !imageUrls.includes(imgUrl)) {
+                    imageUrls.push(imgUrl);
+                }
+            });
+            // Set mainImage to first image if not already set
+            if (!mainImage && imageUrls.length > 0) {
+                mainImage = imageUrls[0];
             }
         } else if (typeof product.images === 'string' && product.images.startsWith('http')) {
-            mainImage = product.images;
+            if (!imageUrls.includes(product.images)) {
+                imageUrls.push(product.images);
+            }
+            if (!mainImage) {
+                mainImage = product.images;
+            }
         } else if (typeof product.images === 'object' && product.images !== null) {
-            mainImage = product.images.url || product.images.uri || product.images.path || product.images.src || '';
-        }
-    }
-    // Method 3: Check alternative image locations (some APIs use different fields)
-    else if (!mainImage) {
-        mainImage = product.image || product.imageUrl || product.photo || product.thumbnail || '';
-    }
-    // Method 4: Check if images are in a nested structure (e.g. product.media.images)
-    // This must be a separate check (not "else if") so it still runs
-    // when previous strategies didn't find any usable image URL.
-    if (!mainImage && product.media && product.media.images) {
-        if (Array.isArray(product.media.images) && product.media.images.length > 0) {
-            const firstMediaImage = product.media.images[0];
-            if (typeof firstMediaImage === 'object' && firstMediaImage !== null) {
-                mainImage = firstMediaImage.url || firstMediaImage.uri || firstMediaImage.path || firstMediaImage.src || '';
-            } else if (typeof firstMediaImage === 'string' && firstMediaImage.startsWith('http')) {
-                mainImage = firstMediaImage;
+            const imgUrl = product.images.url || product.images.uri || product.images.path || product.images.src || '';
+            if (imgUrl && !imageUrls.includes(imgUrl)) {
+                imageUrls.push(imgUrl);
+            }
+            if (!mainImage && imgUrl) {
+                mainImage = imgUrl;
             }
         }
     }
+    
+    // Method 3: Check alternative image locations (some APIs use different fields)
+    const altImage = product.image || product.imageUrl || product.photo || product.thumbnail || '';
+    if (altImage && !imageUrls.includes(altImage)) {
+        imageUrls.push(altImage);
+    }
+    if (!mainImage && altImage) {
+        mainImage = altImage;
+    }
+    
+    // Method 4: Check if images are in a nested structure (e.g. product.media.images)
+    if (product.media && product.media.images) {
+        if (Array.isArray(product.media.images) && product.media.images.length > 0) {
+            product.media.images.forEach(img => {
+                let imgUrl = '';
+                if (typeof img === 'object' && img !== null) {
+                    imgUrl = img.url || img.uri || img.path || img.src || '';
+                } else if (typeof img === 'string' && img.startsWith('http')) {
+                    imgUrl = img;
+                }
+                if (imgUrl && !imageUrls.includes(imgUrl)) {
+                    imageUrls.push(imgUrl);
+                }
+            });
+            // Set mainImage to first media image if not already set
+            if (!mainImage && imageUrls.length > 0) {
+                mainImage = imageUrls[0];
+            }
+        }
+    }
+    
+    // Count total images (limit to 5 as per backend logic)
+    const totalImageCount = Math.min(imageUrls.length, 5);
 
     // Extract badges from product data
     const badges = [];
@@ -2016,6 +2079,12 @@ function createOfferCard(product) {
                         <img src="${mainImage}" alt="${escapeHtml(productName)}" class="offer-image" 
                              loading="lazy"
                              onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                        ${totalImageCount > 1 ? `
+                            <div class="offer-image-count-badge" title="${totalImageCount} images available from Allegro">
+                                <span class="offer-image-count-icon">📷</span>
+                                <span class="offer-image-count-number">${totalImageCount}</span>
+                            </div>
+                        ` : ''}
                         <div class="offer-image-placeholder" style="display: none;">
                             <span>No Image</span>
                         </div>
@@ -2335,32 +2404,62 @@ function displayImportedOffers() {
     }
     
     importedListEl.innerHTML = importedOffers.map(offer => {
-        // Extract product image - same logic as createOfferCard
+        // Count ALL available images from Allegro (same logic as createOfferCard)
+        let imageUrls = [];
         let mainImage = '';
         
         // Method 1: Check primaryImage.url (Allegro /sale/offers API format)
         if (offer.primaryImage && offer.primaryImage.url) {
+            imageUrls.push(offer.primaryImage.url);
             mainImage = offer.primaryImage.url;
         }
+        
         // Method 2: Check offer.images array
-        else if (offer.images) {
+        if (offer.images) {
             if (Array.isArray(offer.images) && offer.images.length > 0) {
-                const firstImage = offer.images[0];
-                if (typeof firstImage === 'object' && firstImage !== null) {
-                    mainImage = firstImage.url || firstImage.uri || firstImage.path || firstImage.src || firstImage.link || '';
-                } else if (typeof firstImage === 'string' && firstImage.startsWith('http')) {
-                    mainImage = firstImage;
+                offer.images.forEach(img => {
+                    let imgUrl = '';
+                    if (typeof img === 'object' && img !== null) {
+                        imgUrl = img.url || img.uri || img.path || img.src || img.link || '';
+                    } else if (typeof img === 'string' && img.startsWith('http')) {
+                        imgUrl = img;
+                    }
+                    if (imgUrl && !imageUrls.includes(imgUrl)) {
+                        imageUrls.push(imgUrl);
+                    }
+                });
+                if (!mainImage && imageUrls.length > 0) {
+                    mainImage = imageUrls[0];
                 }
             } else if (typeof offer.images === 'string' && offer.images.startsWith('http')) {
-                mainImage = offer.images;
+                if (!imageUrls.includes(offer.images)) {
+                    imageUrls.push(offer.images);
+                }
+                if (!mainImage) {
+                    mainImage = offer.images;
+                }
             } else if (typeof offer.images === 'object' && offer.images !== null) {
-                mainImage = offer.images.url || offer.images.uri || offer.images.path || offer.images.src || '';
+                const imgUrl = offer.images.url || offer.images.uri || offer.images.path || offer.images.src || '';
+                if (imgUrl && !imageUrls.includes(imgUrl)) {
+                    imageUrls.push(imgUrl);
+                }
+                if (!mainImage && imgUrl) {
+                    mainImage = imgUrl;
+                }
             }
         }
+        
         // Method 3: Check alternative image locations
-        else if (!mainImage) {
-            mainImage = offer.image || offer.imageUrl || offer.photo || offer.thumbnail || '';
+        const altImage = offer.image || offer.imageUrl || offer.photo || offer.thumbnail || '';
+        if (altImage && !imageUrls.includes(altImage)) {
+            imageUrls.push(altImage);
         }
+        if (!mainImage && altImage) {
+            mainImage = altImage;
+        }
+        
+        // Count total images (limit to 5 as per backend logic)
+        const totalImageCount = Math.min(imageUrls.length, 5);
         
         const productName = offer.name || 'Untitled Product';
         // Truncate product name to keep it short
@@ -2375,6 +2474,12 @@ function displayImportedOffers() {
                     <img src="${mainImage}" alt="${escapeHtml(productName)}" class="imported-item-img" 
                          loading="lazy"
                          onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                    ${totalImageCount > 1 ? `
+                        <div class="offer-image-count-badge" title="${totalImageCount} images available from Allegro">
+                            <span class="offer-image-count-icon">📷</span>
+                            <span class="offer-image-count-number">${totalImageCount}</span>
+                        </div>
+                    ` : ''}
                     <div class="imported-item-image-placeholder" style="display: none;">
                         <span>No Image</span>
                     </div>
