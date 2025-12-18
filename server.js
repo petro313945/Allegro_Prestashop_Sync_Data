@@ -1401,12 +1401,57 @@ app.get('/api/offers', async (req, res) => {
       const data = await allegroApiRequest('/sale/offers', params, true); // Use user token
       
       // Log sample offer structure to debug
+      if (data.offers && data.offers.length > 0) {
+        const sampleOffer = data.offers[0];
+        console.log('Sample offer structure:', {
+          id: sampleOffer.id,
+          hasImages: !!sampleOffer.images,
+          imagesLength: sampleOffer.images?.length || 0,
+          hasPrimaryImage: !!sampleOffer.primaryImage,
+          imageKeys: Object.keys(sampleOffer).filter(k => k.toLowerCase().includes('image'))
+        });
+      }
+      
+      // Enhance offers with full image data if missing
+      // The /sale/offers list endpoint may not return full images array
+      // Only fetch full details for offers that have primaryImage but no images array
+      // (suggesting there might be more images), and limit to first 20 to avoid performance issues
+      const offersToEnhance = (data.offers || []).slice(0, 20); // Limit to first 20 for performance
+      const enhancedOffers = await Promise.all((data.offers || []).map(async (offer, index) => {
+        // Check if offer has images array with multiple images
+        const hasImagesArray = offer.images && Array.isArray(offer.images) && offer.images.length > 0;
+        const hasPrimaryImage = offer.primaryImage && offer.primaryImage.url;
+        
+        // Only fetch full details if:
+        // 1. No images array exists
+        // 2. Has primaryImage (suggesting there might be more images)
+        // 3. Within the first 20 offers (to avoid performance issues)
+        if (!hasImagesArray && hasPrimaryImage && offer.id && index < 20) {
+          try {
+            const fullOfferData = await allegroApiRequest(`/sale/offers/${offer.id}`, {}, true);
+            
+            // Merge images data from full offer if available
+            if (fullOfferData.images && Array.isArray(fullOfferData.images) && fullOfferData.images.length > 0) {
+              offer.images = fullOfferData.images;
+              console.log(`Fetched full offer details for ${offer.id}, found ${fullOfferData.images.length} images`);
+            } else if (fullOfferData.primaryImage && !offer.primaryImage) {
+              // At least ensure primaryImage is set
+              offer.primaryImage = fullOfferData.primaryImage;
+            }
+          } catch (fetchError) {
+            // Silently continue if fetching full details fails
+            console.warn(`Failed to fetch full details for offer ${offer.id}:`, fetchError.message);
+          }
+        }
+        
+        return offer;
+      }));
       
       // Normalize response structure for frontend according to API docs
       // API returns: { "offers": [...], "count": 1, "totalCount": 1234 }
       const normalizedData = {
-        offers: data.offers || [],
-        count: data.count || (data.offers ? data.offers.length : 0),
+        offers: enhancedOffers,
+        count: data.count || (enhancedOffers ? enhancedOffers.length : 0),
         totalCount: data.totalCount || data.count || 0
       };
       
@@ -2520,8 +2565,29 @@ app.post('/api/prestashop/products', async (req, res) => {
       }
     }
     
+    // Method 4: Check if images are in a nested structure (e.g. offer.media.images)
+    if (offer.media && offer.media.images && Array.isArray(offer.media.images)) {
+      offer.media.images.forEach(img => {
+        let imgUrl = '';
+        if (typeof img === 'object' && img !== null) {
+          imgUrl = img.url || img.uri || img.path || img.src || '';
+        } else if (typeof img === 'string' && img.startsWith('http')) {
+          imgUrl = img;
+        }
+        if (imgUrl && imgUrl.length > 0 && !imageUrls.includes(imgUrl)) {
+          imageUrls.push(imgUrl);
+        }
+      });
+    }
+    
     // Log image extraction for debugging
-    console.log(`Extracted ${imageUrls.length} image(s) for offer ${offer.id}:`, imageUrls);
+    console.log(`Extracted ${imageUrls.length} image(s) for offer ${offer.id}:`, {
+      imagesArrayLength: offer.images?.length || 0,
+      hasPrimaryImage: !!offer.primaryImage,
+      hasMediaImages: !!(offer.media?.images?.length),
+      extractedCount: imageUrls.length,
+      urls: imageUrls
+    });
     
     // Limit to 5 images total
     imageUrls = imageUrls.slice(0, 5);
