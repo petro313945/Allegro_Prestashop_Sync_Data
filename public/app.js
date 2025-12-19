@@ -18,6 +18,11 @@ let currentPhrase = ''; // Track current search phrase
 let currentPageNumber = 1; // Track current page number
 let currentStatusFilter = 'ALL'; // ALL | ACTIVE | ENDED
 
+// Category tree state (Allegro hierarchy)
+let categoryTreePath = []; // Array of { id, name } from root to current parent
+let categoryTreeCache = {}; // Cache of categories per parent: { [parentIdOrRoot]: categories[] }
+let categoryTreeInitialized = false; // Avoid reloading root tree unnecessarily
+
 // PrestaShop state
 let prestashopConfigured = false;
 let prestashopAuthorized = false; // Track if PrestaShop connection is successfully tested/authorized
@@ -491,7 +496,10 @@ function setupEventListeners() {
         reloadCategoriesBtn.addEventListener('click', async () => {
             reloadCategoriesBtn.disabled = true;
             try {
+                // Reload categories derived from offers (for PrestaShop mapping)
                 await loadCategoriesFromOffers();
+                // Reload full Allegro category tree in sidebar
+                await loadCategoryTreeRoot(true);
             } finally {
                 reloadCategoriesBtn.disabled = !isAuthenticated || !isOAuthConnected;
             }
@@ -970,6 +978,11 @@ async function checkOAuthStatus() {
         // Update UI state to refresh Load Offers button and other controls
         updateUIState(true);
 
+        // When OAuth is connected, ensure the Allegro category tree is loaded
+        if (isOAuthConnected) {
+            await loadCategoryTreeRoot(false);
+        }
+
         // If everything is configured on this device, auto-load offers after refresh
         await autoLoadOffersIfReady();
     } catch (error) {
@@ -1033,6 +1046,8 @@ async function authorizeAccount() {
                     showToast('Account authorized successfully!', 'success');
                     // Load categories from user's offers (only categories with products)
                     await loadCategoriesFromOffers();
+                    // Load full Allegro category tree for sidebar navigation
+                    await loadCategoryTreeRoot(true);
                     // Refresh offers if already loaded
                     if (currentOffers.length > 0 || currentPageNumber > 1) {
                         await fetchOffers(currentOffset, currentLimit);
@@ -1297,11 +1312,6 @@ async function fetchAllOffers() {
             displayOffersPage();
             updateImportButtons();
         }
-        
-        // Update categories to show only those with products
-        if (allCategories.length > 0) {
-            displayCategories(allCategories);
-        }
     } catch (error) {
         // Show detailed error message
         let errorMsg = error.message || 'Request failed';
@@ -1544,11 +1554,6 @@ async function displayOffers(offers) {
     
     // Display first page
     displayOffersPage();
-    
-    // Update categories to show only those with products
-    if (allCategories.length > 0) {
-        displayCategories(allCategories);
-    }
 }
 
 // Get offers filtered by current search phrase and status (ALL / ACTIVE / ENDED)
@@ -3403,9 +3408,8 @@ function loadOffersAndCategoriesFromStorage() {
             categoriesWithProducts = JSON.parse(savedCategoriesWithProducts) || [];
         }
 
-        // Display categories if we have any saved
+        // Update category select dropdown if we have saved categories
         if (allCategories.length > 0) {
-            displayCategories(allCategories);
             updateCategorySelect();
         }
 
@@ -3511,12 +3515,13 @@ async function loadCategoriesFromOffers() {
                 }
             }));
             
-            // Store categories
+            // Store categories for use with PrestaShop export/mapping and dropdowns.
+            // The sidebar tree itself is now loaded directly from Allegro's category
+            // hierarchy (see loadCategoryTreeRoot / loadCategoryTreeLevel).
             allCategories = categoriesArray;
             categoriesWithProducts = categoriesArray;
             
-            // Display categories
-            displayCategories(categoriesArray);
+            // Update category select dropdown in the Offers section
             updateCategorySelect();
             
             // Update dashboard stats
@@ -3543,6 +3548,69 @@ async function loadCategoriesFromOffers() {
 // Legacy function - kept for backward compatibility but redirects to loadCategoriesFromOffers
 async function loadCategories() {
     await loadCategoriesFromOffers();
+}
+
+// -----------------------------
+// Allegro category tree (sidebar)
+// -----------------------------
+
+// Load root-level Allegro categories and render tree in sidebar
+async function loadCategoryTreeRoot(forceReload = false) {
+    if (!validateAuth() || !isOAuthConnected) {
+        return;
+    }
+
+    const rootKey = 'root';
+    if (!forceReload && categoryTreeInitialized && categoryTreeCache[rootKey]) {
+        await displayCategories(categoryTreeCache[rootKey], []);
+        return;
+    }
+
+    await loadCategoryTreeLevel(null, [], forceReload);
+}
+
+// Load a specific level of the Allegro category tree by parent ID
+async function loadCategoryTreeLevel(parentId = null, path = [], forceReload = false) {
+    if (!validateAuth() || !isOAuthConnected) {
+        return;
+    }
+
+    const categoriesListEl = document.getElementById('categoriesList');
+    if (!categoriesListEl) return;
+
+    const key = parentId || 'root';
+    categoryTreePath = path || [];
+
+    if (!forceReload && categoryTreeCache[key]) {
+        await displayCategories(categoryTreeCache[key], categoryTreePath);
+        categoryTreeInitialized = true;
+        return;
+    }
+
+    categoriesListEl.innerHTML = '<div style="text-align: center; padding: 20px; color: #1a73e8; font-size: 0.9em;">Loading Allegro categories…</div>';
+
+    try {
+        let url = `${API_BASE}/api/categories`;
+        if (parentId) {
+            url += `?parentId=${encodeURIComponent(parentId)}`;
+        }
+
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error('Failed to load categories from Allegro.');
+        }
+
+        const result = await response.json();
+        const categories = result?.data?.categories || [];
+
+        categoryTreeCache[key] = categories;
+        categoryTreeInitialized = true;
+
+        await displayCategories(categories, categoryTreePath);
+    } catch (error) {
+        console.error('Error loading Allegro category tree:', error);
+        categoriesListEl.innerHTML = `<p style="text-align: center; padding: 20px; color: #c5221f;">Failed to load categories. ${escapeHtml(error.message || 'Please try again.')}</p>`;
+    }
 }
 
 // Fetch category name by ID
@@ -3577,105 +3645,15 @@ async function fetchCategoryName(categoryId) {
 }
 
 // Display categories
-async function displayCategories(categories) {
+async function displayCategories(categories, pathOverride) {
     const categoriesListEl = document.getElementById('categoriesList');
     const categorySearchInputEl = document.getElementById('categorySearchInput');
-    
-    // Extract unique category IDs and names from loaded offers
-    const categoriesFromOffers = new Map(); // Map<categoryId, {id, name, count}>
-    
-    if (allLoadedOffers.length > 0) {
-        allLoadedOffers.forEach(offer => {
-            let offerCategoryId = null;
-            let offerCategoryName = null;
-            
-            // Try multiple ways to extract category
-            if (offer.category) {
-                if (typeof offer.category === 'string') {
-                    offerCategoryId = offer.category;
-                } else if (offer.category.id) {
-                    offerCategoryId = offer.category.id;
-                    offerCategoryName = offer.category.name || null;
-                }
-            }
-            
-            // Also check other possible locations
-            if (!offerCategoryId && offer.product?.category) {
-                if (typeof offer.product.category === 'string') {
-                    offerCategoryId = offer.product.category;
-                } else if (offer.product.category.id) {
-                    offerCategoryId = offer.product.category.id;
-                    offerCategoryName = offer.product.category.name || null;
-                }
-            }
-            
-            if (offerCategoryId) {
-                const catId = String(offerCategoryId);
-                if (!categoriesFromOffers.has(catId)) {
-                    categoriesFromOffers.set(catId, {
-                        id: catId,
-                        name: offerCategoryName || categoryNameCache[catId] || `Category ${catId}`,
-                        count: 0
-                    });
-                }
-                categoriesFromOffers.get(catId).count++;
-            }
-        });
-        
-        console.log(`Found ${categoriesFromOffers.size} unique categories in offers`);
-        console.log('Sample offer structure:', allLoadedOffers[0] ? {
-            hasCategory: !!allLoadedOffers[0].category,
-            categoryType: typeof allLoadedOffers[0].category,
-            categoryValue: allLoadedOffers[0].category
-        } : 'No offers');
-    }
-    
-    // Filter categories to only show those with products if we have loaded offers
-    let categoriesToDisplay = categories;
-    if (categoriesFromOffers.size > 0) {
-        // First, try to match with API categories
-        const matchedCategories = categories.filter(category => {
-            return categoriesFromOffers.has(String(category.id));
-        });
-        
-        // If we found matches, use them (they have proper names from API)
-        if (matchedCategories.length > 0) {
-            categoriesToDisplay = matchedCategories;
-            // Update category names from offers if available
-            matchedCategories.forEach(cat => {
-                const offerCat = categoriesFromOffers.get(String(cat.id));
-                if (offerCat && offerCat.name && offerCat.name !== `Category ${cat.id}`) {
-                    cat.name = offerCat.name;
-                }
-            });
-        } else {
-            // No matches with API categories, create categories from offers
-            categoriesToDisplay = Array.from(categoriesFromOffers.values()).map(cat => ({
-                id: cat.id,
-                name: cat.name
-            }));
-            console.log('Created categories from offers:', categoriesToDisplay.length);
-        }
-        
-        categoriesWithProducts = categoriesToDisplay;
-    } else {
-        // If no offers loaded yet, show all categories
-        categoriesWithProducts = categories;
-    }
-    
-    if (categoriesToDisplay.length === 0 && categories.length > 0 && allLoadedOffers.length === 0) {
-        categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories with products found. Load offers first.</p>';
-        return;
-    } else if (categoriesToDisplay.length === 0 && categories.length === 0) {
-        categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories found.</p>';
-        return;
-    } else if (categoriesToDisplay.length === 0 && allLoadedOffers.length > 0) {
-        // Offers loaded but no categories found - this shouldn't happen, but show a message
-        categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #1a73e8;">No categories found in offers. Offers may not have category information.</p>';
-        return;
-    }
-    
-    // Helper: apply search filter text (client-side, no extra requests)
+    if (!categoriesListEl) return;
+
+    const path = Array.isArray(pathOverride) ? pathOverride : (categoryTreePath || []);
+    let categoriesToDisplay = Array.isArray(categories) ? [...categories] : [];
+
+    // Apply simple client-side search within the current level
     let searchText = '';
     if (categorySearchInputEl) {
         searchText = categorySearchInputEl.value.trim().toLowerCase();
@@ -3686,44 +3664,105 @@ async function displayCategories(categories) {
         );
     }
 
-    // Render "All Categories" option first in list
+    const htmlParts = [];
+
+    // Breadcrumb showing where we are in the tree
+    if (path.length > 0) {
+        const breadcrumb = path
+            .map(p => escapeHtml(p.name || `Category ${p.id}`))
+            .join(' / ');
+        htmlParts.push(`<div class="category-breadcrumb">${breadcrumb}</div>`);
+
+        const prevPath = path.slice(0, -1);
+        const prevName = prevPath.length > 0
+            ? prevPath[prevPath.length - 1].name
+            : 'root categories';
+        htmlParts.push(`
+            <div class="category-back" data-role="back">
+                go back to ${escapeHtml(prevName || 'root categories')}
+            </div>
+        `);
+    }
+
+    // "All Categories" item to clear filter and go back to root
     const allCategoriesSelected = selectedCategoryId === null;
-    let html = `
-        <div class="category-item ${allCategoriesSelected ? 'selected' : ''}" data-category-id="all">
+    htmlParts.push(`
+        <div class="category-item ${allCategoriesSelected ? 'selected' : ''}" data-role="all">
             <span class="category-item-name">All Categories</span>
         </div>
-    `;
-    
-    // Render categories in sidebar list
-    html += categoriesToDisplay.map(category => {
-        const isSelected = selectedCategoryId === category.id;
-        return `
-            <div class="category-item ${isSelected ? 'selected' : ''}" data-category-id="${category.id}">
-                <span class="category-item-name">${escapeHtml(category.name || 'Unnamed Category')}</span>
-            </div>
-        `;
-    }).join('');
-    
-    categoriesListEl.innerHTML = html;
-    
-    // Add click listeners for sidebar items
-    document.querySelectorAll('.category-item').forEach(item => {
+    `);
+
+    if (!categoriesToDisplay || categoriesToDisplay.length === 0) {
+        htmlParts.push('<p style="text-align: center; padding: 20px; color: #1a73e8;">No subcategories found.</p>');
+        categoriesListEl.innerHTML = htmlParts.join('');
+    } else {
+        // Render current level categories
+        htmlParts.push(
+            categoriesToDisplay.map(category => {
+                const isSelected = selectedCategoryId !== null &&
+                    String(selectedCategoryId) === String(category.id);
+                const safeName = escapeHtml(category.name || 'Unnamed Category');
+                const isLeaf = !!category.leaf;
+                return `
+                    <div class="category-item ${isSelected ? 'selected' : ''}"
+                         data-category-id="${category.id}"
+                         data-category-name="${safeName}"
+                         data-leaf="${isLeaf ? 'true' : 'false'}">
+                        <span class="category-item-name">${safeName}</span>
+                        ${isLeaf ? '' : '<span class="category-chevron">›</span>'}
+                    </div>
+                `;
+            }).join('')
+        );
+
+        categoriesListEl.innerHTML = htmlParts.join('');
+    }
+
+    // "All Categories" handler
+    const allItem = categoriesListEl.querySelector('.category-item[data-role="all"]');
+    if (allItem) {
+        allItem.addEventListener('click', () => {
+            selectCategory(null); // reset filter
+            // Reset tree to root without forcing reload (will reuse cache)
+            loadCategoryTreeRoot(false);
+        });
+    }
+
+    // Back navigation handler
+    const backEl = categoriesListEl.querySelector('.category-back[data-role="back"]');
+    if (backEl) {
+        backEl.addEventListener('click', () => {
+            const prevPath = path.slice(0, -1);
+            const prevParentId = prevPath.length > 0 ? prevPath[prevPath.length - 1].id : null;
+            loadCategoryTreeLevel(prevParentId, prevPath);
+        });
+    }
+
+    // Category click handlers (select + navigate deeper if non-leaf)
+    categoriesListEl.querySelectorAll('.category-item[data-category-id]').forEach(item => {
         item.addEventListener('click', () => {
             const categoryId = item.dataset.categoryId;
-            if (categoryId === 'all') {
-                selectCategory(null); // null means "All Categories"
-            } else {
+            const categoryName = item.dataset.categoryName || '';
+            const isLeaf = item.dataset.leaf === 'true';
+
+            if (categoryId) {
+                // Use standard selection logic to filter offers
                 selectCategory(categoryId);
+            }
+
+            // Navigate to subcategories for non-leaf categories
+            if (!isLeaf && categoryId) {
+                const newPath = [...path, { id: categoryId, name: categoryName }];
+                loadCategoryTreeLevel(categoryId, newPath);
             }
         });
     });
 
-    // Wire up search box once
+    // Wire up search box once (re-renders current level with new filter text)
     if (categorySearchInputEl && !categorySearchInputEl.dataset.bound) {
         categorySearchInputEl.dataset.bound = 'true';
         categorySearchInputEl.addEventListener('input', () => {
-            // Re-render using same base categories but with new filter text
-            displayCategories(categories);
+            displayCategories(categories, path);
         });
     }
 }
