@@ -49,6 +49,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateUIState(false);
     // Update button states on initialization
     updateButtonStates();
+    // Update sync category button state
+    if (typeof updateSyncCategoryButtonState === 'function') {
+        updateSyncCategoryButtonState();
+    }
 
     // Data will be loaded fresh from Allegro API when user clicks "Load My Offers"
 });
@@ -304,10 +308,18 @@ function updateButtonStates() {
             if (typeof updateCsvExportButtonsState === 'function') {
                 updateCsvExportButtonsState();
             }
+            // Update sync category button state
+            if (typeof updateSyncCategoryButtonState === 'function') {
+                updateSyncCategoryButtonState();
+            }
         } else {
             // Ensure CSV export buttons are disabled when PrestaShop is not configured
             if (typeof updateCsvExportButtonsState === 'function') {
                 updateCsvExportButtonsState();
+            }
+            // Update sync category button state
+            if (typeof updateSyncCategoryButtonState === 'function') {
+                updateSyncCategoryButtonState();
             }
             // Not connected: blue, enabled, shows "Connect"
             prestashopConnectBtn.textContent = 'Connect';
@@ -327,6 +339,26 @@ function updateButtonStates() {
                 prestashopApiKeyInput.readOnly = false;
             }
         }
+    }
+}
+
+// Update sync category button state based on categories and PrestaShop configuration
+function updateSyncCategoryButtonState() {
+    const syncCategoriesBtn = document.getElementById('syncCategoriesBtn');
+    if (!syncCategoriesBtn) return;
+    
+    // Enable button only if categories are loaded and PrestaShop is configured and authorized
+    const hasCategories = allCategories && allCategories.length > 0;
+    const canSync = hasCategories && prestashopConfigured && prestashopAuthorized;
+    
+    syncCategoriesBtn.disabled = !canSync;
+    
+    if (!hasCategories) {
+        syncCategoriesBtn.title = 'Load categories first';
+    } else if (!prestashopConfigured || !prestashopAuthorized) {
+        syncCategoriesBtn.title = 'PrestaShop must be configured and authorized';
+    } else {
+        syncCategoriesBtn.title = '';
     }
 }
 
@@ -380,6 +412,11 @@ function setupEventListeners() {
     const loadOffersBtn = document.getElementById('loadOffersBtn');
     if (loadOffersBtn) {
         loadOffersBtn.addEventListener('click', async () => {
+            // Show confirmation alert
+            if (!confirm('Are you sure you want to load offers from Allegro?')) {
+                return;
+            }
+            
             // Fixed page size: always 30 offers per page
             const limit = 30;
             currentLimit = limit;
@@ -454,6 +491,34 @@ function setupEventListeners() {
     // Removed loadCategoriesBtn and clearCategoryBtn - categories load automatically after OAuth
     document.getElementById('clearImportedBtn').addEventListener('click', clearImportedProducts);
     document.getElementById('exportToPrestashopBtn').addEventListener('click', exportToPrestashop);
+    
+    // Sync Categories button event listener
+    const syncCategoriesBtn = document.getElementById('syncCategoriesBtn');
+    if (syncCategoriesBtn) {
+        syncCategoriesBtn.addEventListener('click', async () => {
+            if (syncCategoriesBtn.disabled) return;
+            
+            // Show confirmation alert
+            if (!confirm('Are you sure you want to sync categories to PrestaShop?')) {
+                return;
+            }
+            
+            syncCategoriesBtn.disabled = true;
+            syncCategoriesBtn.textContent = 'Syncing...';
+            
+            try {
+                await syncCategoriesToPrestashop();
+                // Note: syncCategoriesToPrestashop() already shows toast notifications
+            } catch (error) {
+                console.error('Error syncing categories:', error);
+                showToast('Failed to sync categories. Please try again.', 'error');
+            } finally {
+                syncCategoriesBtn.disabled = false;
+                syncCategoriesBtn.textContent = 'Sync Category';
+                updateSyncCategoryButtonState();
+            }
+        });
+    }
     
     // Removed Created Products feature - no longer needed
     
@@ -796,6 +861,12 @@ async function clearPrestashopConfig() {
     
     // Update UI state
     updateUIState(true);
+    updateButtonStates();
+    
+    // Update sync category button state
+    if (typeof updateSyncCategoryButtonState === 'function') {
+        updateSyncCategoryButtonState();
+    }
     
     // Clear backend configuration (optional - you may want to call an API endpoint)
     try {
@@ -886,6 +957,11 @@ function updateUIState(configured) {
         } else {
             importSelectedBtn.title = '';
         }
+    }
+    
+    // Update sync category button state
+    if (typeof updateSyncCategoryButtonState === 'function') {
+        updateSyncCategoryButtonState();
     }
 }
 
@@ -2833,6 +2909,14 @@ function importSelected() {
     
     const offersToImport = currentOffers.filter(offer => selectedIds.includes(offer.id));
     importOffers(offersToImport);
+    
+    // Unselect all checkboxes after import
+    selectedCheckboxes.forEach(checkbox => {
+        checkbox.checked = false;
+    });
+    
+    // Update UI state to reflect unselected checkboxes
+    updateImportButtons();
 }
 
 // Import offers
@@ -3277,6 +3361,7 @@ async function testPrestashopConnection() {
             updateConfigStatuses();
             checkPrestashopStatus();
             updateUIState(true); // Update UI to enable Allegro Categories and Load Offers
+            updateButtonStates(); // Update all button states including sync category button
         } else {
             // Show error with line breaks if it contains \n
             const errorMsg = (testData.error || 'Connection failed').replace(/\n/g, '<br>');
@@ -3379,6 +3464,7 @@ async function checkPrestashopStatus() {
         updateConfigStatuses();
         updateExportButtonState();
         updateUIState(true); // Update UI state to reflect PrestaShop authorization status
+        updateButtonStates(); // Update all button states including sync category button
 
         // If everything is configured on this device, auto-load offers after refresh
         await autoLoadOffersIfReady();
@@ -3386,6 +3472,7 @@ async function checkPrestashopStatus() {
         console.error('Error checking PrestaShop status:', error);
         prestashopAuthorized = false;
         updateUIState(true); // Update UI state even on error
+        updateButtonStates(); // Update button states even on error
     }
 }
 
@@ -4256,13 +4343,8 @@ async function loadCategoriesFromOffers() {
         // Categories changed, refresh CSV export buttons state
         updateCsvExportButtonsState();
 
-        // Sync categories to PrestaShop after loading (only creates if they don't exist)
-        if (categoriesArray.length > 0) {
-            // Run in background without blocking UI
-            syncCategoriesToPrestashop().catch(error => {
-                console.error('Error syncing categories to PrestaShop:', error);
-            });
-        }
+        // Enable sync button if categories are loaded and PrestaShop is configured
+        updateSyncCategoryButtonState();
     } catch (error) {
         console.error('Error loading categories from offers:', error);
         categoriesListEl.innerHTML = '<p style="text-align: center; padding: 20px; color: #c5221f;">Failed to load categories. Please try again.</p>';
@@ -4428,7 +4510,8 @@ async function displayCategories(categories, pathOverride) {
     const totalOffersCount = totalOffersCountFromAPI !== null ? totalOffersCountFromAPI : (allLoadedOffers ? allLoadedOffers.length : 0);
     htmlParts.push(`
         <div class="category-item ${allCategoriesSelected ? 'selected' : ''}" data-role="all">
-            <span class="category-item-name">All Categories${totalOffersCount > 0 ? ` <span class="category-item-count">${totalOffersCount}</span>` : ''}</span>
+            <span class="category-item-name">All Categories</span>
+            ${totalOffersCount > 0 ? `<span class="category-item-count">${totalOffersCount}</span>` : ''}
         </div>
     `);
 
@@ -4449,8 +4532,11 @@ async function displayCategories(categories, pathOverride) {
                          data-category-id="${category.id}"
                          data-category-name="${safeName}"
                          data-leaf="${isLeaf ? 'true' : 'false'}">
-                        <span class="category-item-name">${safeName}${count > 0 ? ` <span class="category-item-count">${count}</span>` : ''}</span>
-                        ${isLeaf ? '' : '<span class="category-chevron">›</span>'}
+                        <span class="category-item-name">${safeName}</span>
+                        <div class="category-item-right">
+                            ${count > 0 ? `<span class="category-item-count">${count}</span>` : ''}
+                            ${isLeaf ? '' : '<span class="category-chevron">›</span>'}
+                        </div>
                     </div>
                 `;
             }).join('')

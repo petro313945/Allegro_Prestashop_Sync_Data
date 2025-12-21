@@ -733,11 +733,19 @@ input[type="checkbox"] {
     gap: 8px;
 }
 
+.sidebar-header-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
 .sidebar-header h2 {
     font-size: 1.2em;
     color: #333;
-    margin-bottom: 12px;
+    margin: 0;
     font-weight: 500;
+    flex: 1;
 }
 
 .sidebar-header-sub {
@@ -815,6 +823,12 @@ input[type="checkbox"] {
     color: #ffffff;
 }
 
+.category-item-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .category-item-count {
     display: inline-block;
     background: #e8f0fe;
@@ -823,7 +837,6 @@ input[type="checkbox"] {
     border-radius: 12px;
     font-size: 0.75em;
     font-weight: 600;
-    margin-left: 8px;
     white-space: nowrap;
     opacity: 1;
     transition: all 0.2s ease;
@@ -1011,10 +1024,6 @@ input[type="checkbox"] {
     color: #666;
     font-size: 0.9em;
     margin-bottom: 20px;
-    padding: 12px;
-    background: #f8f9fa;
-    border-radius: 6px;
-    border-left: 3px solid #1a73e8;
 }
 
 .search-section {
@@ -2387,10 +2396,6 @@ input[type="checkbox"] {
 /* Sync Stock Log Styles */
 .sync-log-info {
     margin-bottom: 20px;
-    padding: 15px;
-    background: #f8f9fa;
-    border-radius: 6px;
-    border: 1px solid #e0e0e0;
 }
 
 .sync-log-info-header {
