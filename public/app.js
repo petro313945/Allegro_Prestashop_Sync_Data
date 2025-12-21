@@ -773,7 +773,6 @@ async function clearPrestashopConfig() {
     // Clear input fields
     document.getElementById('prestashopUrl').value = '';
     document.getElementById('prestashopApiKey').value = '';
-    document.getElementById('disableStockSyncToAllegro').checked = false;
     
     // Remove from localStorage
     localStorage.removeItem('prestashopConfig');
@@ -805,8 +804,7 @@ async function clearPrestashopConfig() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 baseUrl: '',
-                apiKey: '',
-                disableStockSyncToAllegro: false
+                apiKey: ''
             })
         });
     } catch (error) {
@@ -1737,12 +1735,6 @@ async function displayOffersPage() {
     const startIndex = currentOffset;
     const endIndex = Math.min(startIndex + currentLimit, filteredOffers.length);
     const pageOffers = filteredOffers.slice(startIndex, endIndex);
-    
-    // Update tab badge
-    const tabOffersCount = document.getElementById('tabOffersCount');
-    if (tabOffersCount) {
-        tabOffersCount.textContent = filteredOffers.length;
-    }
     
     // Update dashboard stats
     updateDashboardStats();
@@ -3187,7 +3179,6 @@ function extractDescription(offer) {
 async function savePrestashopConfig() {
     const url = document.getElementById('prestashopUrl').value.trim();
     const apiKey = document.getElementById('prestashopApiKey').value.trim();
-    const disableStockSync = document.getElementById('disableStockSyncToAllegro').checked;
     
     if (!url || !apiKey) {
         showToast('Please fill in all PrestaShop fields', 'error');
@@ -3204,8 +3195,7 @@ async function savePrestashopConfig() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 baseUrl: url,
-                apiKey: apiKey,
-                disableStockSyncToAllegro: disableStockSync
+                apiKey: apiKey
             })
         });
         
@@ -3213,7 +3203,7 @@ async function savePrestashopConfig() {
         
         if (data.success) {
             showToast('✓ PrestaShop configuration saved successfully!', 'success');
-            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey, disableStockSync }));
+            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey }));
             prestashopConfigured = true;
             // Note: prestashopAuthorized will be set to true only after successful test connection
             prestashopAuthorized = false;
@@ -3260,8 +3250,7 @@ async function testPrestashopConnection() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 baseUrl: url,
-                apiKey: apiKey,
-                disableStockSyncToAllegro: document.getElementById('disableStockSyncToAllegro').checked
+                apiKey: apiKey
             })
         });
         
@@ -3276,8 +3265,7 @@ async function testPrestashopConnection() {
         
         if (testData.success) {
             // Save to localStorage when test succeeds
-            const disableStockSync = document.getElementById('disableStockSyncToAllegro').checked;
-            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey, disableStockSync }));
+            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey }));
             showToast('✓ ' + testData.message, 'success');
             prestashopConfigured = true;
             prestashopAuthorized = true; // Mark PrestaShop as authorized after successful test
@@ -3316,7 +3304,6 @@ function loadPrestashopConfig() {
             // Always use saved URL as default (user's entered URL)
             document.getElementById('prestashopUrl').value = config.url || '';
             document.getElementById('prestashopApiKey').value = config.apiKey || '';
-            document.getElementById('disableStockSyncToAllegro').checked = config.disableStockSync || false;
             
             // Show saved configuration info
             updatePrestashopSavedConfigDisplay(config.url);

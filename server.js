@@ -116,8 +116,7 @@ let userOAuthTokens = {
 // Store PrestaShop credentials
 let prestashopCredentials = {
   baseUrl: null,
-  apiKey: null,
-  disableStockSyncToAllegro: false // Toggle for PrestaShop → Allegro stock sync
+  apiKey: null
 };
 
 // Store product mappings (Allegro offer ID → PrestaShop product ID)
@@ -234,7 +233,6 @@ function savePrestashopCredentials() {
     const credData = {
       baseUrl: prestashopCredentials.baseUrl,
       apiKey: prestashopCredentials.apiKey,
-      disableStockSyncToAllegro: prestashopCredentials.disableStockSyncToAllegro,
       savedAt: new Date().toISOString()
     };
     fs.writeFileSync(PRESTASHOP_CREDENTIALS_FILE, JSON.stringify(credData, null, 2), 'utf8');
@@ -254,7 +252,6 @@ function loadPrestashopCredentials() {
       if (credData.baseUrl && credData.apiKey) {
         prestashopCredentials.baseUrl = credData.baseUrl;
         prestashopCredentials.apiKey = credData.apiKey;
-        prestashopCredentials.disableStockSyncToAllegro = credData.disableStockSyncToAllegro || false;
       }
     }
   } catch (error) {
@@ -2017,7 +2014,7 @@ app.get('/api/test-auth', async (req, res) => {
  */
 app.post('/api/prestashop/configure', (req, res) => {
   try {
-    const { baseUrl, apiKey, disableStockSyncToAllegro } = req.body;
+    const { baseUrl, apiKey } = req.body;
     
     if (!baseUrl || !apiKey) {
       return res.status(400).json({
@@ -2028,7 +2025,6 @@ app.post('/api/prestashop/configure', (req, res) => {
 
     prestashopCredentials.baseUrl = baseUrl;
     prestashopCredentials.apiKey = apiKey;
-    prestashopCredentials.disableStockSyncToAllegro = disableStockSyncToAllegro || false;
     
     savePrestashopCredentials();
     
@@ -2050,8 +2046,7 @@ app.post('/api/prestashop/configure', (req, res) => {
 app.get('/api/prestashop/status', (req, res) => {
   res.json({
     configured: !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey),
-    baseUrl: prestashopCredentials.baseUrl,
-    disableStockSyncToAllegro: prestashopCredentials.disableStockSyncToAllegro
+    baseUrl: prestashopCredentials.baseUrl
   });
 });
 
