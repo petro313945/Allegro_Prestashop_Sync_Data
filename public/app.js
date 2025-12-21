@@ -855,12 +855,45 @@ async function clearPrestashopConfig() {
     // Hide saved configuration info
     hidePrestashopSavedConfigDisplay();
     
+    // Clear backend configuration and all JSON files (prestashop.json, credentials.json, tokens.json)
+    try {
+        const response = await fetch(`${API_BASE}/api/prestashop/disconnect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            showToast('All configuration files cleared successfully', 'success');
+        } else {
+            showToast('Error clearing configuration: ' + (data.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        console.error('Error clearing PrestaShop configuration:', error);
+        showToast('Error clearing configuration: ' + error.message, 'error');
+    }
+    
+    // Also clear Allegro authentication state since credentials were cleared
+    isAuthenticated = false;
+    isOAuthConnected = false;
+    
+    // Update Allegro status indicators
+    const authStatusEl = document.getElementById('authStatus');
+    const oauthStatusEl = document.getElementById('oauthStatus');
+    if (authStatusEl) {
+        authStatusEl.textContent = 'Pending';
+        authStatusEl.className = 'status-value error';
+    }
+    if (oauthStatusEl) {
+        oauthStatusEl.textContent = 'Not Connected';
+        oauthStatusEl.className = 'status-value error';
+    }
     
     // Update config status indicators and button states
     updateConfigStatuses();
     
     // Update UI state
-    updateUIState(true);
+    updateUIState(false);
     updateButtonStates();
     
     // Update sync category button state
@@ -868,21 +901,8 @@ async function clearPrestashopConfig() {
         updateSyncCategoryButtonState();
     }
     
-    // Clear backend configuration (optional - you may want to call an API endpoint)
-    try {
-        await fetch(`${API_BASE}/api/prestashop/configure`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                baseUrl: '',
-                apiKey: ''
-            })
-        });
-    } catch (error) {
-        console.error('Error clearing PrestaShop configuration:', error);
-    }
-    
-    showToast('PrestaShop configuration cleared', 'success');
+    // Hide main interface since credentials are cleared
+    hideMainInterface();
 }
 
 // Check if user is authenticated

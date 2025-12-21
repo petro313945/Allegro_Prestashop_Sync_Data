@@ -249,13 +249,24 @@ function loadPrestashopCredentials() {
     if (fs.existsSync(PRESTASHOP_CREDENTIALS_FILE)) {
       const credData = JSON.parse(fs.readFileSync(PRESTASHOP_CREDENTIALS_FILE, 'utf8'));
       
-      if (credData.baseUrl && credData.apiKey) {
-        prestashopCredentials.baseUrl = credData.baseUrl;
-        prestashopCredentials.apiKey = credData.apiKey;
+      // Only load if both values exist and are non-empty strings (after trimming)
+      const baseUrl = credData.baseUrl ? String(credData.baseUrl).trim() : '';
+      const apiKey = credData.apiKey ? String(credData.apiKey).trim() : '';
+      
+      if (baseUrl && apiKey) {
+        prestashopCredentials.baseUrl = baseUrl;
+        prestashopCredentials.apiKey = apiKey;
+      } else {
+        // Clear credentials if they're empty
+        prestashopCredentials.baseUrl = null;
+        prestashopCredentials.apiKey = null;
       }
     }
   } catch (error) {
     console.error('Error loading PrestaShop credentials:', error.message);
+    // Clear credentials on error
+    prestashopCredentials.baseUrl = null;
+    prestashopCredentials.apiKey = null;
   }
 }
 
@@ -2016,15 +2027,19 @@ app.post('/api/prestashop/configure', (req, res) => {
   try {
     const { baseUrl, apiKey } = req.body;
     
-    if (!baseUrl || !apiKey) {
+    // Validate that both values exist and are non-empty strings (after trimming)
+    const trimmedBaseUrl = baseUrl ? String(baseUrl).trim() : '';
+    const trimmedApiKey = apiKey ? String(apiKey).trim() : '';
+    
+    if (!trimmedBaseUrl || !trimmedApiKey) {
       return res.status(400).json({
         success: false,
-        error: 'Base URL and API key are required'
+        error: 'Base URL and API key are required and cannot be empty'
       });
     }
 
-    prestashopCredentials.baseUrl = baseUrl;
-    prestashopCredentials.apiKey = apiKey;
+    prestashopCredentials.baseUrl = trimmedBaseUrl;
+    prestashopCredentials.apiKey = trimmedApiKey;
     
     savePrestashopCredentials();
     
@@ -2041,12 +2056,95 @@ app.post('/api/prestashop/configure', (req, res) => {
 });
 
 /**
+ * Disconnect PrestaShop (clear all configuration files)
+ */
+app.post('/api/prestashop/disconnect', (req, res) => {
+  try {
+    // Clear PrestaShop credentials
+    prestashopCredentials.baseUrl = null;
+    prestashopCredentials.apiKey = null;
+    
+    // Clear PrestaShop credentials file
+    try {
+      if (fs.existsSync(PRESTASHOP_CREDENTIALS_FILE)) {
+        fs.writeFileSync(PRESTASHOP_CREDENTIALS_FILE, JSON.stringify({
+          baseUrl: '',
+          apiKey: '',
+          savedAt: new Date().toISOString()
+        }, null, 2), 'utf8');
+      }
+    } catch (error) {
+      console.error('Error clearing PrestaShop credentials file:', error.message);
+    }
+    
+    // Clear Allegro credentials file
+    try {
+      if (fs.existsSync(CREDENTIALS_STORAGE_FILE)) {
+        fs.writeFileSync(CREDENTIALS_STORAGE_FILE, JSON.stringify({
+          clientId: '',
+          clientSecret: '',
+          savedAt: new Date().toISOString()
+        }, null, 2), 'utf8');
+      }
+      // Also clear in-memory credentials
+      userCredentials.clientId = null;
+      userCredentials.clientSecret = null;
+    } catch (error) {
+      console.error('Error clearing credentials file:', error.message);
+    }
+    
+    // Clear tokens file
+    try {
+      if (fs.existsSync(TOKEN_STORAGE_FILE)) {
+        fs.writeFileSync(TOKEN_STORAGE_FILE, JSON.stringify({
+          userOAuthTokens: {
+            accessToken: null,
+            refreshToken: null,
+            expiresAt: null,
+            userId: null
+          },
+          accessToken: null,
+          tokenExpiry: null,
+          savedAt: new Date().toISOString()
+        }, null, 2), 'utf8');
+      }
+      // Also clear in-memory tokens
+      userOAuthTokens = {
+        accessToken: null,
+        refreshToken: null,
+        expiresAt: null,
+        userId: null
+      };
+      accessToken = null;
+      tokenExpiry = null;
+    } catch (error) {
+      console.error('Error clearing tokens file:', error.message);
+    }
+    
+    res.json({
+      success: true,
+      message: 'All configuration files cleared successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * Get PrestaShop configuration status
  */
 app.get('/api/prestashop/status', (req, res) => {
+  // Check if both values exist and are non-empty strings (after trimming)
+  const baseUrl = prestashopCredentials.baseUrl ? String(prestashopCredentials.baseUrl).trim() : '';
+  const apiKey = prestashopCredentials.apiKey ? String(prestashopCredentials.apiKey).trim() : '';
+  const configured = !!(baseUrl && apiKey);
+  
   res.json({
-    configured: !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey),
-    baseUrl: prestashopCredentials.baseUrl
+    configured: configured,
+    baseUrl: configured ? baseUrl : null
   });
 });
 
