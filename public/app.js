@@ -24,6 +24,7 @@ let categoryTreeCache = {}; // Cache of categories per parent: { [parentIdOrRoot
 let categoryTreeInitialized = false; // Avoid reloading root tree unnecessarily
 let categoryTreeWithProducts = {}; // Tree structure with only categories that have products: { [categoryId]: { id, name, count, children: {}, parent: id } }
 let categoryProductCounts = {}; // Map of category ID to product count: { [categoryId]: count }
+let totalOffersCountFromAPI = null; // Total count from Allegro API (for accurate "All Categories" display)
 
 // PrestaShop state
 let prestashopConfigured = false;
@@ -4063,6 +4064,9 @@ async function buildCategoryTreeWithProducts(categoriesWithCounts) {
     const batchSize = 10;
     const categoryIds = Array.from(categoryMap.keys());
     
+    // Track leaf category counts to ensure we don't double-count
+    const leafCategoryCounts = new Map();
+    
     for (let i = 0; i < categoryIds.length; i += batchSize) {
         const batch = categoryIds.slice(i, i + batchSize);
         await Promise.all(batch.map(async (catId) => {
@@ -4072,6 +4076,12 @@ async function buildCategoryTreeWithProducts(categoriesWithCounts) {
             if (path && path.length > 0) {
                 // Build tree structure from path
                 let currentLevel = categoryTreeWithProducts;
+                const leafCategoryId = String(path[path.length - 1].id);
+                
+                // Store the leaf category count (each leaf category should only be counted once)
+                if (!leafCategoryCounts.has(leafCategoryId)) {
+                    leafCategoryCounts.set(leafCategoryId, category.count);
+                }
                 
                 for (let j = 0; j < path.length; j++) {
                     const pathNode = path[j];
@@ -4088,11 +4098,6 @@ async function buildCategoryTreeWithProducts(categoriesWithCounts) {
                         };
                     }
                     
-                    // If this is the leaf category (has products), add its count
-                    if (j === path.length - 1) {
-                        currentLevel[pathNodeId].count += category.count;
-                    }
-                    
                     // Ensure children object exists
                     if (!currentLevel[pathNodeId].children) {
                         currentLevel[pathNodeId].children = {};
@@ -4105,22 +4110,30 @@ async function buildCategoryTreeWithProducts(categoriesWithCounts) {
         }));
     }
     
-    // Calculate counts for parent categories (sum of all children)
-    function calculateParentCounts(node) {
-        let totalCount = node.count || 0;
+    // Set category counts correctly: leaf categories get their direct product count,
+    // parent categories get the sum of all products in their subtree
+    function setLeafCounts(node, leafCounts) {
+        // Get direct product count for this category (if it has products directly)
+        const directCount = leafCounts.get(node.id) || 0;
         
-        for (const childId in node.children) {
-            const childCount = calculateParentCounts(node.children[childId]);
-            totalCount += childCount;
+        // Calculate total from all children
+        let childrenTotal = 0;
+        if (node.children && Object.keys(node.children).length > 0) {
+            for (const childId in node.children) {
+                childrenTotal += setLeafCounts(node.children[childId], leafCounts);
+            }
         }
         
-        node.count = totalCount;
-        return totalCount;
+        // Category count = direct products + products from all descendants
+        // Note: In Allegro, typically a category either has direct products OR has children,
+        // but we handle both cases to be safe
+        node.count = directCount + childrenTotal;
+        return node.count;
     }
     
-    // Calculate counts for all root nodes
+    // Set counts for all root nodes
     for (const rootId in categoryTreeWithProducts) {
-        calculateParentCounts(categoryTreeWithProducts[rootId]);
+        setLeafCounts(categoryTreeWithProducts[rootId], leafCategoryCounts);
     }
 }
 
@@ -4173,14 +4186,17 @@ async function loadCategoriesFromOffers() {
     categoriesListEl.innerHTML = '<div style="text-align: center; padding: 20px; color: #1a73e8; font-size: 0.9em;">Loading categories from your offers...</div>';
     
     try {
-        // Fetch ALL offers to get complete category data
+        // Fetch ACTIVE offers by default to match Allegro website count
+        // This ensures category counts match what Allegro displays
         let allOffers = [];
         let offset = 0;
         const limit = 1000; // Maximum allowed by API
         let hasMore = true;
+        let totalCountFromAPI = null; // Store API's totalCount for accurate display
         
         while (hasMore) {
-            const response = await fetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}`);
+            // Filter by ACTIVE status to match Allegro website (which shows ACTIVE offers by default)
+            const response = await fetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}&status=ACTIVE`);
             
             if (!response.ok && response.status === 401) {
                 throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
@@ -4191,6 +4207,11 @@ async function loadCategoriesFromOffers() {
             if (result.success) {
                 const offers = result.data.offers || [];
                 allOffers = allOffers.concat(offers);
+                
+                // Store totalCount from API (this is the accurate count from Allegro)
+                if (totalCountFromAPI === null) {
+                    totalCountFromAPI = result.data.totalCount || 0;
+                }
                 
                 // Check if there are more offers to fetch
                 const totalCount = result.data.totalCount || 0;
@@ -4204,12 +4225,27 @@ async function loadCategoriesFromOffers() {
             }
         }
         
-        console.log(`Loaded ${allOffers.length} total offers from Allegro for category extraction`);
+        // Filter to only active offers for accurate counts
+        const activeOffersForCount = allOffers.filter(offer => {
+            return offer?.publication?.status === 'ACTIVE';
+        });
+        
+        console.log(`Loaded ${allOffers.length} offers from Allegro (${activeOffersForCount.length} ACTIVE) for category extraction (API totalCount: ${totalCountFromAPI || 'N/A'})`);
+        
+        // Store total count of ACTIVE offers for accurate "All Categories" display
+        if (totalCountFromAPI !== null && totalCountFromAPI > 0) {
+            // Use API count if it matches active offers, otherwise use filtered count
+            totalOffersCountFromAPI = activeOffersForCount.length;
+        } else {
+            totalOffersCountFromAPI = activeOffersForCount.length;
+        }
         
         // Extract unique categories from offers with counts
+        // Only count offers with ACTIVE status
         const categoriesFromOffers = new Map();
         
-        allOffers.forEach(offer => {
+        // Use the already filtered active offers for counting
+        activeOffersForCount.forEach(offer => {
             let offerCategoryId = null;
             let offerCategoryName = null;
             
@@ -4249,7 +4285,7 @@ async function loadCategoriesFromOffers() {
         // Convert map to array and fetch category names if needed
         const categoriesArray = Array.from(categoriesFromOffers.values());
         
-        console.log(`Found ${categoriesArray.length} unique categories from ${allOffers.length} offers`);
+        console.log(`Found ${categoriesArray.length} unique categories from ${activeOffersForCount.length} active offers`);
         if (categoriesArray.length > 0) {
             const totalProductsInCategories = categoriesArray.reduce((sum, cat) => sum + (cat.count || 0), 0);
             console.log(`Total products in categories: ${totalProductsInCategories}`);
@@ -4476,9 +4512,11 @@ async function displayCategories(categories, pathOverride) {
 
     // "All Categories" item to clear filter and go back to root
     const allCategoriesSelected = selectedCategoryId === null;
+    // Use API totalCount if available (more accurate), otherwise fall back to loaded offers count
+    const totalOffersCount = totalOffersCountFromAPI !== null ? totalOffersCountFromAPI : (allLoadedOffers ? allLoadedOffers.length : 0);
     htmlParts.push(`
         <div class="category-item ${allCategoriesSelected ? 'selected' : ''}" data-role="all">
-            <span class="category-item-name">All Categories</span>
+            <span class="category-item-name">All Categories${totalOffersCount > 0 ? ` <span class="category-item-count" style="color: #666; font-weight: normal;">(${totalOffersCount})</span>` : ''}</span>
         </div>
     `);
 
@@ -4499,7 +4537,7 @@ async function displayCategories(categories, pathOverride) {
                          data-category-id="${category.id}"
                          data-category-name="${safeName}"
                          data-leaf="${isLeaf ? 'true' : 'false'}">
-                        <span class="category-item-name">${safeName}${count > 0 ? ` <span style="color: #666; font-weight: normal;">(${count})</span>` : ''}</span>
+                        <span class="category-item-name">${safeName}${count > 0 ? ` <span class="category-item-count" style="color: #666; font-weight: normal;">(${count})</span>` : ''}</span>
                         ${isLeaf ? '' : '<span class="category-chevron">›</span>'}
                     </div>
                 `;

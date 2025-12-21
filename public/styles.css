@@ -815,6 +815,19 @@ input[type="checkbox"] {
     color: #ffffff;
 }
 
+.category-item-count {
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.category-item:hover .category-item-count {
+    opacity: 1;
+}
+
+.category-item.selected .category-item-count {
+    opacity: 1;
+}
+
 /* Category tree helpers */
 .category-breadcrumb {
     font-size: 0.75em;

@@ -1450,7 +1450,7 @@ app.post('/api/oauth/disconnect', (req, res) => {
  */
 app.get('/api/offers', async (req, res) => {
   try {
-    let { limit = 20, offset = 0, sellerId } = req.query;
+    let { limit = 20, offset = 0, sellerId, status } = req.query;
     
     // Validate and cap limit
     const parsedLimit = parseInt(limit, 10);
@@ -1476,6 +1476,29 @@ app.get('/api/offers', async (req, res) => {
         limit: limit,
         offset: offset
       };
+      
+      // Add status filter if provided (ACTIVE, ENDED, INACTIVE, ACTIVATING)
+      // Multiple statuses can be specified: status=ACTIVE&status=ENDED
+      // Allegro API expects: publication.status=ACTIVE&publication.status=ENDED
+      if (status) {
+        // Handle both single status and multiple statuses (array or comma-separated)
+        let statusArray = [];
+        if (Array.isArray(status)) {
+          statusArray = status;
+        } else if (typeof status === 'string' && status.includes(',')) {
+          statusArray = status.split(',').map(s => s.trim());
+        } else {
+          statusArray = [status];
+        }
+        
+        // Filter valid statuses and add to params
+        const validStatuses = statusArray.filter(s => ['ACTIVE', 'ENDED', 'INACTIVE', 'ACTIVATING'].includes(s));
+        if (validStatuses.length > 0) {
+          // Axios will automatically convert array to multiple query params
+          params['publication.status'] = validStatuses;
+        }
+      }
+      
       const data = await allegroApiRequest('/sale/offers', params, true); // Use user token
 
       // Log sample offer structure to debug (without extra detail calls)
