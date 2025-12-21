@@ -15,6 +15,7 @@ const CREDENTIALS_STORAGE_FILE = path.join(__dirname, '.credentials.json');
 const PRESTASHOP_CREDENTIALS_FILE = path.join(__dirname, '.prestashop.json');
 const PRODUCT_MAPPINGS_FILE = path.join(__dirname, '.product_mappings.json');
 const CATEGORY_CACHE_FILE = path.join(__dirname, '.category_cache.json');
+const SYNC_LOG_FILE = path.join(__dirname, '.sync_log.json');
 
 // Middleware
 app.use(cors());
@@ -121,6 +122,20 @@ let prestashopCredentials = {
 
 // Store product mappings (Allegro offer ID → PrestaShop product ID)
 let productMappings = {};
+
+// Store sync logs
+let syncLogs = [];
+const MAX_SYNC_LOGS = 1000; // Keep last 1000 log entries
+
+// Sync job state
+let syncJobRunning = false;
+let lastSyncTime = null;
+let nextSyncTime = null;
+const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Configuration: Use setInterval timer (true) or rely on external cron (false)
+// Set to false on Ubuntu to use system cron instead
+const USE_INTERVAL_TIMER = process.env.USE_INTERVAL_TIMER !== 'false'; // Default: true (for Windows dev)
 
 /**
  * Save tokens to file (persistent storage)
@@ -273,6 +288,58 @@ function loadProductMappings() {
 }
 
 /**
+ * Save sync logs to file (persistent storage)
+ */
+function saveSyncLogs() {
+  try {
+    const logData = {
+      logs: syncLogs,
+      savedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(SYNC_LOG_FILE, JSON.stringify(logData, null, 2), 'utf8');
+  } catch (error) {
+    console.error('Error saving sync logs:', error.message);
+  }
+}
+
+/**
+ * Load sync logs from file (on server startup)
+ */
+function loadSyncLogs() {
+  try {
+    if (fs.existsSync(SYNC_LOG_FILE)) {
+      const logData = JSON.parse(fs.readFileSync(SYNC_LOG_FILE, 'utf8'));
+      if (logData.logs && Array.isArray(logData.logs)) {
+        syncLogs = logData.logs;
+        // Enforce MAX_SYNC_LOGS limit
+        if (syncLogs.length > MAX_SYNC_LOGS) {
+          syncLogs = syncLogs.slice(-MAX_SYNC_LOGS);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error loading sync logs:', error.message);
+    syncLogs = [];
+  }
+}
+
+/**
+ * Add a sync log entry
+ */
+function addSyncLog(entry) {
+  const logEntry = {
+    ...entry,
+    timestamp: new Date().toISOString()
+  };
+  syncLogs.push(logEntry);
+  
+  // Enforce MAX_SYNC_LOGS limit
+  if (syncLogs.length > MAX_SYNC_LOGS) {
+    syncLogs = syncLogs.slice(-MAX_SYNC_LOGS);
+  }
+}
+
+/**
  * Save category cache to file (persistent storage)
  */
 function saveCategoryCache() {
@@ -324,6 +391,7 @@ loadCredentials();
 loadTokens();
 loadPrestashopCredentials();
 loadProductMappings();
+loadSyncLogs();
 // Category cache loading is disabled – categories are always checked
 // directly against PrestaShop instead of using a persisted cache.
 loadCategoryCache();
@@ -1143,6 +1211,12 @@ async function allegroApiRequest(endpoint, params = {}, useUserToken = false, cu
     if (error.response?.status === 401) {
       const friendlyError = new Error('Authentication failed. Your credentials may be invalid or expired. Please check your Client ID and Client Secret.');
       friendlyError.status = 401;
+      throw friendlyError;
+    }
+    // Convert 403 error to user-friendly message
+    if (error.response?.status === 403) {
+      const friendlyError = new Error('Access forbidden. Your OAuth token may be expired or missing required permissions. Please reconnect your Allegro account.');
+      friendlyError.status = 403;
       throw friendlyError;
     }
     throw error;
@@ -4019,6 +4093,417 @@ app.get('/api/export/combinations.csv', async (req, res) => {
   }
 });
 
+/**
+ * Sync stock from Allegro to PrestaShop
+ * Only syncs products that exist in PrestaShop (from productMappings)
+ */
+async function syncStockFromAllegroToPrestashop() {
+  if (syncJobRunning) {
+    console.log('Stock sync already running, skipping...');
+    return;
+  }
+
+  // Check if credentials are configured
+  if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
+    addSyncLog({
+      status: 'warning',
+      message: 'PrestaShop not configured. Stock sync skipped.',
+      productName: null,
+      offerId: null,
+      prestashopProductId: null,
+      stockChange: null
+    });
+    return;
+  }
+
+  // Check if user OAuth token exists and is valid
+  if (!userOAuthTokens.accessToken) {
+    addSyncLog({
+      status: 'warning',
+      message: 'Allegro OAuth not authenticated. Stock sync skipped. Please connect your Allegro account in the Settings tab.',
+      productName: null,
+      offerId: null,
+      prestashopProductId: null,
+      stockChange: null
+    });
+    syncJobRunning = false;
+    return;
+  }
+  
+  // Try to validate token by attempting to refresh it if needed
+  try {
+    await getUserAccessToken();
+  } catch (tokenError) {
+    addSyncLog({
+      status: 'error',
+      message: `OAuth token validation failed: ${tokenError.message}. Please reconnect your Allegro account in the Settings tab.`,
+      productName: null,
+      offerId: null,
+      prestashopProductId: null,
+      stockChange: null
+    });
+    syncJobRunning = false;
+    return;
+  }
+
+  syncJobRunning = true;
+  const syncStartTime = new Date().toISOString();
+  let syncedCount = 0;
+  let errorCount = 0;
+  let skippedCount = 0;
+  let consecutive403Errors = 0;
+  const MAX_CONSECUTIVE_403 = 3; // Stop after 3 consecutive 403 errors
+
+  try {
+    console.log('Starting stock sync from Allegro to PrestaShop...');
+    
+    // Get all product mappings (only products that exist in PrestaShop)
+    const offerIds = Object.keys(productMappings);
+    
+    if (offerIds.length === 0) {
+      addSyncLog({
+        status: 'info',
+        message: 'No products to sync. No products have been exported to PrestaShop yet.',
+        productName: null,
+        offerId: null,
+        prestashopProductId: null,
+        stockChange: null
+      });
+      syncJobRunning = false;
+      return;
+    }
+
+    // Process in batches to avoid overwhelming the API
+    const batchSize = 10;
+    for (let i = 0; i < offerIds.length; i += batchSize) {
+      // Stop if we've hit too many consecutive 403 errors
+      if (consecutive403Errors >= MAX_CONSECUTIVE_403) {
+        addSyncLog({
+          status: 'error',
+          message: `Stopped sync due to multiple authentication errors. Please reconnect your Allegro account in the Settings tab.`,
+          productName: null,
+          offerId: null,
+          prestashopProductId: null,
+          stockChange: null
+        });
+        break;
+      }
+      
+      const batch = offerIds.slice(i, i + batchSize);
+      
+      await Promise.all(batch.map(async (offerId) => {
+        try {
+          const mapping = productMappings[offerId];
+          if (!mapping || !mapping.prestashopProductId) {
+            skippedCount++;
+            return;
+          }
+
+          // Get current stock from Allegro
+          let allegroStock = 0;
+          try {
+            const offerData = await allegroApiRequest(`/sale/offers/${offerId}`, {}, true);
+            allegroStock = offerData.stock?.available || 0;
+            // Reset 403 counter on success
+            consecutive403Errors = 0;
+          } catch (error) {
+            console.error(`Error fetching Allegro offer ${offerId}:`, error.message);
+            
+            // Check if this is a 403 error
+            const is403Error = error.response?.status === 403 || error.status === 403;
+            if (is403Error) {
+              consecutive403Errors++;
+            } else {
+              consecutive403Errors = 0; // Reset counter for non-403 errors
+            }
+            
+            // Provide more specific error message for 403 errors
+            let errorMessage = error.message;
+            if (is403Error) {
+              errorMessage = 'Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.';
+            } else if (error.message.includes('OAuth')) {
+              errorMessage = 'OAuth authentication required. Please connect your Allegro account in the Settings tab.';
+            }
+            
+            addSyncLog({
+              status: 'error',
+              message: `Failed to fetch stock from Allegro: ${errorMessage}`,
+              productName: mapping.productName || `Offer ${offerId}`,
+              offerId: offerId,
+              prestashopProductId: mapping.prestashopProductId,
+              stockChange: null
+            });
+            errorCount++;
+            return;
+          }
+
+          // Get current stock from PrestaShop
+          let prestashopStock = 0;
+          try {
+            const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${mapping.prestashopProductId}]`, 'GET');
+            if (stockData.stock_availables) {
+              const stocks = Array.isArray(stockData.stock_availables) 
+                ? stockData.stock_availables 
+                : [stockData.stock_availables];
+              if (stocks.length > 0) {
+                const stock = stocks[0].stock_available || stocks[0];
+                prestashopStock = parseInt(stock.quantity) || 0;
+              }
+            }
+          } catch (error) {
+            console.error(`Error fetching PrestaShop stock for product ${mapping.prestashopProductId}:`, error.message);
+            addSyncLog({
+              status: 'error',
+              message: `Failed to fetch stock from PrestaShop: ${error.message}`,
+              productName: mapping.productName || `Offer ${offerId}`,
+              offerId: offerId,
+              prestashopProductId: mapping.prestashopProductId,
+              stockChange: null
+            });
+            errorCount++;
+            return;
+          }
+
+          // Only update if stock has changed
+          if (allegroStock !== prestashopStock) {
+            try {
+              // Get stock available ID
+              const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${mapping.prestashopProductId}]`, 'GET');
+              let stockAvailableId = null;
+              
+              if (stockData.stock_availables) {
+                if (Array.isArray(stockData.stock_availables) && stockData.stock_availables.length > 0) {
+                  stockAvailableId = stockData.stock_availables[0].stock_available?.id || stockData.stock_availables[0].id;
+                } else if (stockData.stock_availables.stock_available) {
+                  stockAvailableId = stockData.stock_availables.stock_available.id;
+                }
+              } else if (stockData.stock_available) {
+                stockAvailableId = stockData.stock_available.id;
+              }
+
+              if (stockAvailableId) {
+                // Update existing stock
+                const stockXml = buildStockAvailableXml({
+                  id: stockAvailableId,
+                  quantity: parseInt(allegroStock),
+                  id_product: mapping.prestashopProductId
+                });
+                await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', stockXml);
+              } else {
+                // Create new stock entry if it doesn't exist
+                const stockXml = buildStockAvailableXml({
+                  quantity: parseInt(allegroStock),
+                  id_product: mapping.prestashopProductId,
+                  id_product_attribute: 0,
+                  id_shop: 1,
+                  id_shop_group: 0,
+                  depends_on_stock: 0,
+                  out_of_stock: allegroStock === 0 ? 1 : 2
+                });
+                await prestashopApiRequest('stock_availables', 'POST', stockXml);
+              }
+
+              // Update mapping sync time
+              mapping.lastStockSync = new Date().toISOString();
+              saveProductMappings();
+
+              syncedCount++;
+              addSyncLog({
+                status: 'success',
+                message: `Stock synced successfully`,
+                productName: mapping.productName || `Offer ${offerId}`,
+                offerId: offerId,
+                prestashopProductId: mapping.prestashopProductId,
+                stockChange: {
+                  from: prestashopStock,
+                  to: allegroStock
+                }
+              });
+            } catch (error) {
+              console.error(`Error updating PrestaShop stock for product ${mapping.prestashopProductId}:`, error.message);
+              addSyncLog({
+                status: 'error',
+                message: `Failed to update stock in PrestaShop: ${error.message}`,
+                productName: mapping.productName || `Offer ${offerId}`,
+                offerId: offerId,
+                prestashopProductId: mapping.prestashopProductId,
+                stockChange: {
+                  from: prestashopStock,
+                  to: allegroStock
+                }
+              });
+              errorCount++;
+            }
+          } else {
+            skippedCount++;
+          }
+        } catch (error) {
+          console.error(`Error processing offer ${offerId}:`, error.message);
+          errorCount++;
+        }
+      }));
+    }
+
+    // Add summary log
+    addSyncLog({
+      status: 'info',
+      message: `Stock sync completed: ${syncedCount} synced, ${skippedCount} unchanged, ${errorCount} errors`,
+      productName: null,
+      offerId: null,
+      prestashopProductId: null,
+      stockChange: null
+    });
+
+    lastSyncTime = syncStartTime;
+    saveSyncLogs();
+    console.log(`Stock sync completed: ${syncedCount} synced, ${skippedCount} unchanged, ${errorCount} errors`);
+  } catch (error) {
+    console.error('Stock sync error:', error.message);
+    addSyncLog({
+      status: 'error',
+      message: `Stock sync failed: ${error.message}`,
+      productName: null,
+      offerId: null,
+      prestashopProductId: null,
+      stockChange: null
+    });
+  } finally {
+    syncJobRunning = false;
+  }
+}
+
+/**
+ * Start the stock sync cron job
+ * Uses setInterval on Windows (development) or can be disabled for Ubuntu cron
+ */
+function startStockSyncCron() {
+  if (USE_INTERVAL_TIMER) {
+    // Use setInterval timer (good for Windows development)
+    const now = Date.now();
+    nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
+    
+    // Run sync immediately on startup (after a short delay to let server initialize)
+    setTimeout(() => {
+      syncStockFromAllegroToPrestashop();
+    }, 10000); // Wait 10 seconds after server starts
+
+    // Then run every 5 minutes
+    setInterval(() => {
+      nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
+      syncStockFromAllegroToPrestashop();
+    }, SYNC_INTERVAL_MS);
+
+    console.log('Stock sync timer started (runs every 5 minutes using setInterval)');
+  } else {
+    // Timer disabled - use external cron on Ubuntu
+    console.log('Stock sync timer disabled. Use system cron to call /api/sync/trigger endpoint.');
+    console.log('On Ubuntu, add to crontab: */5 * * * * curl -X POST http://localhost:3000/api/sync/trigger');
+  }
+}
+
+/**
+ * API: Get sync logs
+ */
+app.get('/api/sync/logs', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    const status = req.query.status; // Optional filter by status
+    
+    let filteredLogs = [...syncLogs];
+    
+    // Filter by status if provided
+    if (status) {
+      filteredLogs = filteredLogs.filter(log => log.status === status);
+    }
+    
+    // Sort by timestamp (newest first) and limit
+    filteredLogs = filteredLogs
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, limit);
+    
+    res.json({
+      success: true,
+      logs: filteredLogs,
+      total: syncLogs.length,
+      lastSyncTime: lastSyncTime,
+      nextSyncTime: nextSyncTime
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Clear sync logs
+ */
+app.post('/api/sync/logs/clear', (req, res) => {
+  try {
+    syncLogs = [];
+    saveSyncLogs();
+    res.json({
+      success: true,
+      message: 'Sync logs cleared'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Trigger manual stock sync
+ * Can be called manually or by external cron (Ubuntu)
+ */
+app.post('/api/sync/trigger', async (req, res) => {
+  try {
+    if (syncJobRunning) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stock sync is already running'
+      });
+    }
+
+    // Run sync in background (don't wait for completion)
+    syncStockFromAllegroToPrestashop().catch(error => {
+      console.error('Sync error:', error);
+    });
+
+    // Return immediately - sync runs in background
+    res.json({
+      success: true,
+      message: 'Stock sync triggered',
+      status: 'running'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Get sync status (for cron monitoring)
+ */
+app.get('/api/sync/status', (req, res) => {
+  res.json({
+    success: true,
+    running: syncJobRunning,
+    lastSyncTime: lastSyncTime,
+    nextSyncTime: nextSyncTime,
+    useIntervalTimer: USE_INTERVAL_TIMER
+  });
+});
+
 // Start server
-app.listen(PORT);
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  // Start the stock sync cron job
+  startStockSyncCron();
+});
 

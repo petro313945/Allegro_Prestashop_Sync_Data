@@ -128,11 +128,11 @@
                         <span>Imported Products</span>
                         <span id="tabImportedCount" class="tab-badge">0</span>
                     </button>
-                    <button class="tab-btn" data-tab="categories">
-                        <span>Categories</span>
-                    </button>
                     <button class="tab-btn" data-tab="csv">
                         <span>CSV Export</span>
+                    </button>
+                    <button class="tab-btn" data-tab="sync-log">
+                        <span>Sync Stock Log</span>
                     </button>
                 </div>
 
@@ -141,8 +141,6 @@
                     <div class="section-card">
                         <div class="section-header">
                             <div style="display: flex; align-items: center; gap: 10px;">
-                                <h2>Allegro Offers</h2>
-                                <span id="resultsCount" class="count-badge">0</span>
                                 <button id="loadOffersBtn" class="btn btn-primary" disabled>Load Offers</button>
                             </div>
                             <div class="section-actions">
@@ -203,8 +201,6 @@
                 <div class="tab-content" id="tab-imported">
                     <div class="section-card">
                         <div class="section-header">
-                            <h2>Imported Products</h2>
-                            <span id="importedCount" class="count-badge">0</span>
                             <div class="section-actions">
                                 <button id="clearImportedBtn" class="btn btn-secondary btn-small" disabled>Clear</button>
                                 <button id="exportToPrestashopBtn" class="btn btn-success btn-small" disabled>Export to PrestaShop</button>
@@ -220,29 +216,9 @@
                     </div>
                 </div>
 
-                <!-- Tab Content: Categories -->
-                <div class="tab-content" id="tab-categories">
-                    <div class="section-card">
-                        <div class="section-header">
-                            <h2>Allegro Categories</h2>
-                            <div class="section-actions">
-                                <button id="reloadCategoriesBtn" class="btn btn-primary btn-small" disabled>Reload Categories</button>
-                            </div>
-                        </div>
-                        <div id="categoriesTabContent" class="categories-tab-content">
-                            <p class="info-text">Select a category from the sidebar to view details, or use the search to find specific categories.</p>
-                            <div id="categoryDetails" class="category-details"></div>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- Tab Content: CSV Export -->
                 <div class="tab-content" id="tab-csv">
                     <div class="section-card">
-                        <div class="section-header">
-                            <h2>CSV Export</h2>
-                            <p class="section-description">Export your data to CSV files for backup, analysis, or import into other systems.</p>
-                        </div>
                         <div class="csv-export-grid">
                             <div class="csv-export-card">
                             <h3>Export Categories</h3>
@@ -261,6 +237,36 @@
                             </div>
                         </div>
                         <div id="csvExportMessage" class="message" style="display: none; margin-top: 20px;"></div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: Sync Stock Log -->
+                <div class="tab-content" id="tab-sync-log">
+                    <div class="section-card">
+                        <div class="sync-log-info">
+                            <div class="sync-log-info-header">
+                                <div class="sync-log-info-content">
+                                    <p class="info-text">
+                                        <strong>Automatic Stock Sync:</strong> Stock is automatically synced from Allegro to PrestaShop every 5 minutes.
+                                        Only products that exist in PrestaShop are synced. Stock changes in PrestaShop do not affect Allegro stock.
+                                    </p>
+                                    <div class="sync-status" id="syncStatus">
+                                        <span class="sync-status-label">Last Sync:</span>
+                                        <span id="lastSyncTime" class="sync-status-value">Never</span>
+                                        <span class="sync-status-label" style="margin-left: 20px;">Next Sync:</span>
+                                        <span id="nextSyncTime" class="sync-status-value">-</span>
+                                    </div>
+                                </div>
+                                <div class="section-actions">
+                                    <button id="refreshSyncLogBtn" class="btn btn-primary btn-small">Refresh</button>
+                                    <button id="clearSyncLogBtn" class="btn btn-secondary btn-small">Clear Log</button>
+                                    <button id="triggerSyncBtn" class="btn btn-success btn-small">Sync Now</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="syncLogContainer" class="sync-log-container">
+                            <div id="syncLogList" class="sync-log-list"></div>
+                        </div>
                     </div>
                 </div>
             </main>

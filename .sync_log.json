@@ -1,0 +1,221 @@
+{
+  "logs": [
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18179757205",
+      "offerId": "18179757205",
+      "prestashopProductId": "163",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.289Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157371809",
+      "offerId": "18157371809",
+      "prestashopProductId": "161",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.298Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164328251",
+      "offerId": "18164328251",
+      "prestashopProductId": "167",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.305Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157371059",
+      "offerId": "18157371059",
+      "prestashopProductId": "168",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.323Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157371668",
+      "offerId": "18157371668",
+      "prestashopProductId": "162",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.327Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164344911",
+      "offerId": "18164344911",
+      "prestashopProductId": "165",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.331Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164347774",
+      "offerId": "18164347774",
+      "prestashopProductId": "164",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.336Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157370994",
+      "offerId": "18157370994",
+      "prestashopProductId": "169",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.345Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164341038",
+      "offerId": "18164341038",
+      "prestashopProductId": "166",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.350Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18149631313",
+      "offerId": "18149631313",
+      "prestashopProductId": "170",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.356Z"
+    },
+    {
+      "status": "error",
+      "message": "Stopped sync due to multiple authentication errors. Please reconnect your Allegro account in the Settings tab.",
+      "productName": null,
+      "offerId": null,
+      "prestashopProductId": null,
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.356Z"
+    },
+    {
+      "status": "info",
+      "message": "Stock sync completed: 0 synced, 0 unchanged, 10 errors",
+      "productName": null,
+      "offerId": null,
+      "prestashopProductId": null,
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:07:08.356Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164347774",
+      "offerId": "18164347774",
+      "prestashopProductId": "164",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.676Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18149631313",
+      "offerId": "18149631313",
+      "prestashopProductId": "170",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.684Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164344911",
+      "offerId": "18164344911",
+      "prestashopProductId": "165",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.696Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18179757205",
+      "offerId": "18179757205",
+      "prestashopProductId": "163",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.700Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157371809",
+      "offerId": "18157371809",
+      "prestashopProductId": "161",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.704Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157371059",
+      "offerId": "18157371059",
+      "prestashopProductId": "168",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.709Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157370994",
+      "offerId": "18157370994",
+      "prestashopProductId": "169",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.713Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164341038",
+      "offerId": "18164341038",
+      "prestashopProductId": "166",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.717Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18157371668",
+      "offerId": "18157371668",
+      "prestashopProductId": "162",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.722Z"
+    },
+    {
+      "status": "error",
+      "message": "Failed to fetch stock from Allegro: Access forbidden. OAuth token expired or missing permissions. Please reconnect your Allegro account in the Settings tab.",
+      "productName": "Offer 18164328251",
+      "offerId": "18164328251",
+      "prestashopProductId": "167",
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.726Z"
+    },
+    {
+      "status": "error",
+      "message": "Stopped sync due to multiple authentication errors. Please reconnect your Allegro account in the Settings tab.",
+      "productName": null,
+      "offerId": null,
+      "prestashopProductId": null,
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.726Z"
+    },
+    {
+      "status": "info",
+      "message": "Stock sync completed: 0 synced, 0 unchanged, 10 errors",
+      "productName": null,
+      "offerId": null,
+      "prestashopProductId": null,
+      "stockChange": null,
+      "timestamp": "2025-12-21T21:08:47.726Z"
+    }
+  ],
+  "savedAt": "2025-12-21T21:08:47.726Z"
+}

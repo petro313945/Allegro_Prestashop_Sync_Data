@@ -492,22 +492,18 @@ function setupEventListeners() {
         exportCombinationsCsvBtn.addEventListener('click', exportCombinationsCsv);
     }
     
-    // Reload Categories button
-    const reloadCategoriesBtn = document.getElementById('reloadCategoriesBtn');
-    if (reloadCategoriesBtn) {
-        reloadCategoriesBtn.addEventListener('click', async () => {
-            reloadCategoriesBtn.disabled = true;
-            try {
-                // Reload categories derived from offers (for PrestaShop mapping)
-                await loadCategoriesFromOffers();
-                // Reload full Allegro category tree in sidebar
-                await loadCategoryTreeRoot(true);
-            } finally {
-                reloadCategoriesBtn.disabled = !isAuthenticated || !isOAuthConnected;
-            }
-        });
-        // Set initial disabled state
-        reloadCategoriesBtn.disabled = !isAuthenticated || !isOAuthConnected;
+    // Sync Stock Log event listeners
+    const refreshSyncLogBtn = document.getElementById('refreshSyncLogBtn');
+    if (refreshSyncLogBtn) {
+        refreshSyncLogBtn.addEventListener('click', loadSyncLogs);
+    }
+    const clearSyncLogBtn = document.getElementById('clearSyncLogBtn');
+    if (clearSyncLogBtn) {
+        clearSyncLogBtn.addEventListener('click', clearSyncLogs);
+    }
+    const triggerSyncBtn = document.getElementById('triggerSyncBtn');
+    if (triggerSyncBtn) {
+        triggerSyncBtn.addEventListener('click', triggerStockSync);
     }
     
     // Load PrestaShop config on startup
@@ -893,12 +889,6 @@ function updateUIState(configured) {
         } else {
             loadOffersBtn.title = '';
         }
-    }
-    
-    // Update reload categories button
-    const reloadCategoriesBtnEl = document.getElementById('reloadCategoriesBtn');
-    if (reloadCategoriesBtnEl) {
-        reloadCategoriesBtnEl.disabled = !authenticated || !isOAuthConnected;
     }
     
     if (importSelectedBtn) {
@@ -1750,7 +1740,6 @@ function navigateImage(event, productId, direction) {
 
 async function displayOffersPage() {
     const offersListEl = document.getElementById('offersList');
-    const resultsCountEl = document.getElementById('resultsCount');
     
     // Apply status filter to all currently loaded offers
     const filteredOffers = getOffersFilteredByStatus();
@@ -1759,9 +1748,6 @@ async function displayOffersPage() {
     const startIndex = currentOffset;
     const endIndex = Math.min(startIndex + currentLimit, filteredOffers.length);
     const pageOffers = filteredOffers.slice(startIndex, endIndex);
-    
-    // Update results count with total filtered count
-    resultsCountEl.textContent = filteredOffers.length;
     
     // Update tab badge
     const tabOffersCount = document.getElementById('tabOffersCount');
@@ -2883,11 +2869,8 @@ function importOffers(offers) {
 // Display imported offers
 function displayImportedOffers() {
     const importedListEl = document.getElementById('importedList');
-    const importedCountEl = document.getElementById('importedCount');
     const clearImportedBtn = document.getElementById('clearImportedBtn');
     const exportToPrestashopBtn = document.getElementById('exportToPrestashopBtn');
-    
-    importedCountEl.textContent = importedOffers.length;
     
     // Update tab badge
     const tabImportedCount = document.getElementById('tabImportedCount');
@@ -4516,7 +4499,7 @@ async function displayCategories(categories, pathOverride) {
     const totalOffersCount = totalOffersCountFromAPI !== null ? totalOffersCountFromAPI : (allLoadedOffers ? allLoadedOffers.length : 0);
     htmlParts.push(`
         <div class="category-item ${allCategoriesSelected ? 'selected' : ''}" data-role="all">
-            <span class="category-item-name">All Categories${totalOffersCount > 0 ? ` <span class="category-item-count" style="color: #666; font-weight: normal;">(${totalOffersCount})</span>` : ''}</span>
+            <span class="category-item-name">All Categories${totalOffersCount > 0 ? ` <span class="category-item-count">${totalOffersCount}</span>` : ''}</span>
         </div>
     `);
 
@@ -4537,7 +4520,7 @@ async function displayCategories(categories, pathOverride) {
                          data-category-id="${category.id}"
                          data-category-name="${safeName}"
                          data-leaf="${isLeaf ? 'true' : 'false'}">
-                        <span class="category-item-name">${safeName}${count > 0 ? ` <span class="category-item-count" style="color: #666; font-weight: normal;">(${count})</span>` : ''}</span>
+                        <span class="category-item-name">${safeName}${count > 0 ? ` <span class="category-item-count">${count}</span>` : ''}</span>
                         ${isLeaf ? '' : '<span class="category-chevron">›</span>'}
                     </div>
                 `;
@@ -4705,7 +4688,6 @@ function updateCategorySelect() {
                 displayOffersPage();
             } else {
                 document.getElementById('offersList').innerHTML = '';
-                document.getElementById('resultsCount').textContent = '0';
                 document.getElementById('pagination').style.display = 'none';
             }
             return;
@@ -4765,7 +4747,6 @@ function clearCategorySelection() {
     } else {
         // Clear product results if no offers loaded
         document.getElementById('offersList').innerHTML = '';
-        document.getElementById('resultsCount').textContent = '0';
         document.getElementById('pagination').style.display = 'none';
         currentOffers = [];
         currentOffset = 0;
@@ -4825,6 +4806,26 @@ function setupTabNavigation() {
             const targetContent = document.getElementById(`tab-${targetTab}`);
             if (targetContent) {
                 targetContent.classList.add('active');
+                
+                // Load sync logs when sync-log tab is opened
+                if (targetTab === 'sync-log') {
+                    loadSyncLogs();
+                    // Auto-refresh sync logs every 10 seconds when tab is active
+                    if (window.syncLogInterval) {
+                        clearInterval(window.syncLogInterval);
+                    }
+                    window.syncLogInterval = setInterval(() => {
+                        if (targetContent.classList.contains('active')) {
+                            loadSyncLogs();
+                        }
+                    }, 10000);
+                } else {
+                    // Clear interval when switching away from sync-log tab
+                    if (window.syncLogInterval) {
+                        clearInterval(window.syncLogInterval);
+                        window.syncLogInterval = null;
+                    }
+                }
             }
         });
     });
@@ -4875,5 +4876,160 @@ function escapeHtml(text) {
 function truncateText(text, maxLength) {
     if (text.length <= maxLength) return text;
     return text.substring(0, maxLength) + '...';
+}
+
+// Sync Stock Log Functions
+async function loadSyncLogs() {
+    try {
+        const response = await fetch('/api/sync/logs?limit=200');
+        const data = await response.json();
+        
+        if (data.success) {
+            displaySyncLogs(data.logs);
+            updateSyncStatus(data.lastSyncTime, data.nextSyncTime);
+        } else {
+            console.error('Failed to load sync logs:', data.error);
+        }
+    } catch (error) {
+        console.error('Error loading sync logs:', error);
+    }
+}
+
+function displaySyncLogs(logs) {
+    const syncLogList = document.getElementById('syncLogList');
+    if (!syncLogList) return;
+    
+    if (!logs || logs.length === 0) {
+        syncLogList.innerHTML = '<div class="sync-log-empty">No sync logs yet. Stock sync will run automatically every 5 minutes.</div>';
+        return;
+    }
+    
+    // Sort by timestamp (newest first) to ensure proper ordering
+    const sortedLogs = [...logs].sort((a, b) => {
+        const dateA = new Date(a.timestamp);
+        const dateB = new Date(b.timestamp);
+        return dateB - dateA; // Newest first
+    });
+    
+    syncLogList.innerHTML = sortedLogs.map(log => {
+        const timestamp = new Date(log.timestamp).toLocaleString();
+        const statusClass = log.status || 'info';
+        
+        let stockChangeHtml = '';
+        if (log.stockChange && log.stockChange.from !== null && log.stockChange.to !== null) {
+            stockChangeHtml = `
+                <div class="sync-log-stock-change">
+                    Stock: ${log.stockChange.from} <span class="stock-arrow">→</span> ${log.stockChange.to}
+                </div>
+            `;
+        }
+        
+        let productInfo = '';
+        if (log.productName) {
+            productInfo = `<div class="sync-log-product">${escapeHtml(log.productName)}</div>`;
+        }
+        
+        let detailsHtml = '';
+        if (log.offerId || log.prestashopProductId) {
+            const parts = [];
+            if (log.offerId) parts.push(`Allegro: ${log.offerId}`);
+            if (log.prestashopProductId) parts.push(`PrestaShop: ${log.prestashopProductId}`);
+            detailsHtml = `<div style="font-size: 0.85em; color: #999; margin-top: 4px;">${parts.join(' | ')}</div>`;
+        }
+        
+        return `
+            <div class="sync-log-entry ${statusClass}">
+                <div class="sync-log-header">
+                    <div class="sync-log-timestamp">${timestamp}</div>
+                    <span class="sync-log-status ${statusClass}">${statusClass}</span>
+                </div>
+                <div class="sync-log-details">
+                    ${productInfo}
+                    <div class="sync-log-message">${escapeHtml(log.message || '')}</div>
+                    ${stockChangeHtml}
+                    ${detailsHtml}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function updateSyncStatus(lastSyncTime, nextSyncTime) {
+    const lastSyncTimeEl = document.getElementById('lastSyncTime');
+    const nextSyncTimeEl = document.getElementById('nextSyncTime');
+    
+    if (lastSyncTimeEl) {
+        if (lastSyncTime) {
+            const lastSync = new Date(lastSyncTime);
+            lastSyncTimeEl.textContent = lastSync.toLocaleString();
+        } else {
+            lastSyncTimeEl.textContent = 'Never';
+        }
+    }
+    
+    if (nextSyncTimeEl) {
+        if (nextSyncTime) {
+            const nextSync = new Date(nextSyncTime);
+            nextSyncTimeEl.textContent = nextSync.toLocaleString();
+        } else {
+            nextSyncTimeEl.textContent = 'Calculating...';
+        }
+    }
+}
+
+async function clearSyncLogs() {
+    if (!confirm('Are you sure you want to clear all sync logs?')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/sync/logs/clear', {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            loadSyncLogs();
+            showToast('Sync logs cleared', 'success');
+        } else {
+            showToast('Failed to clear sync logs: ' + data.error, 'error');
+        }
+    } catch (error) {
+        console.error('Error clearing sync logs:', error);
+        showToast('Error clearing sync logs', 'error');
+    }
+}
+
+async function triggerStockSync() {
+    const triggerSyncBtn = document.getElementById('triggerSyncBtn');
+    if (triggerSyncBtn) {
+        triggerSyncBtn.disabled = true;
+        triggerSyncBtn.textContent = 'Syncing...';
+    }
+    
+    try {
+        const response = await fetch('/api/sync/trigger', {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Stock sync triggered. Check logs for progress.', 'success');
+            // Refresh logs after a short delay
+            setTimeout(() => {
+                loadSyncLogs();
+            }, 2000);
+        } else {
+            showToast('Failed to trigger sync: ' + data.error, 'error');
+        }
+    } catch (error) {
+        console.error('Error triggering sync:', error);
+        showToast('Error triggering sync', 'error');
+    } finally {
+        if (triggerSyncBtn) {
+            triggerSyncBtn.disabled = false;
+            triggerSyncBtn.textContent = 'Sync Now';
+        }
+    }
 }
 
