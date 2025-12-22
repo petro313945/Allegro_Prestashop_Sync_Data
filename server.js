@@ -4481,17 +4481,59 @@ async function syncStockFromAllegroToPrestashop() {
           }
 
           // Get current stock from PrestaShop
+          // Improved retrieval to handle all PrestaShop API response formats
           let prestashopStock = 0;
           try {
             const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]`, 'GET');
-            if (stockData.stock_availables) {
-              const stocks = Array.isArray(stockData.stock_availables) 
-                ? stockData.stock_availables 
-                : [stockData.stock_availables];
-              if (stocks.length > 0) {
-                const stock = stocks[0].stock_available || stocks[0];
-                prestashopStock = parseInt(stock.quantity) || 0;
+            
+            // Handle various PrestaShop API response formats
+            let stockEntry = null;
+            
+            // Format 1: { stock_availables: { stock_available: {...} } }
+            if (stockData.stock_availables?.stock_available) {
+              stockEntry = stockData.stock_availables.stock_available;
+            }
+            // Format 2: { stock_availables: [{ stock_available: {...} }] } or { stock_availables: [{...}] }
+            else if (Array.isArray(stockData.stock_availables) && stockData.stock_availables.length > 0) {
+              stockEntry = stockData.stock_availables[0].stock_available || stockData.stock_availables[0];
+            }
+            // Format 3: { stock_availables: { stock_available: [{...}] } }
+            else if (stockData.stock_availables && typeof stockData.stock_availables === 'object') {
+              const stocks = stockData.stock_availables;
+              if (Array.isArray(stocks)) {
+                stockEntry = stocks[0]?.stock_available || stocks[0];
+              } else if (stocks.stock_available) {
+                stockEntry = Array.isArray(stocks.stock_available) ? stocks.stock_available[0] : stocks.stock_available;
               }
+            }
+            // Format 4: { stock_available: {...} }
+            else if (stockData.stock_available) {
+              stockEntry = stockData.stock_available;
+            }
+            
+            // Extract quantity from stock entry
+            if (stockEntry) {
+              // Try multiple possible field names for quantity
+              const quantity = stockEntry.quantity !== undefined ? stockEntry.quantity :
+                              stockEntry.qty !== undefined ? stockEntry.qty :
+                              stockEntry.available_quantity !== undefined ? stockEntry.available_quantity :
+                              null;
+              
+              if (quantity !== null && quantity !== undefined) {
+                prestashopStock = parseInt(quantity);
+                // Validate parsed value
+                if (isNaN(prestashopStock)) {
+                  console.warn(`Invalid stock quantity format for product ${prestashopProductId}: "${quantity}". Defaulting to 0.`);
+                  prestashopStock = 0;
+                }
+              } else {
+                console.warn(`No quantity field found in stock data for product ${prestashopProductId}. Stock entry:`, JSON.stringify(stockEntry).substring(0, 200));
+                prestashopStock = 0;
+              }
+            } else {
+              // No stock entry found - log for debugging
+              console.warn(`No stock entry found for product ${prestashopProductId}. Response structure:`, JSON.stringify(Object.keys(stockData || {})).substring(0, 200));
+              prestashopStock = 0;
             }
           } catch (error) {
             console.error(`Error fetching PrestaShop stock for product ${prestashopProductId}:`, error.message);
@@ -4513,7 +4555,12 @@ async function syncStockFromAllegroToPrestashop() {
           const allegroStockNum = parseInt(allegroStock) || 0;
           const prestashopStockNum = parseInt(prestashopStock) || 0;
           
+          // Log stock comparison for debugging
+          console.log(`Stock comparison for product ${prestashopProductId} (Allegro offer ${offerId}): Allegro=${allegroStockNum}, PrestaShop=${prestashopStockNum}`);
+          
+          // Only sync if stocks differ (Allegro is the source of truth)
           if (allegroStockNum !== prestashopStockNum) {
+            console.log(`Stock differs: Allegro=${allegroStockNum}, PrestaShop=${prestashopStockNum}. Syncing from Allegro to PrestaShop...`);
             try {
               // Get stock available ID
               const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]`, 'GET');
@@ -4587,7 +4634,7 @@ async function syncStockFromAllegroToPrestashop() {
                       syncedCount++;
                       addSyncLog({
                         status: 'success',
-                        message: `Stock synced successfully (stock entry created automatically)`,
+                        message: `Stock synced from Allegro to PrestaShop: ${prestashopStockNum} → ${allegroStockNum} (stock entry created automatically)`,
                         productName: productName,
                         categoryName: categoryName,
                         offerId: offerId,
@@ -4622,14 +4669,14 @@ async function syncStockFromAllegroToPrestashop() {
               syncedCount++;
               addSyncLog({
                 status: 'success',
-                message: `Stock synced successfully`,
+                message: `Stock synced from Allegro to PrestaShop: ${prestashopStockNum} → ${allegroStockNum}`,
                 productName: productName,
                 categoryName: categoryName,
                 offerId: offerId,
                 prestashopProductId: prestashopProductId,
                 stockChange: {
-                  from: prestashopStock,
-                  to: allegroStock
+                  from: prestashopStockNum,
+                  to: allegroStockNum
                 }
               });
             } catch (error) {
@@ -4653,7 +4700,7 @@ async function syncStockFromAllegroToPrestashop() {
             unchangedCount++;
             addSyncLog({
               status: 'unchanged',
-              message: `Stock unchanged: ${allegroStockNum} (matches PrestaShop)`,
+              message: `Stock unchanged: Allegro=${allegroStockNum}, PrestaShop=${prestashopStockNum} (already in sync)`,
               productName: productName,
               categoryName: categoryName,
               offerId: offerId,
