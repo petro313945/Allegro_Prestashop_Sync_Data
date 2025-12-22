@@ -5034,6 +5034,21 @@ function displaySyncLogs(logs) {
                 productDisplayName += `<span style="font-weight: 400; color: #666; font-size: 0.9em;"> • ${escapeHtml(log.categoryName)}</span>`;
             }
             
+            // Format sync date from timestamp
+            let syncDateDisplay = '';
+            if (log.timestamp) {
+                const syncDate = new Date(log.timestamp);
+                syncDateDisplay = syncDate.toLocaleString('en-US', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false
+                });
+            }
+            
             return `
                 <div class="product-checking-item ${statusClass}">
                     <div class="product-check-status ${statusClass}">${statusIcon}</div>
@@ -5045,6 +5060,7 @@ function displaySyncLogs(logs) {
                             ${idsInfo}
                         </div>
                     </div>
+                    <input type="text" class="product-check-sync-date" value="${syncDateDisplay}" readonly>
                 </div>
             `;
         }).join('');

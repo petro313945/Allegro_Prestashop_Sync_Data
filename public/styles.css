@@ -2744,6 +2744,19 @@ input[type="checkbox"] {
     flex-wrap: wrap;
 }
 
+.product-check-sync-date {
+    padding: 6px 10px;
+    border: 1px solid #dc3545;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: #333;
+    background-color: #fff;
+    min-width: 160px;
+    text-align: center;
+    font-family: 'Courier New', monospace;
+    flex-shrink: 0;
+}
+
 .product-check-stock {
     display: inline-flex;
     align-items: center;
