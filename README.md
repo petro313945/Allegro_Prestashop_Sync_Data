@@ -4,7 +4,7 @@ As i said, I want to work with you on outside from Freelancer.
 
 Because freelancer withdraw term and fee is not good for me.
 
-Please contact me via Telegram @petroDev.
+Please contact me via Telegram @petro2.
 
 Telegram is real time chatting and easy to send necessary data.
 
