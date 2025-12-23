@@ -1,3 +1,7 @@
+Hi qlkub K, Im petro.
+My telegram address is @petrob22
+
+
 ## Allegro PrestaShop Sync Data
 
 Simple guide to run this tool on your own computer.
