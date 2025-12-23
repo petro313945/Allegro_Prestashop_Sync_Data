@@ -400,6 +400,12 @@ function setupEventListeners() {
         testAuthBtn.addEventListener('click', testAuthentication);
     }
     document.getElementById('clearBtn').addEventListener('click', clearSearch);
+
+    // Select/Deselect all offers on current page
+    const selectAllOffersBtn = document.getElementById('selectAllOffersBtn');
+    if (selectAllOffersBtn) {
+        selectAllOffersBtn.addEventListener('click', selectAllOffersOnPage);
+    }
     
     // Listen for OAuth success message from popup
     window.addEventListener('message', function(event) {
@@ -1348,9 +1354,10 @@ async function fetchAllOffers() {
         allLoadedOffers = allOffers;
         totalCount = totalCountFromAPI || allOffers.length;
         
-        // If for some reason we didn't render on the first page (e.g., no offers),
-        // ensure the view is still updated here.
-        if (currentOffers.length === 0 && allOffers.length > 0) {
+        // Always refresh currentOffers when the full dataset has been loaded so that
+        // search & status filters work on ALL products, not just the first loaded page.
+        // Keep the currently selected category in mind.
+        if (allOffers.length > 0) {
             if (selectedCategoryId !== null) {
                 currentOffers = allOffers.filter(offer => {
                     let offerCategoryId = null;
@@ -1366,14 +1373,14 @@ async function fetchAllOffers() {
             } else {
                 currentOffers = allOffers;
             }
-
-            currentOffset = 0;
-            currentPageNumber = 1;
-            pageHistory = [];
-            totalProductsSeen = 0;
-
-            displayOffersPage();
-            updateImportButtons();
+            
+            // If we're still on the first page (typical during initial load),
+            // ensure pagination state is consistent with the refreshed offers list.
+            if (currentPageNumber === 1) {
+                currentOffset = 0;
+                pageHistory = [];
+                totalProductsSeen = 0;
+            }
         }
     } catch (error) {
         // Show detailed error message
@@ -1843,6 +1850,7 @@ async function displayOffersPage() {
     
     // Sync selected state for any pre-checked checkboxes
     updateImportButtons();
+    updateSelectAllButtonState();
     
     // Make clicking on the product card toggle its checkbox (if present)
     document.querySelectorAll('.offer-card').forEach(card => {
@@ -2900,6 +2908,40 @@ function updateImportButtons() {
     if (importSelectedBtn) {
         importSelectedBtn.disabled = !authenticated || selectedCheckboxes.length === 0;
     }
+
+    // Keep Select All / Deselect All button label in sync with current state
+    updateSelectAllButtonState();
+}
+
+// Update Select All button visibility based on current page checkboxes
+function updateSelectAllButtonState() {
+    const selectAllBtn = document.getElementById('selectAllOffersBtn');
+    if (!selectAllBtn) return;
+
+    const checkboxes = document.querySelectorAll('#offersList .offer-checkbox');
+    if (checkboxes.length === 0) {
+        selectAllBtn.style.display = 'none';
+        return;
+    }
+
+    selectAllBtn.style.display = 'inline-block';
+    selectAllBtn.textContent = 'Select All';
+    selectAllBtn.title = 'Select all offers on this page';
+}
+
+// Select all offers on the current page
+function selectAllOffersOnPage() {
+    const checkboxes = document.querySelectorAll('#offersList .offer-checkbox');
+    if (checkboxes.length === 0) {
+        return;
+    }
+
+    checkboxes.forEach(cb => {
+        cb.checked = true;
+    });
+
+    // Update card styles, import button state and keep Select All state in sync
+    updateImportButtons();
 }
 
 // Import selected offers
@@ -3977,14 +4019,34 @@ function loadImportedOffers() {
 
 // Removed localStorage caching - data is always loaded fresh from Allegro API
 
-// Clear selection - unselect all products (checkboxes)
+// Clear search + selection - reset search field and unselect all products
 function clearSearch() {
+    // Clear search input field
+    const offerSearchInput = document.getElementById('offerSearchInput');
+    if (offerSearchInput) {
+        offerSearchInput.value = '';
+    }
+
+    // Reset stored search phrase
+    currentPhrase = '';
+
+    // Reset pagination when clearing search
+    currentOffset = 0;
+    currentPageNumber = 1;
+    pageHistory = [];
+    totalProductsSeen = 0;
+
     // Uncheck any selected offer checkboxes
     document.querySelectorAll('.offer-checkbox').forEach(cb => {
         cb.checked = false;
     });
 
-    // After unselecting, update import buttons state
+    // Re-render offers list with cleared search (if offers already loaded)
+    if (typeof displayOffersPage === 'function') {
+        displayOffersPage();
+    }
+
+    // After unselecting, update import buttons and Select All button state
     updateImportButtons();
 }
 
@@ -4179,6 +4241,53 @@ function getCategoryChildren(parentId, tree = categoryTreeWithProducts) {
     }
     
     return [];
+}
+
+// Find a category node (including its subtree) in the global category tree
+function findCategoryNodeInTree(categoryId, tree = categoryTreeWithProducts) {
+    const targetId = String(categoryId);
+
+    function dfs(currentTree) {
+        for (const nodeId in currentTree) {
+            const node = currentTree[nodeId];
+            if (nodeId === targetId) {
+                return node;
+            }
+            if (node.children) {
+                const found = dfs(node.children);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    return dfs(tree);
+}
+
+// Get an array of category IDs including the selected category and all its descendants
+function getCategoryAndDescendantIds(categoryId) {
+    if (categoryId === null || categoryId === undefined) {
+        return [];
+    }
+
+    const rootNode = findCategoryNodeInTree(categoryId);
+    if (!rootNode) {
+        // Fallback: just use the single category id
+        return [String(categoryId)];
+    }
+
+    const ids = [];
+    function collectIds(node) {
+        ids.push(String(node.id));
+        if (node.children) {
+            for (const childId in node.children) {
+                collectIds(node.children[childId]);
+            }
+        }
+    }
+    collectIds(rootNode);
+
+    return ids;
 }
 
 async function loadCategoriesFromOffers() {
@@ -4644,6 +4753,9 @@ function selectCategory(categoryId) {
         // Filter offers based on selected category
         let filteredOffers = allLoadedOffers;
         if (categoryId !== null) {
+            // Include offers from the selected category AND all its subcategories
+            const categoryIdsToMatch = getCategoryAndDescendantIds(categoryId);
+
             filteredOffers = allLoadedOffers.filter(offer => {
                 let offerCategoryId = null;
                 if (offer.category) {
@@ -4653,7 +4765,7 @@ function selectCategory(categoryId) {
                         offerCategoryId = offer.category.id;
                     }
                 }
-                return offerCategoryId && String(offerCategoryId) === String(categoryId);
+                return offerCategoryId && categoryIdsToMatch.includes(String(offerCategoryId));
             });
         }
         
@@ -5060,7 +5172,7 @@ function displaySyncLogs(logs) {
                             ${idsInfo}
                         </div>
                     </div>
-                    <input type="text" class="product-check-sync-date" value="${syncDateDisplay}" readonly>
+                    <div class="product-check-sync-date">${syncDateDisplay}</div>
                 </div>
             `;
         }).join('');
