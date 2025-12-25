@@ -29,6 +29,40 @@ Simple guide to run this tool on your own computer.
 
    This will create the `node_modules` folder automatically.
 
+4. **Create a `.env` file** in the project root directory (same folder as `server.js`):
+   
+   Create a file named `.env` with the following content:
+   
+   ```env
+   # Database Configuration
+   DB_HOST=localhost
+   DB_PORT=3306
+   DB_USER=root
+   DB_PASSWORD=your_database_password
+   DB_NAME=your_database_name
+   
+   # Admin User Configuration
+   # These credentials will be used to create the initial admin user
+   ADMIN_EMAIL=admin@example.com
+   ADMIN_PASSWORD=your_secure_password
+   ```
+   
+   **Important Notes:**
+   - Replace `your_database_password` with your actual MariaDB/MySQL password
+   - Replace `your_database_name` with your desired database name
+   - Replace `admin@example.com` with your admin email address
+   - Replace `your_secure_password` with a strong password for the admin user
+   - The database and admin user will be created automatically when you start the server
+   - If the database already exists, it will be used (not recreated)
+   - If the admin user already exists, it will not be recreated
+   
+   **Optional environment variables:**
+   ```env
+   PORT=3000                    # HTTP server port (default: 3000)
+   HTTPS_PORT=3300              # HTTPS server port (default: 3300)
+   USE_INTERVAL_TIMER=true      # Use internal timer for sync (default: true)
+   ```
+
 ---
 
 ## 3. Start the Server

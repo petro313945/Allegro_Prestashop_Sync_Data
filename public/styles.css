@@ -6,10 +6,110 @@
 
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    background: #f5f5f5;
+    background: #ffffff;
     min-height: 100vh;
     color: #333;
     overflow-x: hidden;
+}
+
+/* Login Screen */
+.login-screen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    /* White background with a subtle gray overlay */
+    background:
+        linear-gradient(
+            135deg,
+            rgba(0, 0, 0, 0.04) 0%,
+            rgba(0, 0, 0, 0.06) 50%,
+            rgba(0, 0, 0, 0.04) 100%
+        ),
+        #ffffff;
+    padding: 20px;
+}
+
+.login-container {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+    padding: 40px;
+    width: 100%;
+    max-width: 400px;
+}
+
+.login-header {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.login-header h1 {
+    font-size: 24px;
+    color: #333;
+    margin-bottom: 8px;
+}
+
+.login-header p {
+    color: #666;
+    font-size: 14px;
+}
+
+.login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.login-form .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.login-form label {
+    font-size: 14px;
+    font-weight: 500;
+    color: #333;
+}
+
+.login-form input {
+    padding: 12px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+    line-height: 1.4;
+}
+
+.login-form input:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
+.btn-block {
+    width: 100%;
+    padding: 12px;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.login-form .btn-block {
+    padding: 12px;
+    font-size: 14px;
+    line-height: 1.4;
+    box-sizing: border-box;
+    border-radius: 6px;
+}
+
+.login-form .error-message {
+    background: #fee;
+    color: #c33;
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    border: 1px solid #fcc;
 }
 
 /* Dashboard Container */
@@ -37,6 +137,11 @@ body {
     cursor: pointer;
     user-select: none;
     transition: background 0.2s;
+    position: relative;
+}
+
+.config-panel-toggle * {
+    pointer-events: none; /* Allow all clicks to pass through to the toggle */
 }
 
 .config-panel-toggle:hover {
@@ -64,6 +169,7 @@ body {
     gap: 12px;
     margin-left: auto;
     flex-wrap: wrap;
+    pointer-events: none; /* Allow clicks to pass through to parent toggle */
 }
 
 /* Shared pill-style status badges (header + config + quick statuses) */
@@ -84,6 +190,11 @@ body {
 .quick-status-badge.error {
     background: #fce8e6;
     color: #c5221f;
+}
+
+.quick-status-badge.pending {
+    background: #fff3cd;
+    color: #856404;
 }
 
 .config-panel {
@@ -580,6 +691,25 @@ input[type="checkbox"] {
     align-items: center;
     gap: 4px;
     white-space: nowrap;
+}
+
+.user-display {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.user-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #2e7d32;
+    flex-shrink: 0;
+}
+
+.user-icon svg {
+    width: 16px;
+    height: 16px;
 }
 
 .status-label {
@@ -2757,7 +2887,6 @@ input[type="checkbox"] {
     }
 
     .sidebar {
-        .sidebar {
         width: 100%;
         position: relative;
         top: 0;
@@ -2860,5 +2989,255 @@ input[type="checkbox"] {
     .sync-log-info-header .section-actions {
         margin-top: 15px;
         justify-content: flex-start;
+    }
+}
+
+/* General Table Styles - Small Height */
+table tr {
+    height: auto;
+}
+
+table th {
+    padding: 8px 12px;
+    line-height: 1.4;
+}
+
+table td {
+    padding: 8px 12px;
+    line-height: 1.4;
+}
+
+/* User Management Styles */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    padding: 20px;
+}
+
+.modal-content {
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    max-width: 500px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 1.3em;
+    color: #333;
+}
+
+.modal-close {
+    background: transparent;
+    border: none;
+    font-size: 28px;
+    color: #666;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    background: #f5f5f5;
+    color: #333;
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+.users-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+    background: #ffffff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.users-table thead {
+    background: #f8f9fa;
+}
+
+.users-table th {
+    padding: 8px 16px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.9em;
+    color: #333;
+    border-bottom: 2px solid #e0e0e0;
+}
+
+.users-table td {
+    padding: 8px 16px;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 0.9em;
+    color: #666;
+}
+
+.users-table tr {
+    width: 100%;
+}
+
+.users-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.users-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.user-role-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 0.85em;
+    font-weight: 500;
+}
+
+.user-role-badge.admin {
+    background: #e8f0fe;
+    color: #1a73e8;
+}
+
+.user-role-badge.user {
+    background: #f1f3f4;
+    color: #5f6368;
+}
+
+.user-status-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: 500;
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.user-status-badge.admin {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.user-status-badge.user {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.user-status-badge.active {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.user-status-badge.locked {
+    background: #fff3cd;
+    color: #856404;
+}
+
+/* Switch Toggle Button */
+.user-status-switch {
+    position: relative;
+    display: inline-block;
+    width: 50px;
+    height: 24px;
+}
+
+.user-status-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.user-status-switch-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    transition: 0.3s;
+    border-radius: 24px;
+}
+
+.user-status-switch-slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: 0.3s;
+    border-radius: 50%;
+}
+
+.user-status-switch input:checked + .user-status-switch-slider {
+    background-color: #34a853;
+}
+
+.user-status-switch input:focus + .user-status-switch-slider {
+    box-shadow: 0 0 1px #34a853;
+}
+
+.user-status-switch input:checked + .user-status-switch-slider:before {
+    transform: translateX(26px);
+}
+
+.user-status-switch input:disabled + .user-status-switch-slider {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.user-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.user-actions .btn {
+    padding: 6px 12px;
+    font-size: 0.85em;
+}
+
+@media (max-width: 768px) {
+    .users-table {
+        font-size: 0.85em;
+    }
+    
+    .users-table th,
+    .users-table td {
+        padding: 6px 12px;
+    }
+    
+    .modal-content {
+        max-width: 95%;
     }
 }

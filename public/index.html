@@ -7,8 +7,29 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- Main Application Layout - Always Visible -->
-    <div id="mainApp" class="main-app">
+    <!-- Login Screen - Shown First -->
+    <div id="loginScreen" class="login-screen">
+        <div class="login-container">
+            <div class="login-header">
+                <h1>Allegro → PrestaShop Integration</h1>
+            </div>
+            <form id="loginForm" class="login-form">
+                <div class="form-group">
+                    <label for="loginEmail">Email</label>
+                    <input type="email" id="loginEmail" placeholder="Enter your email" required autocomplete="email">
+                </div>
+                <div class="form-group">
+                    <label for="loginPassword">Password</label>
+                    <input type="password" id="loginPassword" placeholder="Enter your password" required autocomplete="current-password">
+                </div>
+                <div id="loginErrorMessage" class="error-message" style="display: none;"></div>
+                <button type="submit" id="loginSubmitBtn" class="btn btn-primary btn-block">Log In</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Application Layout - Hidden Until Login -->
+    <div id="mainApp" class="main-app" style="display: none;">
         <!-- Top Header -->
         <header class="top-header">
             <div class="header-content">
@@ -17,16 +38,16 @@
                 </div>
                 <div class="user-info">
                     <div class="status-item">
-                        <span class="status-label">Allegro Auth:</span>
-                        <span id="authStatus" class="status-value error">Pending</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-label">Account:</span>
-                        <span id="oauthStatus" class="status-value error">Not Connected</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-label">PrestaShop:</span>
-                        <span id="prestashopHeaderStatus" class="status-value error">Not Connected</span>
+                        <div class="user-display">
+                            <span class="user-icon">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M12 12C14.7614 12 17 9.76142 17 7C17 4.23858 14.7614 2 12 2C9.23858 2 7 4.23858 7 7C7 9.76142 9.23858 12 12 12Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M20.59 22C20.59 18.13 16.74 15 12 15C7.26 15 3.41 18.13 3.41 22" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </span>
+                            <span id="userDisplay" class="user-status-badge"></span>
+                        </div>
+                        <button id="logoutBtn" class="btn btn-secondary btn-small" style="margin-left: 10px; padding: 4px 12px; font-size: 12px;">Logout</button>
                     </div>
                 </div>
             </div>
@@ -38,6 +59,8 @@
                 <span class="toggle-icon">▼</span>
                 <span class="toggle-text">Configuration</span>
                 <div class="config-quick-status">
+                    <span id="authStatus" class="quick-status-badge error">Allegro Auth: Pending</span>
+                    <span id="oauthStatus" class="quick-status-badge error">Account: Not Connected</span>
                     <span id="allegroQuickStatus" class="quick-status-badge error">Allegro: Not Configured</span>
                     <span id="prestashopQuickStatus" class="quick-status-badge error">PrestaShop: Not Configured</span>
                 </div>
@@ -131,6 +154,9 @@
                     </button>
                     <button class="tab-btn" data-tab="sync-log">
                         <span>Sync Stock Log</span>
+                    </button>
+                    <button class="tab-btn" data-tab="user-management" id="userManagementTab" style="display: none;">
+                        <span>User Management</span>
                     </button>
                 </div>
 
@@ -271,6 +297,79 @@
                             </div>
                             <!-- Sync Logs -->
                             <div id="syncLogList" class="sync-log-list"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Content: User Management -->
+                <div class="tab-content" id="tab-user-management">
+                    <div class="section-card">
+                        <div class="section-header">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <h2 style="margin: 0;">User Management</h2>
+                            </div>
+                            <div class="section-actions">
+                                <button id="createUserBtn" class="btn btn-primary">Create New User</button>
+                                <button id="refreshUsersBtn" class="btn btn-secondary">Refresh</button>
+                            </div>
+                        </div>
+
+                        <!-- Create/Edit User Modal -->
+                        <div id="userModal" class="modal" style="display: none;">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <h3 id="userModalTitle">Create User</h3>
+                                    <button class="modal-close" id="closeUserModal">&times;</button>
+                                </div>
+                                <div class="modal-body">
+                                    <form id="userForm">
+                                        <input type="hidden" id="userId" name="userId" value="">
+                                        <div class="form-group">
+                                            <label for="userEmail">Email *</label>
+                                            <input type="email" id="userEmail" name="userEmail" required autocomplete="off">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="userPassword">Password *</label>
+                                            <input type="password" id="userPassword" name="userPassword" autocomplete="new-password">
+                                            <small style="color: #666; font-size: 12px;">Leave blank to keep current password when editing</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="userRole">Role</label>
+                                            <div id="userRoleDisplay" style="padding: 8px; background-color: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; color: #333;">User</div>
+                                            <input type="hidden" id="userRole" name="userRole" value="user">
+                                        </div>
+                                        <div id="userFormError" class="error-message" style="display: none; margin-top: 10px;"></div>
+                                        <div class="form-actions" style="margin-top: 20px;">
+                                            <button type="submit" id="saveUserBtn" class="btn btn-primary">Save</button>
+                                            <button type="button" id="cancelUserBtn" class="btn btn-secondary">Cancel</button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Users Table -->
+                        <div id="usersTableContainer" style="margin-top: 20px;">
+                            <div id="usersLoading" class="loading" style="display: none;">
+                                <div class="spinner"></div>
+                                <p>Loading users...</p>
+                            </div>
+                            <div id="usersErrorMessage" class="error-message" style="display: none;"></div>
+                            <table id="usersTable" class="users-table" style="display: none;">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Email</th>
+                                        <th>Role</th>
+                                        <th>Last Login</th>
+                                        <th>Created At</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="usersTableBody">
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>

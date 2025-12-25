@@ -5,8 +5,43 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
+const mysql = require('mysql2/promise');
 const FormData = require('form-data'); 
-require('dotenv').config(); 
+
+// Load environment variables from .env file (explicitly from project root)
+const envPath = path.join(__dirname, '.env');
+console.log(`Looking for .env file at: ${envPath}`);
+
+// Check if .env file exists
+if (!fs.existsSync(envPath)) {
+  console.warn(`Warning: .env file not found at: ${envPath}`);
+} else {
+  console.log(`✓ .env file found at: ${envPath}`);
+}
+
+// Load .env file - dotenv doesn't expand variables by default, so $ in passwords should be fine
+const dotenvResult = require('dotenv').config({ path: envPath });
+
+if (dotenvResult.error) {
+  console.error('Error loading .env file:', dotenvResult.error.message);
+  console.warn('Using default values or system environment variables.');
+} else {
+  console.log('✓ .env file loaded successfully');
+  // Debug: Show which variables were loaded
+  if (dotenvResult.parsed) {
+    const loadedVars = Object.keys(dotenvResult.parsed);
+    console.log(`  Loaded ${loadedVars.length} environment variables: ${loadedVars.join(', ')}`);
+    // Show actual values for debugging (be careful with sensitive data)
+    console.log('  Sample values:');
+    if (dotenvResult.parsed.DB_NAME) console.log(`    DB_NAME="${dotenvResult.parsed.DB_NAME}"`);
+    if (dotenvResult.parsed.ADMIN_EMAIL) console.log(`    ADMIN_EMAIL="${dotenvResult.parsed.ADMIN_EMAIL}"`);
+    if (dotenvResult.parsed.ADMIN_PASSWORD) console.log(`    ADMIN_PASSWORD="${dotenvResult.parsed.ADMIN_PASSWORD ? '*** (set)' : '(not set)'}"`);
+  } else {
+    console.warn('  Warning: dotenv.parsed is null or undefined - no variables were parsed!');
+    console.warn('  This usually means the .env file format is incorrect or the file is empty.');
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,6 +53,258 @@ const PRESTASHOP_CREDENTIALS_FILE = path.join(__dirname, '.prestashop.json');
 const PRODUCT_MAPPINGS_FILE = path.join(__dirname, '.product_mappings.json');
 const CATEGORY_CACHE_FILE = path.join(__dirname, '.category_cache.json');
 const SYNC_LOG_FILE = path.join(__dirname, '.sync_log.json');
+
+// MariaDB configuration (environment variables)
+const DB_HOST = process.env.DB_HOST || 'localhost';
+const DB_PORT = process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3306;
+const DB_USER = process.env.DB_USER || 'root';
+const DB_PASSWORD = process.env.DB_PASSWORD || '';
+const DB_NAME = process.env.DB_NAME || 'allegro_prestashop_sync';
+
+// Log database configuration (without showing password)
+console.log('Database Configuration:');
+console.log(`  Host: ${DB_HOST}`);
+console.log(`  Port: ${DB_PORT}`);
+console.log(`  User: ${DB_USER}`);
+console.log(`  Database: ${DB_NAME}`);
+console.log(`  Password: ${DB_PASSWORD ? '*** (set)' : '(not set - using empty)'}`);
+
+// Log admin configuration status
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+console.log('Admin Configuration:');
+console.log(`  ADMIN_EMAIL: ${ADMIN_EMAIL ? `"${ADMIN_EMAIL}"` : '(not set)'}`);
+console.log(`  ADMIN_PASSWORD: ${ADMIN_PASSWORD ? '*** (set)' : '(not set)'}`);
+if (ADMIN_EMAIL && ADMIN_PASSWORD) {
+  console.log(`  → Admin user "${ADMIN_EMAIL}" will be created if not exists`);
+} else {
+  console.warn('  ⚠ Warning: ADMIN_EMAIL or ADMIN_PASSWORD not set. Admin user will not be auto-created.');
+  if (!ADMIN_EMAIL) console.warn('    Missing: ADMIN_EMAIL');
+  if (!ADMIN_PASSWORD) console.warn('    Missing: ADMIN_PASSWORD');
+}
+
+// Session and security configuration
+const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const SESSION_MAX_LIFETIME_MS = 20 * 60 * 1000; // 20 minutes
+const MAX_FAILED_LOGINS = 5;
+const LOGIN_LOCK_DURATION_MS = 60 * 1000; // 60 seconds
+
+// Database connection pool (initialized later)
+let dbPool = null;
+
+// In-memory session store (token -> session data)
+// NOTE: Tokens are not persisted across server restarts by design.
+const sessions = new Map();
+
+/**
+ * Hash a password using PBKDF2 with per-user salt
+ */
+function hashPassword(password, salt = null) {
+  if (!salt) {
+    salt = crypto.randomBytes(16).toString('hex');
+  }
+  const hash = crypto
+    .pbkdf2Sync(password, salt, 100000, 64, 'sha512')
+    .toString('hex');
+  return { hash, salt };
+}
+
+/**
+ * Constant‑time password verification
+ */
+function verifyPassword(password, storedHash, storedSalt) {
+  const { hash } = hashPassword(password, storedSalt);
+  const hashBuffer = Buffer.from(hash, 'hex');
+  const storedBuffer = Buffer.from(storedHash, 'hex');
+
+  if (hashBuffer.length !== storedBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(hashBuffer, storedBuffer);
+}
+
+/**
+ * Create a new session token for a user
+ */
+function createSession(user) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const now = Date.now();
+  sessions.set(token, {
+    userId: user.id,
+    role: user.role,
+    createdAt: now,
+    lastActivity: now
+  });
+  return token;
+}
+
+/**
+ * Validate a session token and enforce idle / absolute timeouts
+ */
+function validateSession(token) {
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session) return null;
+
+  const now = Date.now();
+
+  // Absolute timeout
+  if (now - session.createdAt > SESSION_MAX_LIFETIME_MS) {
+    sessions.delete(token);
+    return null;
+  }
+
+  // Idle timeout
+  if (now - session.lastActivity > SESSION_IDLE_TIMEOUT_MS) {
+    sessions.delete(token);
+    return null;
+  }
+
+  // Refresh activity timestamp
+  session.lastActivity = now;
+  return session;
+}
+
+/**
+ * Invalidate a session token
+ */
+function invalidateSession(token) {
+  if (token) {
+    sessions.delete(token);
+  }
+}
+
+/**
+ * Express middleware: authenticate requests using Bearer token
+ */
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.substring(7)
+    : null;
+
+  const session = validateSession(token);
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized'
+    });
+  }
+
+  req.user = session;
+  next();
+}
+
+/**
+ * Express middleware: require admin role
+ */
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Admin access required'
+    });
+  }
+  next();
+}
+
+/**
+ * Initialize MariaDB database and users table (idempotent)
+ */
+async function initDatabase() {
+  // Create database if it does not exist (connect without DB first)
+  const rootConnection = await mysql.createConnection({
+    host: DB_HOST,
+    port: DB_PORT,
+    user: DB_USER,
+    password: DB_PASSWORD
+  });
+
+  await rootConnection.query(
+    `CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+  );
+  await rootConnection.end();
+
+  // Create pool bound to the application database
+  dbPool = mysql.createPool({
+    host: DB_HOST,
+    port: DB_PORT,
+    user: DB_USER,
+    password: DB_PASSWORD,
+    database: DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  });
+
+  // Create users table if it does not exist
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      password_salt VARCHAR(64) NOT NULL,
+      role ENUM('admin','user') NOT NULL DEFAULT 'user',
+      failed_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+      lock_until DATETIME NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      last_login_at DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // Add is_active column if it doesn't exist (for existing databases)
+  try {
+    const [columns] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'users' 
+      AND COLUMN_NAME = 'is_active'
+    `);
+    
+    if (columns.length === 0) {
+      await dbPool.query(`
+        ALTER TABLE users 
+        ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1
+      `);
+      console.log('✓ Added is_active column to users table');
+    }
+  } catch (error) {
+    console.warn('Warning: Could not add is_active column:', error.message);
+  }
+
+  // Ensure at least one admin user exists if ADMIN_EMAIL / ADMIN_PASSWORD are provided
+  const adminEmail = process.env.ADMIN_EMAIL;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (adminEmail && adminPassword) {
+    // Check if any admin user exists
+    const [adminUsers] = await dbPool.query('SELECT id FROM users WHERE role = ?', ['admin']);
+    
+    if (adminUsers.length === 0) {
+      // No admin users exist, check if the specific admin email exists
+      const [rows] = await dbPool.query('SELECT id FROM users WHERE email = ?', [
+        adminEmail
+      ]);
+      if (rows.length === 0) {
+        const { hash, salt } = hashPassword(adminPassword);
+        await dbPool.query(
+          'INSERT INTO users (email, password_hash, password_salt, role) VALUES (?, ?, ?, ?)',
+          [adminEmail, hash, salt, 'admin']
+        );
+        console.log(`✓ Created initial admin user: ${adminEmail}`);
+      } else {
+        console.log(`✓ Admin user already exists: ${adminEmail}`);
+      }
+    } else {
+      console.log(`✓ Admin user(s) already exist, skipping initial-seed-admin creation`);
+    }
+  } else {
+    console.warn('⚠ Admin user not created: ADMIN_EMAIL or ADMIN_PASSWORD not set in .env file');
+  }
+}
 
 // Middleware
 app.use(cors());
@@ -490,6 +777,427 @@ loadProductMappings();
 // Category cache loading is disabled – categories are always checked
 // directly against PrestaShop instead of using a persisted cache.
 loadCategoryCache();
+
+// Initialize MariaDB database (creates DB and users table if they do not exist)
+initDatabase()
+  .then(() => {
+    console.log(`MariaDB database '${DB_NAME}' initialized`);
+  })
+  .catch((error) => {
+    console.error('Error initializing MariaDB database:', error.message);
+  });
+
+/**
+ * Authentication & user management routes
+ * These are defined before other /api routes.
+ */
+
+/**
+ * Login endpoint
+ * - Email + password only
+ * - Brute‑force protection: 5 attempts -> 60s lock
+ * - Returns token and basic user info
+ */
+app.post('/api/login', async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Authentication service not initialized yet'
+      });
+    }
+
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email and password are required'
+      });
+    }
+
+    const [rows] = await dbPool.query(
+      'SELECT * FROM users WHERE email = ?',
+      [email]
+    );
+
+    if (rows.length === 0) {
+      // Do not reveal whether the email exists
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid email or password'
+      });
+    }
+
+    const user = rows[0];
+
+    // Check if account is active
+    if (user.is_active === 0 || user.is_active === false) {
+      return res.status(403).json({
+        success: false,
+        error: 'Account is deactivated. Please contact an administrator.'
+      });
+    }
+
+    // Check for lock
+    if (user.lock_until && new Date(user.lock_until).getTime() > Date.now()) {
+      const secondsLeft = Math.ceil(
+        (new Date(user.lock_until).getTime() - Date.now()) / 1000
+      );
+      return res.status(423).json({
+        success: false,
+        error: `Account temporarily locked. Try again in ${secondsLeft} seconds.`
+      });
+    }
+
+    const passwordOk = verifyPassword(
+      password,
+      user.password_hash,
+      user.password_salt
+    );
+
+    if (!passwordOk) {
+      const failedAttempts = (user.failed_attempts || 0) + 1;
+      let lockUntil = null;
+
+      if (failedAttempts >= MAX_FAILED_LOGINS) {
+        lockUntil = new Date(Date.now() + LOGIN_LOCK_DURATION_MS);
+      }
+
+      await dbPool.query(
+        'UPDATE users SET failed_attempts = ?, lock_until = ? WHERE id = ?',
+        [failedAttempts, lockUntil, user.id]
+      );
+
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid email or password'
+      });
+    }
+
+    // Successful login -> reset counters and set last_login_at
+    await dbPool.query(
+      'UPDATE users SET failed_attempts = 0, lock_until = NULL, last_login_at = NOW() WHERE id = ?',
+      [user.id]
+    );
+
+    const token = createSession(user);
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role
+      },
+      session: {
+        idleTimeoutMinutes: SESSION_IDLE_TIMEOUT_MS / 60000,
+        maxLifetimeMinutes: SESSION_MAX_LIFETIME_MS / 60000
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Login failed'
+    });
+  }
+});
+
+/**
+ * Logout endpoint
+ */
+app.post('/api/logout', (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.substring(7)
+    : null;
+
+  invalidateSession(token);
+
+  res.json({
+    success: true
+  });
+});
+
+/**
+ * Admin: create user account
+ * - Only admins can create accounts
+ * - Users cannot self‑register
+ */
+app.post('/api/admin/users', authMiddleware, requireAdmin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Authentication service not initialized yet'
+      });
+    }
+
+    const { email, password, role } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email and password are required'
+      });
+    }
+
+    const normalizedRole = role === 'admin' ? 'admin' : 'user';
+
+    const [existing] = await dbPool.query(
+      'SELECT id FROM users WHERE email = ?',
+      [email]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'User with this email already exists'
+      });
+    }
+
+    const { hash, salt } = hashPassword(password);
+    const [result] = await dbPool.query(
+      'INSERT INTO users (email, password_hash, password_salt, role) VALUES (?, ?, ?, ?)',
+      [email, hash, salt, normalizedRole]
+    );
+
+    res.status(201).json({
+      success: true,
+      user: {
+        id: result.insertId,
+        email,
+        role: normalizedRole
+      }
+    });
+  } catch (error) {
+    console.error('Create user error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Could not create user'
+    });
+  }
+});
+
+/**
+ * Admin: list all users
+ * - Only admins can view user list
+ */
+app.get('/api/admin/users', authMiddleware, requireAdmin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Authentication service not initialized yet'
+      });
+    }
+
+    const [rows] = await dbPool.query(
+      'SELECT id, email, role, failed_attempts, lock_until, is_active, last_login_at, created_at, updated_at FROM users ORDER BY created_at DESC'
+    );
+
+    res.json({
+      success: true,
+      users: rows.map(user => ({
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        failed_attempts: user.failed_attempts,
+        lock_until: user.lock_until,
+        is_active: user.is_active === 1 || user.is_active === true,
+        last_login_at: user.last_login_at,
+        created_at: user.created_at,
+        updated_at: user.updated_at
+      }))
+    });
+  } catch (error) {
+    console.error('List users error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Could not list users'
+    });
+  }
+});
+
+/**
+ * Admin: update user account
+ * - Only admins can update accounts
+ * - Can update email, password, and role
+ */
+app.put('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Authentication service not initialized yet'
+      });
+    }
+
+    const userId = parseInt(req.params.id, 10);
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid user ID'
+      });
+    }
+
+    const { email, password, role, is_active } = req.body || {};
+    
+    // Check if user exists
+    const [existing] = await dbPool.query(
+      'SELECT id FROM users WHERE id = ?',
+      [userId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    const updates = [];
+    const values = [];
+
+    // Update email if provided
+    if (email !== undefined) {
+      // Check if email is already taken by another user
+      const [emailCheck] = await dbPool.query(
+        'SELECT id FROM users WHERE email = ? AND id != ?',
+        [email, userId]
+      );
+      if (emailCheck.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: 'Email already in use by another user'
+        });
+      }
+      updates.push('email = ?');
+      values.push(email);
+    }
+
+    // Update password if provided
+    if (password !== undefined && password !== '') {
+      const { hash, salt } = hashPassword(password);
+      updates.push('password_hash = ?', 'password_salt = ?');
+      values.push(hash, salt);
+    }
+
+    // Update role if provided
+    if (role !== undefined) {
+      const normalizedRole = role === 'admin' ? 'admin' : 'user';
+      updates.push('role = ?');
+      values.push(normalizedRole);
+    }
+
+    // Update is_active if provided
+    if (is_active !== undefined) {
+      updates.push('is_active = ?');
+      values.push(is_active ? 1 : 0);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No fields to update'
+      });
+    }
+
+    values.push(userId);
+    await dbPool.query(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    // Fetch updated user
+    const [updated] = await dbPool.query(
+      'SELECT id, email, role, failed_attempts, lock_until, is_active, last_login_at, created_at, updated_at FROM users WHERE id = ?',
+      [userId]
+    );
+
+    res.json({
+      success: true,
+      user: {
+        id: updated[0].id,
+        email: updated[0].email,
+        role: updated[0].role,
+        failed_attempts: updated[0].failed_attempts,
+        lock_until: updated[0].lock_until,
+        is_active: updated[0].is_active === 1 || updated[0].is_active === true,
+        last_login_at: updated[0].last_login_at,
+        created_at: updated[0].created_at,
+        updated_at: updated[0].updated_at
+      }
+    });
+  } catch (error) {
+    console.error('Update user error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Could not update user'
+    });
+  }
+});
+
+/**
+ * Admin: delete user account
+ * - Only admins can delete accounts
+ * - Prevents deleting the last admin user
+ */
+app.delete('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Authentication service not initialized yet'
+      });
+    }
+
+    const userId = parseInt(req.params.id, 10);
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid user ID'
+      });
+    }
+
+    // Check if user exists and get their role
+    const [existing] = await dbPool.query(
+      'SELECT id, role FROM users WHERE id = ?',
+      [userId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    // Prevent deleting the last admin user
+    if (existing[0].role === 'admin') {
+      const [adminCount] = await dbPool.query(
+        'SELECT COUNT(*) as count FROM users WHERE role = ?',
+        ['admin']
+      );
+      if (adminCount[0].count <= 1) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot delete the last admin user'
+        });
+      }
+    }
+
+    await dbPool.query('DELETE FROM users WHERE id = ?', [userId]);
+
+    res.json({
+      success: true,
+      message: 'User deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete user error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Could not delete user'
+    });
+  }
+});
 
 // Watch PrestaShop credentials file for external changes (make config dynamic)
 try {
@@ -1341,7 +2049,7 @@ async function allegroApiRequest(endpoint, params = {}, useUserToken = false, cu
 /**
  * Set credentials endpoint
  */
-app.post('/api/credentials', (req, res) => {
+app.post('/api/credentials', authMiddleware, (req, res) => {
   try {
     const { clientId, clientSecret } = req.body;
     
@@ -1368,7 +2076,7 @@ app.post('/api/credentials', (req, res) => {
 /**
  * Check if credentials are configured
  */
-app.get('/api/credentials/status', (req, res) => {
+app.get('/api/credentials/status', authMiddleware, (req, res) => {
   res.json({
     configured: !!(userCredentials.clientId && userCredentials.clientSecret)
   });
@@ -1389,7 +2097,7 @@ app.get('/api/health', (req, res) => {
 /**
  * OAuth Authorization endpoint - returns authorization URL for frontend to open
  */
-app.get('/api/oauth/authorize', (req, res) => {
+app.get('/api/oauth/authorize', authMiddleware, (req, res) => {
   if (!userCredentials.clientId) {
     return res.status(400).json({
       success: false,
@@ -1440,7 +2148,7 @@ app.get('/api/oauth/authorize', (req, res) => {
 /**
  * OAuth Callback endpoint - handles authorization code and exchanges for tokens
  */
-app.get('/api/oauth/callback', async (req, res) => {
+app.get('/api/oauth/callback', authMiddleware, async (req, res) => {
   try {
     const { code, state, error } = req.query;
     
@@ -1580,7 +2288,7 @@ app.get('/api/oauth/callback', async (req, res) => {
  * Check OAuth connection status
  * Attempts to refresh token if expired but refresh token exists
  */
-app.get('/api/oauth/status', async (req, res) => {
+app.get('/api/oauth/status', authMiddleware, async (req, res) => {
   try {
     // Check if token is still valid
     let isConnected = !!(userOAuthTokens.accessToken && userOAuthTokens.expiresAt && Date.now() < userOAuthTokens.expiresAt);
@@ -1614,7 +2322,7 @@ app.get('/api/oauth/status', async (req, res) => {
 /**
  * Disconnect OAuth (clear user tokens)
  */
-app.post('/api/oauth/disconnect', (req, res) => {
+app.post('/api/oauth/disconnect', authMiddleware, (req, res) => {
   userOAuthTokens = {
     accessToken: null,
     refreshToken: null,
@@ -1635,7 +2343,7 @@ app.post('/api/oauth/disconnect', (req, res) => {
  * Get user's own offers from Allegro
  * Uses user OAuth token to fetch user's own offers
  */
-app.get('/api/offers', async (req, res) => {
+app.get('/api/offers', authMiddleware, async (req, res) => {
   try {
     let { limit = 20, offset = 0, sellerId, status } = req.query;
     
@@ -1834,7 +2542,7 @@ app.get('/api/offers', async (req, res) => {
  * Uses user OAuth token to access own offers
  * Updated to use /sale/product-offers/{offerId} (old /sale/offers/{offerId} was deprecated in 2024)
  */
-app.get('/api/offers/:offerId', async (req, res) => {
+app.get('/api/offers/:offerId', authMiddleware, async (req, res) => {
   try {
     const { offerId } = req.params;
     
@@ -1892,7 +2600,7 @@ app.get('/api/offers/:offerId', async (req, res) => {
  * - GET /sale/product-offers/{offerId} - Get product data from offer ID (includes images, description, details)
  * - GET /sale/products/{productId} - Get product details by product ID (UUID)
  */
-app.get('/api/products/:productId', async (req, res) => {
+app.get('/api/products/:productId', authMiddleware, async (req, res) => {
   try {
     const { productId } = req.params;
     const { language, 'category.id': categoryId } = req.query;
@@ -2039,7 +2747,7 @@ app.get('/api/products/:productId', async (req, res) => {
 /**
  * Get categories
  */
-app.get('/api/categories', async (req, res) => {
+app.get('/api/categories', authMiddleware, async (req, res) => {
   try {
     const { parentId } = req.query;
     const params = parentId ? { 'parent.id': parentId } : {};
@@ -2079,7 +2787,7 @@ app.get('/api/categories', async (req, res) => {
 /**
  * Get category by ID
  */
-app.get('/api/categories/:categoryId', async (req, res) => {
+app.get('/api/categories/:categoryId', authMiddleware, async (req, res) => {
   try {
     const { categoryId } = req.params;
     
@@ -2109,7 +2817,7 @@ app.get('/api/categories/:categoryId', async (req, res) => {
 /**
  * Test authentication
  */
-app.get('/api/test-auth', async (req, res) => {
+app.get('/api/test-auth', authMiddleware, async (req, res) => {
   try {
     const token = await getAccessToken();
     res.json({
@@ -2136,7 +2844,7 @@ app.get('/api/test-auth', async (req, res) => {
 /**
  * Configure PrestaShop credentials
  */
-app.post('/api/prestashop/configure', (req, res) => {
+app.post('/api/prestashop/configure', authMiddleware, (req, res) => {
   try {
     const { baseUrl, apiKey } = req.body;
     
@@ -2171,7 +2879,7 @@ app.post('/api/prestashop/configure', (req, res) => {
 /**
  * Disconnect PrestaShop (clear all configuration files)
  */
-app.post('/api/prestashop/disconnect', (req, res) => {
+app.post('/api/prestashop/disconnect', authMiddleware, (req, res) => {
   try {
     // Clear PrestaShop credentials
     prestashopCredentials.baseUrl = null;
@@ -2249,7 +2957,7 @@ app.post('/api/prestashop/disconnect', (req, res) => {
 /**
  * Get PrestaShop configuration status
  */
-app.get('/api/prestashop/status', (req, res) => {
+app.get('/api/prestashop/status', authMiddleware, (req, res) => {
   // Check if both values exist and are non-empty strings (after trimming)
   const baseUrl = prestashopCredentials.baseUrl ? String(prestashopCredentials.baseUrl).trim() : '';
   const apiKey = prestashopCredentials.apiKey ? String(prestashopCredentials.apiKey).trim() : '';
@@ -2264,7 +2972,7 @@ app.get('/api/prestashop/status', (req, res) => {
 /**
  * Test PrestaShop connection
  */
-app.get('/api/prestashop/test', async (req, res) => {
+app.get('/api/prestashop/test', authMiddleware, async (req, res) => {
   try {
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       return res.status(400).json({
@@ -2822,7 +3530,7 @@ async function findProductByReference(reference) {
 /**
  * Get PrestaShop categories
  */
-app.get('/api/prestashop/categories', async (req, res) => {
+app.get('/api/prestashop/categories', authMiddleware, async (req, res) => {
   try {
     const { limit = 1000, offset = 0 } = req.query;
     const data = await prestashopApiRequest(`categories?limit=${limit}&offset=${offset}`, 'GET');
@@ -2854,7 +3562,7 @@ app.get('/api/prestashop/categories', async (req, res) => {
 /**
  * Create category in PrestaShop
  */
-app.post('/api/prestashop/categories', async (req, res) => {
+app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
   try {
     const { name, idParent = 2, active = 1 } = req.body;
     
@@ -2912,7 +3620,7 @@ app.post('/api/prestashop/categories', async (req, res) => {
 /**
  * Create product in PrestaShop
  */
-app.post('/api/prestashop/products', async (req, res) => {
+app.post('/api/prestashop/products', authMiddleware, async (req, res) => {
   try {
     let { offer, categoryId, categories } = req.body;
     
@@ -3347,7 +4055,7 @@ app.post('/api/prestashop/products', async (req, res) => {
 /**
  * Get PrestaShop product by ID
  */
-app.get('/api/prestashop/products/:productId', async (req, res) => {
+app.get('/api/prestashop/products/:productId', authMiddleware, async (req, res) => {
   try {
     const { productId } = req.params;
     
@@ -3440,7 +4148,7 @@ app.get('/api/prestashop/products/:productId', async (req, res) => {
 /**
  * Update product stock in PrestaShop
  */
-app.put('/api/prestashop/products/:productId/stock', async (req, res) => {
+app.put('/api/prestashop/products/:productId/stock', authMiddleware, async (req, res) => {
   try {
     const { productId } = req.params;
     const { quantity } = req.body;
@@ -3498,7 +4206,7 @@ app.put('/api/prestashop/products/:productId/stock', async (req, res) => {
 /**
  * Get product mappings
  */
-app.get('/api/prestashop/mappings', (req, res) => {
+app.get('/api/prestashop/mappings', authMiddleware, (req, res) => {
   res.json({
     success: true,
     mappings: productMappings
@@ -3508,7 +4216,7 @@ app.get('/api/prestashop/mappings', (req, res) => {
 /**
  * Sync stock from Allegro to PrestaShop
  */
-app.post('/api/prestashop/sync/stock', async (req, res) => {
+app.post('/api/prestashop/sync/stock', authMiddleware, async (req, res) => {
   try {
     const { offerId, quantity } = req.body;
     
@@ -4173,7 +4881,7 @@ async function exportProductsToCsv() {
 /**
  * Export categories CSV endpoint
  */
-app.get('/api/export/categories.csv', async (req, res) => {
+app.get('/api/export/categories.csv', authMiddleware, async (req, res) => {
   try {
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       return res.status(400).json({
@@ -4198,7 +4906,7 @@ app.get('/api/export/categories.csv', async (req, res) => {
 /**
  * Export products CSV endpoint
  */
-app.get('/api/export/products.csv', async (req, res) => {
+app.get('/api/export/products.csv', authMiddleware, async (req, res) => {
   try {
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       return res.status(400).json({
@@ -4903,7 +5611,7 @@ function startStockSyncCron() {
 /**
  * API: Get sync logs
  */
-app.get('/api/sync/logs', (req, res) => {
+app.get('/api/sync/logs', authMiddleware, (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
     const status = req.query.status; // Optional filter by status
@@ -4938,7 +5646,7 @@ app.get('/api/sync/logs', (req, res) => {
 /**
  * API: Clear sync logs
  */
-app.post('/api/sync/logs/clear', (req, res) => {
+app.post('/api/sync/logs/clear', authMiddleware, (req, res) => {
   try {
     syncLogs = [];
     // Logs are in-memory only - no file saving needed
@@ -4958,7 +5666,7 @@ app.post('/api/sync/logs/clear', (req, res) => {
  * API: Trigger manual stock sync
  * Can be called manually or by external cron (Ubuntu)
  */
-app.post('/api/sync/trigger', async (req, res) => {
+app.post('/api/sync/trigger', authMiddleware, async (req, res) => {
   try {
     if (syncJobRunning) {
       return res.status(400).json({
@@ -4989,7 +5697,7 @@ app.post('/api/sync/trigger', async (req, res) => {
 /**
  * API: Get sync status (for cron monitoring)
  */
-app.get('/api/sync/status', (req, res) => {
+app.get('/api/sync/status', authMiddleware, (req, res) => {
   res.json({
     success: true,
     running: syncJobRunning,

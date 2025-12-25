@@ -33,10 +33,238 @@ let prestashopAuthorized = false; // Track if PrestaShop connection is successfu
 // API Base URL
 const API_BASE = '';
 
+// Authentication state
+let authToken = null;
+let currentUser = null;
+
+// Auth token management
+function getAuthToken() {
+    if (!authToken) {
+        authToken = localStorage.getItem('auth_token');
+    }
+    return authToken;
+}
+
+function setAuthToken(token) {
+    authToken = token;
+    if (token) {
+        localStorage.setItem('auth_token', token);
+    } else {
+        localStorage.removeItem('auth_token');
+    }
+}
+
+function clearAuth() {
+    authToken = null;
+    currentUser = null;
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('current_user');
+}
+
+// Authenticated fetch wrapper
+async function authFetch(url, options = {}) {
+    const token = getAuthToken();
+    if (!token) {
+        throw new Error('Not authenticated');
+    }
+
+    const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        ...options.headers
+    };
+
+    const response = await fetch(url, {
+        ...options,
+        headers
+    });
+
+    // If unauthorized, clear token and show login
+    if (response.status === 401) {
+        clearAuth();
+        showLoginScreen();
+        throw new Error('Session expired. Please log in again.');
+    }
+
+    return response;
+}
+
+// Update user display with username (without domain), icon, and role
+function updateUserDisplay(user) {
+    const userDisplayEl = document.getElementById('userDisplay');
+    
+    if (userDisplayEl && user && user.email && user.role) {
+        // Extract username from email (remove @domain.com)
+        const username = user.email.split('@')[0];
+        // Capitalize first letter of username
+        const displayName = username.charAt(0).toUpperCase() + username.slice(1);
+        // Capitalize first letter of role
+        const roleText = user.role.charAt(0).toUpperCase() + user.role.slice(1);
+        // Format as "admin: Me" or "user: Me"
+        userDisplayEl.textContent = `${roleText}: ${displayName}`;
+        userDisplayEl.className = `user-status-badge ${user.role}`;
+    }
+}
+
+// Login function
+async function login(email, password) {
+    try {
+        const response = await fetch(`${API_BASE}/api/login`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ email, password })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || 'Login failed');
+        }
+
+        setAuthToken(data.token);
+        currentUser = data.user;
+        localStorage.setItem('current_user', JSON.stringify(data.user));
+        
+        // Update user email display
+        updateUserDisplay(data.user);
+        
+        return data;
+    } catch (error) {
+        throw error;
+    }
+}
+
+// Logout function
+async function logout() {
+    try {
+        // Capture user info before clearing auth
+        const savedUser = localStorage.getItem('current_user');
+        const user = savedUser ? JSON.parse(savedUser) : currentUser;
+        const token = getAuthToken();
+        if (token) {
+            await authFetch(`${API_BASE}/api/logout`, {
+                method: 'POST'
+            });
+        }
+
+        // Show logout info toast
+        if (user && user.email) {
+            const logoutTime = new Date().toLocaleString();
+            showToast(`${user.email} logged out at ${logoutTime}`, 'info', 5000);
+        }
+    } catch (error) {
+        console.error('Logout error:', error);
+    } finally {
+        clearAuth();
+        showLoginScreen();
+    }
+}
+
+// Show/hide login screen
+function showLoginScreen() {
+    document.getElementById('loginScreen').style.display = 'flex';
+    document.getElementById('mainApp').style.display = 'none';
+}
+
+// Check if user is logged in on page load
+async function checkAuth() {
+    const token = getAuthToken();
+    if (!token) {
+        showLoginScreen();
+        return false;
+    }
+
+    // Verify token is still valid by checking a protected endpoint
+    try {
+        const response = await authFetch(`${API_BASE}/api/health`);
+        if (response.ok) {
+            const savedUser = localStorage.getItem('current_user');
+            if (savedUser) {
+                currentUser = JSON.parse(savedUser);
+                // Update user display
+                updateUserDisplay(currentUser);
+            }
+            showMainInterface();
+            
+            // Show message that user is already logged in
+            if (currentUser && currentUser.email) {
+                const now = new Date();
+                const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+                const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                showToast(`${currentUser.email} already logged in at ${dateStr}, ${timeStr}`, 'info', 4000);
+            }
+            
+            return true;
+        }
+    } catch (error) {
+        console.error('Auth check failed:', error);
+        showLoginScreen();
+        return false;
+    }
+
+    showLoginScreen();
+    return false;
+}
+
 // Initialize app
 document.addEventListener('DOMContentLoaded', async () => {
-    // Show main interface immediately - no modal
-    showMainInterface();
+    // Setup login form handler
+    const loginForm = document.getElementById('loginForm');
+    const loginEmail = document.getElementById('loginEmail');
+    const loginPassword = document.getElementById('loginPassword');
+    const loginErrorMessage = document.getElementById('loginErrorMessage');
+    const loginSubmitBtn = document.getElementById('loginSubmitBtn');
+
+    loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        loginErrorMessage.style.display = 'none';
+        loginSubmitBtn.disabled = true;
+        loginSubmitBtn.textContent = 'Logging in...';
+
+        try {
+            const loginResult = await login(loginEmail.value.trim(), loginPassword.value);
+            // Show main interface immediately after successful login
+            showMainInterface();
+            // Notify user with who logged in and when
+            const userEmail = loginResult?.user?.email || loginEmail.value.trim();
+            const loginTime = new Date().toLocaleString();
+            showToast(`${userEmail} logged in at ${loginTime}`, 'success', 5000);
+            
+            // Initialize app components (these may fail, but UI should already be shown)
+            try {
+                setupEventListeners();
+                loadImportedOffers();
+                loadPrestashopConfig();
+                checkPrestashopStatus();
+                await loadSavedCredentials();
+                updateUIState(false);
+                updateButtonStates();
+                if (typeof updateSyncCategoryButtonState === 'function') {
+                    updateSyncCategoryButtonState();
+                }
+            } catch (initError) {
+                console.error('Error initializing app components:', initError);
+                // UI is already shown, so just log the error
+            }
+        } catch (error) {
+            loginErrorMessage.textContent = error.message || 'Login failed. Please try again.';
+            loginErrorMessage.style.display = 'block';
+        } finally {
+            loginSubmitBtn.disabled = false;
+            loginSubmitBtn.textContent = 'Log In';
+            loginPassword.value = '';
+        }
+    });
+
+    // Check if already logged in
+    const isAuthenticated = await checkAuth();
+    if (!isAuthenticated) {
+        return; // Stop here, wait for login
+    }
+
+    // User is authenticated, continue with app initialization
     setupEventListeners();
     loadImportedOffers();
     loadPrestashopConfig();
@@ -112,7 +340,7 @@ async function loadSavedCredentials() {
         
         // Send credentials to backend to ensure they're loaded
         try {
-            const credentialsResponse = await fetch(`${API_BASE}/api/credentials`, {
+            const credentialsResponse = await authFetch(`${API_BASE}/api/credentials`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -135,7 +363,7 @@ async function loadSavedCredentials() {
             }
             
             // Check if credentials are still valid by testing authentication
-            const authResponse = await fetch(`${API_BASE}/api/test-auth`);
+            const authResponse = await authFetch(`${API_BASE}/api/test-auth`);
             const authData = await authResponse.json();
             
             if (authData.success) {
@@ -143,8 +371,8 @@ async function loadSavedCredentials() {
                 isAuthenticated = true;
                 const authStatusEl = document.getElementById('authStatus');
                 if (authStatusEl) {
-                    authStatusEl.textContent = 'Authenticated';
-                    authStatusEl.className = 'status-value success';
+                    authStatusEl.textContent = 'Allegro Auth: Authenticated';
+                    authStatusEl.className = 'quick-status-badge success';
                 }
                 
                 // Show disconnect button
@@ -248,12 +476,24 @@ function updateButtonStates() {
     const clientIdInput = document.getElementById('clientId');
     const clientSecretInput = document.getElementById('clientSecret');
     
+    // Update Allegro disconnect and authorize buttons
+    const clearBtn = document.getElementById('clearCredentialsBtn');
+    const authorizeBtn = document.getElementById('authorizeAccountBtn');
+    
     if (allegroConnectBtn) {
         if (isAuthenticated) {
             // Connected state: grey, disabled, shows "Connected"
             allegroConnectBtn.textContent = 'Connected';
             allegroConnectBtn.className = 'btn btn-connected';
             allegroConnectBtn.disabled = true;
+            
+            // Show disconnect and authorize buttons
+            if (clearBtn) {
+                clearBtn.style.display = 'block';
+            }
+            if (authorizeBtn) {
+                authorizeBtn.style.display = 'block';
+            }
             
             // Make inputs readonly
             if (clientIdInput) {
@@ -267,6 +507,14 @@ function updateButtonStates() {
             allegroConnectBtn.textContent = 'Connect';
             allegroConnectBtn.className = 'btn btn-primary';
             allegroConnectBtn.disabled = false;
+            
+            // Hide disconnect and authorize buttons
+            if (clearBtn) {
+                clearBtn.style.display = 'none';
+            }
+            if (authorizeBtn) {
+                authorizeBtn.style.display = 'none';
+            }
             
             // Make inputs editable
             if (clientIdInput) {
@@ -384,8 +632,32 @@ function updateCsvExportButtonsState() {
     }
 }
 
+// Store logout handler reference to allow removal
+let logoutHandler = null;
+
 // Setup event listeners
 function setupEventListeners() {
+    // Logout button - remove old listener before adding new one
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (logoutBtn) {
+        // Remove existing listener if it exists
+        if (logoutHandler) {
+            logoutBtn.removeEventListener('click', logoutHandler);
+        }
+        // Create new handler function
+        logoutHandler = async () => {
+            if (confirm('Are you sure you want to log out?')) {
+                await logout();
+            }
+        };
+        // Add the new listener
+        logoutBtn.addEventListener('click', logoutHandler);
+    }
+
+    // Update user email display
+    if (currentUser) {
+        updateUserDisplay(currentUser);
+    }
     document.getElementById('saveCredentialsBtn').addEventListener('click', saveCredentials);
     const clearBtn = document.getElementById('clearCredentialsBtn');
     if (clearBtn) {
@@ -564,6 +836,9 @@ function setupEventListeners() {
     // Setup tab navigation
     setupTabNavigation();
     
+    // Setup user management (only for admins)
+    setupUserManagement();
+    
     // Initialize dashboard stats
     updateDashboardStats();
 }
@@ -638,7 +913,7 @@ async function saveCredentials() {
     
     try {
         // Step 1: Send credentials to backend
-        const credentialsResponse = await fetch(`${API_BASE}/api/credentials`, {
+        const credentialsResponse = await authFetch(`${API_BASE}/api/credentials`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -656,7 +931,7 @@ async function saveCredentials() {
         }
         
         // Step 2: Test authentication immediately
-        const authResponse = await fetch(`${API_BASE}/api/test-auth`);
+        const authResponse = await authFetch(`${API_BASE}/api/test-auth`);
         
         // Check for 401 status before parsing JSON
         if (!authResponse.ok && authResponse.status === 401) {
@@ -679,8 +954,8 @@ async function saveCredentials() {
             isAuthenticated = true;
             const authStatusEl = document.getElementById('authStatus');
             if (authStatusEl) {
-                authStatusEl.textContent = 'Authenticated';
-                authStatusEl.className = 'status-value success';
+                authStatusEl.textContent = 'Allegro Auth: Authenticated';
+                authStatusEl.className = 'quick-status-badge success';
             }
             
             // Show disconnect button in Allegro API Configuration section
@@ -725,7 +1000,7 @@ async function saveCredentials() {
 // Keeping for backward compatibility if needed elsewhere
 async function sendCredentialsToBackend(clientId, clientSecret) {
     try {
-        const response = await fetch(`${API_BASE}/api/credentials`, {
+        const response = await authFetch(`${API_BASE}/api/credentials`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -750,7 +1025,11 @@ async function sendCredentialsToBackend(clientId, clientSecret) {
 
 // Show main interface
 function showMainInterface() {
+    const loginScreen = document.getElementById('loginScreen');
     const mainApp = document.getElementById('mainApp');
+    if (loginScreen) {
+        loginScreen.style.display = 'none';
+    }
     if (mainApp) {
         mainApp.style.display = 'flex';
     }
@@ -776,7 +1055,7 @@ async function clearCredentials() {
     
     // Disconnect OAuth
     try {
-        await fetch(`${API_BASE}/api/oauth/disconnect`, {
+        await authFetch(`${API_BASE}/api/oauth/disconnect`, {
             method: 'POST'
         });
     } catch (error) {
@@ -792,12 +1071,12 @@ async function clearCredentials() {
     const authStatusEl = document.getElementById('authStatus');
     const oauthStatusEl = document.getElementById('oauthStatus');
     if (authStatusEl) {
-        authStatusEl.textContent = 'Pending';
-        authStatusEl.className = 'status-value error';
+        authStatusEl.textContent = 'Allegro Auth: Pending';
+        authStatusEl.className = 'quick-status-badge error';
     }
     if (oauthStatusEl) {
-        oauthStatusEl.textContent = 'Not Connected';
-        oauthStatusEl.className = 'status-value error';
+        oauthStatusEl.textContent = 'Account: Not Connected';
+        oauthStatusEl.className = 'quick-status-badge error';
     }
     isAuthenticated = false;
     isOAuthConnected = false;
@@ -851,7 +1130,7 @@ async function clearPrestashopConfig() {
     
     // Clear backend configuration and all JSON files (prestashop.json, credentials.json, tokens.json)
     try {
-        const response = await fetch(`${API_BASE}/api/prestashop/disconnect`, {
+        const response = await authFetch(`${API_BASE}/api/prestashop/disconnect`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
         });
@@ -867,26 +1146,10 @@ async function clearPrestashopConfig() {
         showToast('Error clearing configuration: ' + error.message, 'error');
     }
     
-    // Also clear Allegro authentication state since credentials were cleared
-    isAuthenticated = false;
-    isOAuthConnected = false;
-    
-    // Update Allegro status indicators
-    const authStatusEl = document.getElementById('authStatus');
-    const oauthStatusEl = document.getElementById('oauthStatus');
-    if (authStatusEl) {
-        authStatusEl.textContent = 'Pending';
-        authStatusEl.className = 'status-value error';
-    }
-    if (oauthStatusEl) {
-        oauthStatusEl.textContent = 'Not Connected';
-        oauthStatusEl.className = 'status-value error';
-    }
-    
     // Update config status indicators and button states
     updateConfigStatuses();
     
-    // Update UI state
+    // Update UI state (only affects PrestaShop-related features)
     updateUIState(false);
     updateButtonStates();
     
@@ -902,7 +1165,7 @@ async function clearPrestashopConfig() {
 // Check if user is authenticated
 function checkAuthentication() {
     const authStatusEl = document.getElementById('authStatus');
-    return authStatusEl && authStatusEl.className.includes('success') && authStatusEl.textContent === 'Authenticated';
+    return authStatusEl && authStatusEl.className.includes('success') && authStatusEl.textContent === 'Allegro Auth: Authenticated';
 }
 
 // Validate authentication before allowing actions
@@ -982,7 +1245,7 @@ function updateUIState(configured) {
 // Check API status (no longer displayed in header, but still used for internal checks)
 async function checkApiStatus() {
     try {
-        const response = await fetch(`${API_BASE}/api/health`);
+        const response = await authFetch(`${API_BASE}/api/health`);
         const data = await response.json();
         // Status is now shown in Allegro API Configuration panel
         updateConfigStatuses();
@@ -995,7 +1258,7 @@ async function checkApiStatus() {
 // Check OAuth connection status
 async function checkOAuthStatus() {
     try {
-        const response = await fetch(`${API_BASE}/api/oauth/status`);
+        const response = await authFetch(`${API_BASE}/api/oauth/status`);
         const data = await response.json();
         
         const oauthStatusEl = document.getElementById('oauthStatus');
@@ -1006,11 +1269,11 @@ async function checkOAuthStatus() {
         
         if (oauthStatusEl) {
             if (isOAuthConnected) {
-                oauthStatusEl.textContent = 'Connected';
-                oauthStatusEl.className = 'status-value success';
+                oauthStatusEl.textContent = 'Account: Connected';
+                oauthStatusEl.className = 'quick-status-badge success';
             } else {
-                oauthStatusEl.textContent = 'Not Connected';
-                oauthStatusEl.className = 'status-value error';
+                oauthStatusEl.textContent = 'Account: Not Connected';
+                oauthStatusEl.className = 'quick-status-badge error';
             }
         }
         
@@ -1058,8 +1321,8 @@ async function checkOAuthStatus() {
         console.error('Error checking OAuth status:', error);
         const oauthStatusEl = document.getElementById('oauthStatus');
         if (oauthStatusEl) {
-            oauthStatusEl.textContent = 'Error';
-            oauthStatusEl.className = 'status-value error';
+            oauthStatusEl.textContent = 'Account: Error';
+            oauthStatusEl.className = 'quick-status-badge error';
         }
         const oauthInfoEl = document.getElementById('oauthInfo');
         if (oauthInfoEl) {
@@ -1079,7 +1342,7 @@ async function authorizeAccount() {
     
     try {
         // Get OAuth authorization URL from backend
-        const response = await fetch(`${API_BASE}/api/oauth/authorize`);
+        const response = await authFetch(`${API_BASE}/api/oauth/authorize`);
         const data = await response.json();
         
         if (!data.success || !data.authUrl) {
@@ -1136,8 +1399,8 @@ async function authorizeAccount() {
 async function testAuthentication() {
     const authStatusEl = document.getElementById('authStatus');
     if (authStatusEl) {
-        authStatusEl.textContent = 'Testing';
-        authStatusEl.className = 'status-value pending';
+        authStatusEl.textContent = 'Allegro Auth: Testing';
+        authStatusEl.className = 'quick-status-badge pending';
     }
     
     const clientId = document.getElementById('clientId').value.trim();
@@ -1145,8 +1408,8 @@ async function testAuthentication() {
     
     if (!clientId || !clientSecret) {
         if (authStatusEl) {
-            authStatusEl.textContent = 'Credentials required';
-            authStatusEl.className = 'status-value error';
+            authStatusEl.textContent = 'Allegro Auth: Credentials required';
+            authStatusEl.className = 'quick-status-badge error';
         }
         showToast('Credentials required', 'error');
         return;
@@ -1157,15 +1420,15 @@ async function testAuthentication() {
         await sendCredentialsToBackend(clientId, clientSecret);
     } catch (error) {
         if (authStatusEl) {
-            authStatusEl.textContent = 'Error';
-            authStatusEl.className = 'status-value error';
+            authStatusEl.textContent = 'Allegro Auth: Error';
+            authStatusEl.className = 'quick-status-badge error';
         }
         showToast('Failed to save credentials', 'error');
         return;
     }
     
     try {
-        const response = await fetch(`${API_BASE}/api/test-auth`);
+        const response = await authFetch(`${API_BASE}/api/test-auth`);
         
         // Check for 401 status before parsing JSON
         if (!response.ok && response.status === 401) {
@@ -1176,8 +1439,8 @@ async function testAuthentication() {
         
         if (data.success) {
             if (authStatusEl) {
-                authStatusEl.textContent = 'Authenticated';
-                authStatusEl.className = 'status-value success';
+                authStatusEl.textContent = 'Allegro Auth: Authenticated';
+                authStatusEl.className = 'quick-status-badge success';
             }
             isAuthenticated = true;
             updateUIState(true);
@@ -1185,8 +1448,8 @@ async function testAuthentication() {
             // Categories will be loaded automatically after OAuth authorization
         } else {
             if (authStatusEl) {
-                authStatusEl.textContent = 'Failed';
-                authStatusEl.className = 'status-value error';
+                authStatusEl.textContent = 'Allegro Auth: Failed';
+                authStatusEl.className = 'quick-status-badge error';
             }
             isAuthenticated = false;
             updateUIState(false);
@@ -1194,8 +1457,8 @@ async function testAuthentication() {
         }
     } catch (error) {
         if (authStatusEl) {
-            authStatusEl.textContent = 'Error';
-            authStatusEl.className = 'status-value error';
+            authStatusEl.textContent = 'Allegro Auth: Error';
+            authStatusEl.className = 'quick-status-badge error';
         }
         isAuthenticated = false;
         updateUIState(false);
@@ -1254,7 +1517,7 @@ async function fetchAllOffers() {
             params.append('offset', offset);
             params.append('limit', limit);
             
-            const response = await fetch(`${API_BASE}/api/offers?${params}`);
+            const response = await authFetch(`${API_BASE}/api/offers?${params}`);
             
             // Check for 401 status before parsing JSON
             if (!response.ok && response.status === 401) {
@@ -1456,7 +1719,7 @@ async function fetchOffers(offset = 0, limit = 20) {
         params.append('offset', offset);
         params.append('limit', limit);
         
-        const response = await fetch(`${API_BASE}/api/offers?${params}`);
+        const response = await authFetch(`${API_BASE}/api/offers?${params}`);
         
         // Check for 401 status before parsing JSON
         if (!response.ok && response.status === 401) {
@@ -1911,7 +2174,7 @@ async function fetchProductDetails(offerId) {
         
         // Use /api/products/{offerId} which uses /sale/product-offers/{offerId}
         // This endpoint only works for the user's own offers
-        const response = await fetch(`${API_BASE}/api/products/${offerId}`);
+        const response = await authFetch(`${API_BASE}/api/products/${offerId}`);
         let product = null;
         
         if (response.ok) {
@@ -1927,7 +2190,7 @@ async function fetchProductDetails(offerId) {
         } else {
             // For other errors, try the offers endpoint as fallback (only if it's a user offer)
             if (isUserOffer) {
-                const offerResponse = await fetch(`${API_BASE}/api/offers/${offerId}`);
+                const offerResponse = await authFetch(`${API_BASE}/api/offers/${offerId}`);
                 if (offerResponse.ok) {
                     const offerResult = await offerResponse.json();
                     if (offerResult.success && offerResult.data) {
@@ -3324,7 +3587,7 @@ async function savePrestashopConfig() {
     if (messageEl) messageEl.style.display = 'none';
     
     try {
-        const response = await fetch(`${API_BASE}/api/prestashop/configure`, {
+        const response = await authFetch(`${API_BASE}/api/prestashop/configure`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -3336,7 +3599,7 @@ async function savePrestashopConfig() {
         const data = await response.json();
         
         if (data.success) {
-            showToast('✓ PrestaShop configuration saved successfully!', 'success');
+            showToast('PrestaShop configuration saved successfully!', 'success');
             localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey }));
             prestashopConfigured = true;
             // Note: prestashopAuthorized will be set to true only after successful test connection
@@ -3351,7 +3614,7 @@ async function savePrestashopConfig() {
             updateExportButtonState();
             updateUIState(true); // Update UI state
         } else {
-            showToast('✗ ' + (data.error || 'Failed to save configuration'), 'error', 8000);
+            showToast(data.error || 'Failed to save configuration', 'error', 8000);
         }
     } catch (error) {
         showToast('✗ Error: ' + error.message, 'error', 8000);
@@ -3379,7 +3642,7 @@ async function testPrestashopConnection() {
     
     try {
         // Save temporarily for test
-        const response = await fetch(`${API_BASE}/api/prestashop/configure`, {
+        const response = await authFetch(`${API_BASE}/api/prestashop/configure`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -3394,13 +3657,13 @@ async function testPrestashopConnection() {
         }
         
         // Test connection
-        const testResponse = await fetch(`${API_BASE}/api/prestashop/test`);
+        const testResponse = await authFetch(`${API_BASE}/api/prestashop/test`);
         const testData = await testResponse.json();
         
         if (testData.success) {
             // Save to localStorage when test succeeds
             localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey }));
-            showToast('✓ ' + testData.message, 'success');
+            showToast(testData.message, 'success');
             prestashopConfigured = true;
             prestashopAuthorized = true; // Mark PrestaShop as authorized after successful test
             
@@ -3415,7 +3678,7 @@ async function testPrestashopConnection() {
         } else {
             // Show error with line breaks if it contains \n
             const errorMsg = (testData.error || 'Connection failed').replace(/\n/g, '<br>');
-            showToast('✗ ' + errorMsg, 'error', 10000);
+            showToast(errorMsg, 'error', 10000);
         }
     } catch (error) {
         // Format error message for better readability
@@ -3424,7 +3687,7 @@ async function testPrestashopConnection() {
             errorMsg = errorMsg.replace(/\n/g, '<br>• ');
             errorMsg = '• ' + errorMsg;
         }
-        showToast('✗ ' + errorMsg, 'error', 10000);
+        showToast(errorMsg, 'error', 10000);
     } finally {
         testBtn.disabled = false;
         testBtn.textContent = originalText;
@@ -3476,7 +3739,7 @@ function hidePrestashopSavedConfigDisplay() {
 
 async function checkPrestashopStatus() {
     try {
-        const response = await fetch(`${API_BASE}/api/prestashop/status`);
+        const response = await authFetch(`${API_BASE}/api/prestashop/status`);
         const data = await response.json();
         
         prestashopConfigured = data.configured;
@@ -3485,7 +3748,7 @@ async function checkPrestashopStatus() {
         // Only set authorized to true if we can successfully test the connection
         if (prestashopConfigured) {
             try {
-                const testResponse = await fetch(`${API_BASE}/api/prestashop/test`);
+                const testResponse = await authFetch(`${API_BASE}/api/prestashop/test`);
                 const testData = await testResponse.json();
                 prestashopAuthorized = testData.success || false;
             } catch (error) {
@@ -3671,7 +3934,7 @@ async function syncCategoriesToPrestashop() {
             }
 
             try {
-                const response = await fetch(`${API_BASE}/api/prestashop/categories`, {
+                const response = await authFetch(`${API_BASE}/api/prestashop/categories`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -3834,7 +4097,7 @@ async function exportToPrestashop() {
                 }
             }
             
-            const response = await fetch(`${API_BASE}/api/prestashop/products`, {
+            const response = await authFetch(`${API_BASE}/api/prestashop/products`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -3915,7 +4178,7 @@ async function exportCategoriesCsv() {
     }
     
     try {
-        const response = await fetch(`${API_BASE}/api/export/categories.csv`);
+        const response = await authFetch(`${API_BASE}/api/export/categories.csv`);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to export categories' }));
@@ -3962,7 +4225,7 @@ async function exportProductsCsv() {
     }
     
     try {
-        const response = await fetch(`${API_BASE}/api/export/products.csv`);
+        const response = await authFetch(`${API_BASE}/api/export/products.csv`);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to export products' }));
@@ -4061,7 +4324,7 @@ async function fetchCategoryData(categoryId) {
     }
     
     try {
-        const response = await fetch(`${API_BASE}/api/categories/${categoryId}`);
+        const response = await authFetch(`${API_BASE}/api/categories/${categoryId}`);
         if (!response.ok) {
             return null;
         }
@@ -4312,7 +4575,7 @@ async function loadCategoriesFromOffers() {
         
         while (hasMore) {
             // Filter by ACTIVE status to match Allegro website (which shows ACTIVE offers by default)
-            const response = await fetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}&status=ACTIVE`);
+            const response = await authFetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}&status=ACTIVE`);
             
             if (!response.ok) {
                 if (response.status === 401) {
@@ -4597,7 +4860,7 @@ async function fetchCategoryName(categoryId) {
     }
     
     try {
-        const response = await fetch(`${API_BASE}/api/categories/${categoryId}`);
+        const response = await authFetch(`${API_BASE}/api/categories/${categoryId}`);
         if (!response.ok) {
             return 'N/A';
         }
@@ -4933,17 +5196,40 @@ function setupConfigPanelToggle() {
     const toggle = document.getElementById('configPanelToggle');
     const wrapper = document.querySelector('.config-panel-wrapper');
     
-    if (toggle && wrapper) {
-        // Check if config is already set (both Allegro and PrestaShop)
-        const isConfigured = isAuthenticated && prestashopConfigured && prestashopAuthorized;
+    if (!toggle || !wrapper) {
+        console.warn('Config panel toggle elements not found');
+        return;
+    }
+    
+    // Check if config is already set (both Allegro and PrestaShop)
+    // Use safe checks for variables that might not be defined yet
+    try {
+        const isConfigured = (typeof isAuthenticated !== 'undefined' && isAuthenticated) && 
+                            (typeof prestashopConfigured !== 'undefined' && prestashopConfigured) && 
+                            (typeof prestashopAuthorized !== 'undefined' && prestashopAuthorized);
         if (isConfigured) {
             wrapper.classList.add('collapsed');
         }
-        
-        toggle.addEventListener('click', () => {
-            wrapper.classList.toggle('collapsed');
-        });
+    } catch (e) {
+        // If variables don't exist, start with panel expanded (default)
+        console.log('Config variables not initialized, starting with panel expanded');
     }
+    
+    // Remove any existing click listeners by using a named function we can remove
+    // Store the handler function on the element for potential cleanup
+    if (toggle._configToggleHandler) {
+        toggle.removeEventListener('click', toggle._configToggleHandler);
+    }
+    
+    // Create and store the handler
+    toggle._configToggleHandler = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        wrapper.classList.toggle('collapsed');
+    };
+    
+    // Add click event listener
+    toggle.addEventListener('click', toggle._configToggleHandler);
 }
 
 // Setup tab navigation
@@ -4980,6 +5266,9 @@ function setupTabNavigation() {
                     
                     // Start real-time timer updates
                     startSyncTimer();
+                } else if (targetTab === 'user-management') {
+                    // Load users when user-management tab is opened
+                    loadUsers();
                 } else {
                     // Clear interval when switching away from sync-log tab
                     if (window.syncLogInterval) {
@@ -5047,7 +5336,7 @@ function truncateText(text, maxLength) {
 // Sync Stock Log Functions
 async function loadSyncLogs() {
     try {
-        const response = await fetch('/api/sync/logs?limit=200');
+        const response = await authFetch('/api/sync/logs?limit=200');
         const data = await response.json();
         
         if (data.success) {
@@ -5389,6 +5678,437 @@ function formatTimeRemaining(seconds) {
         const hours = Math.floor(seconds / 3600);
         const minutes = Math.floor((seconds % 3600) / 60);
         return `${hours}h ${minutes}m`;
+    }
+}
+
+// ============================================
+// User Management Functions
+// ============================================
+
+// Load and display all users
+async function loadUsers() {
+    const loadingEl = document.getElementById('usersLoading');
+    const errorEl = document.getElementById('usersErrorMessage');
+    const tableEl = document.getElementById('usersTable');
+    const tableBodyEl = document.getElementById('usersTableBody');
+
+    if (!tableBodyEl) return;
+
+    try {
+        loadingEl.style.display = 'block';
+        errorEl.style.display = 'none';
+        tableEl.style.display = 'none';
+
+        const response = await authFetch(`${API_BASE}/api/admin/users`);
+        if (!response.ok) {
+            throw new Error('Failed to load users');
+        }
+
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to load users');
+        }
+
+        const users = data.users || [];
+        
+        if (users.length === 0) {
+            tableBodyEl.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px; color: #999;">No users found</td></tr>';
+        } else {
+            tableBodyEl.innerHTML = users.map(user => {
+                const lastLogin = user.last_login_at 
+                    ? new Date(user.last_login_at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+                    : 'Never';
+                const createdAt = new Date(user.created_at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                const isActive = user.is_active !== false && user.is_active !== 0;
+                const isLocked = user.lock_until && new Date(user.lock_until).getTime() > Date.now();
+                // Disable switch if user is locked (locked takes precedence)
+                const canToggle = !isLocked;
+                const adminCount = users.filter(u => u.role === 'admin').length;
+                const isLastAdmin = user.role === 'admin' && adminCount === 1;
+
+                return `
+                    <tr>
+                        <td>${user.id}</td>
+                        <td>${user.email}</td>
+                        <td><span class="user-role-badge ${user.role}">${user.role}</span></td>
+                        <td>${lastLogin}</td>
+                        <td>${createdAt}</td>
+                        <td>
+                            <label class="user-status-switch" title="${isLocked ? 'User is locked' : isLastAdmin ? 'Cannot deactivate the last admin' : isActive ? 'Click to deactivate' : 'Click to activate'}">
+                                <input type="checkbox" ${isActive ? 'checked' : ''} ${!canToggle || isLastAdmin ? 'disabled' : ''} onchange="toggleUserStatus(${user.id}, ${isActive}, '${user.email.replace(/'/g, "\\'")}')">
+                                <span class="user-status-switch-slider"></span>
+                            </label>
+                        </td>
+                        <td>
+                            <div class="user-actions">
+                                <button class="btn btn-secondary btn-small" onclick="editUser(${user.id}, '${user.email.replace(/'/g, "\\'")}', '${user.role}')">Edit</button>
+                                <button class="btn btn-secondary btn-small" onclick="deleteUser(${user.id}, '${user.email.replace(/'/g, "\\'")}')" ${isLastAdmin ? 'disabled title="Cannot delete the last admin user"' : ''}>Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        loadingEl.style.display = 'none';
+        tableEl.style.display = 'table';
+    } catch (error) {
+        console.error('Error loading users:', error);
+        loadingEl.style.display = 'none';
+        errorEl.textContent = error.message || 'Failed to load users';
+        errorEl.style.display = 'block';
+    }
+}
+
+// Reset user form to default state
+function resetUserForm() {
+    const userIdEl = document.getElementById('userId');
+    const emailEl = document.getElementById('userEmail');
+    const passwordEl = document.getElementById('userPassword');
+    const roleEl = document.getElementById('userRole');
+    const errorEl = document.getElementById('userFormError');
+    const form = document.getElementById('userForm');
+    
+    if (userIdEl) userIdEl.value = '';
+    if (emailEl) emailEl.value = '';
+    if (passwordEl) {
+        passwordEl.value = '';
+        passwordEl.required = true;
+    }
+    // Role defaults to user for new users
+    if (roleEl) roleEl.value = 'user';
+    const roleDisplayEl = document.getElementById('userRoleDisplay');
+    if (roleDisplayEl) roleDisplayEl.textContent = 'User';
+    if (errorEl) errorEl.style.display = 'none';
+    if (form) form.reset(); // Reset form to clear any validation states
+}
+
+// Open modal for creating a new user
+function createUser() {
+    resetUserForm();
+    document.getElementById('userPassword').required = true;
+    document.getElementById('userModalTitle').textContent = 'Create User';
+    document.getElementById('userModal').style.display = 'flex';
+    
+    // Focus on email field for better UX
+    setTimeout(() => {
+        const emailEl = document.getElementById('userEmail');
+        if (emailEl) emailEl.focus();
+    }, 100);
+}
+
+// Open modal for editing an existing user
+function editUser(id, email, role) {
+    // Hide error message first
+    const errorEl = document.getElementById('userFormError');
+    if (errorEl) errorEl.style.display = 'none';
+    
+    // Show modal first
+    document.getElementById('userModal').style.display = 'flex';
+    document.getElementById('userModalTitle').textContent = 'Edit User';
+    
+    // Set values after modal is shown - use requestAnimationFrame for better timing
+    requestAnimationFrame(() => {
+        const userIdEl = document.getElementById('userId');
+        // Get the input element from the form specifically to avoid conflict with span element
+        const userForm = document.getElementById('userForm');
+        const emailEl = userForm ? userForm.querySelector('input[name="userEmail"]') : document.getElementById('userEmail');
+        const passwordEl = document.getElementById('userPassword');
+        const roleEl = document.getElementById('userRole');
+        const roleDisplayEl = document.getElementById('userRoleDisplay');
+        
+        // Set values directly - ensure proper string conversion
+        if (userIdEl) userIdEl.value = String(id || '');
+        if (emailEl) {
+            emailEl.value = String(email || '');
+            // Trigger events to ensure value is recognized by browser
+            emailEl.dispatchEvent(new Event('input', { bubbles: true }));
+            emailEl.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        if (passwordEl) {
+            passwordEl.value = '';
+            passwordEl.required = false;
+        }
+        // Display role in read-only field (use existing user's role)
+        if (roleDisplayEl) {
+            const roleDisplay = role ? role.charAt(0).toUpperCase() + role.slice(1) : 'User';
+            roleDisplayEl.textContent = roleDisplay;
+        }
+        // Set hidden input to existing user's role
+        if (roleEl) roleEl.value = String(role || 'user');
+        
+        // Focus and select email field for better UX
+        if (emailEl && (emailEl.tagName === 'INPUT' || emailEl.tagName === 'TEXTAREA')) {
+            emailEl.focus();
+            // Select all text for easy editing - only if select method exists
+            if (typeof emailEl.select === 'function') {
+                setTimeout(() => emailEl.select(), 10);
+            }
+        }
+        
+        // Debug log to verify values are set
+        console.log('Edit User - Values set:', {
+            id: userIdEl?.value,
+            email: emailEl?.value,
+            role: roleEl?.value || role,
+            receivedParams: { id, email, role }
+        });
+    });
+}
+
+// Delete a user
+async function deleteUser(id, email) {
+    if (!confirm(`Are you sure you want to delete user "${email}"? This action cannot be undone.`)) {
+        return;
+    }
+
+    try {
+        const response = await authFetch(`${API_BASE}/api/admin/users/${id}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || 'Failed to delete user');
+        }
+
+        showToast(`User "${email}" deleted successfully`, 'success');
+        await loadUsers();
+    } catch (error) {
+        console.error('Error deleting user:', error);
+        showToast(error.message || 'Failed to delete user', 'error');
+    }
+}
+
+// Toggle user activation status
+async function toggleUserStatus(userId, currentStatus, email) {
+    const newStatus = !currentStatus;
+    
+    try {
+        const response = await authFetch(`${API_BASE}/api/admin/users/${userId}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                is_active: newStatus
+            })
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || 'Failed to update user status');
+        }
+
+        const statusText = newStatus ? 'activated' : 'deactivated';
+        showToast(`User "${email}" ${statusText} successfully`, 'success');
+        await loadUsers();
+    } catch (error) {
+        console.error('Error toggling user status:', error);
+        showToast(error.message || 'Failed to update user status', 'error');
+        // Reload users to reset the switch to its previous state
+        await loadUsers();
+    }
+}
+
+// Save user (create or update)
+async function saveUser(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const userIdEl = document.getElementById('userId');
+    const emailEl = document.getElementById('userEmail');
+    const passwordEl = document.getElementById('userPassword');
+    const roleEl = document.getElementById('userRole');
+    const errorEl = document.getElementById('userFormError');
+    const saveBtn = document.getElementById('saveUserBtn');
+
+    // Try multiple methods to get values
+    // Method 1: Direct element access
+    const userId = userIdEl ? userIdEl.value : '';
+    const emailRaw = emailEl ? emailEl.value : '';
+    const email = emailRaw.trim();
+    const password = passwordEl ? passwordEl.value : '';
+    const role = roleEl ? roleEl.value : '';
+    
+    // Method 2: FormData (more reliable)
+    const form = document.getElementById('userForm');
+    let formDataEmail = '';
+    let formDataPassword = '';
+    let formDataRole = '';
+    if (form && event && event.target) {
+        const formData = new FormData(event.target);
+        formDataEmail = formData.get('userEmail') || '';
+        formDataPassword = formData.get('userPassword') || '';
+        formDataRole = formData.get('userRole') || '';
+    }
+
+    // Log field values for debugging
+    console.log('=== User Form Field Values ===');
+    console.log('User ID:', userId || '(empty - new user)');
+    console.log('  → Explanation: Empty means creating a new user. If editing, this contains the user\'s database ID.');
+    console.log('');
+    console.log('--- Method 1: Direct Element Access ---');
+    console.log('Email (raw):', JSON.stringify(emailRaw), '| Length:', emailRaw.length);
+    console.log('Email (trimmed):', email || '(empty)');
+    console.log('  → Element found:', !!emailEl);
+    if (emailEl) {
+        console.log('  → Element value property:', JSON.stringify(emailEl.value));
+        console.log('  → Element type:', emailEl.type);
+        console.log('  → Element required:', emailEl.required);
+        console.log('  → Element id:', emailEl.id);
+        console.log('  → Element name:', emailEl.name || '(no name attribute)');
+    }
+    console.log('Password:', password ? '***' + password.length + ' characters***' : '(empty)');
+    console.log('Role:', role || '(empty)');
+    console.log('');
+    console.log('--- Method 2: FormData ---');
+    console.log('Email (FormData):', formDataEmail || '(empty)');
+    console.log('Password (FormData):', formDataPassword ? '***' + formDataPassword.length + ' characters***' : '(empty)');
+    console.log('Role (FormData):', formDataRole || '(empty)');
+    console.log('=============================');
+    
+    // Use FormData values if direct access failed
+    const finalEmail = email || formDataEmail.trim();
+    const finalPassword = password || formDataPassword;
+    // Get role from hidden input (will be 'user' for new users, existing role for edits)
+    const finalRole = roleEl ? roleEl.value : (formDataRole || 'user');
+
+    errorEl.style.display = 'none';
+
+    // Validation - use finalEmail which tries both methods
+    if (!finalEmail) {
+        errorEl.textContent = 'Email is required';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    const isEdit = userId !== '';
+    if (!isEdit && !finalPassword) {
+        errorEl.textContent = 'Password is required for new users';
+        errorEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+
+        if (isEdit) {
+            // Update existing user
+            const updateData = { email: finalEmail, role: finalRole };
+            if (finalPassword) {
+                updateData.password = finalPassword;
+            }
+
+            const response = await authFetch(`${API_BASE}/api/admin/users/${userId}`, {
+                method: 'PUT',
+                body: JSON.stringify(updateData)
+            });
+
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.error || 'Failed to update user');
+            }
+
+            showToast(`User "${finalEmail}" updated successfully`, 'success');
+        } else {
+            // Create new user
+            if (!finalPassword) {
+                throw new Error('Password is required');
+            }
+
+            const response = await authFetch(`${API_BASE}/api/admin/users`, {
+                method: 'POST',
+                body: JSON.stringify({ email: finalEmail, password: finalPassword, role: finalRole })
+            });
+
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.error || 'Failed to create user');
+            }
+
+            showToast(`User "${finalEmail}" created successfully`, 'success');
+        }
+
+        // Close modal, reset form, and refresh list
+        document.getElementById('userModal').style.display = 'none';
+        resetUserForm(); // Clear form fields after successful save
+        await loadUsers();
+    } catch (error) {
+        console.error('Error saving user:', error);
+        errorEl.textContent = error.message || 'Failed to save user';
+        errorEl.style.display = 'block';
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+    }
+}
+
+// Setup user management event listeners
+function setupUserManagement() {
+    // Show/hide User Management tab and content based on user role
+    const userManagementTab = document.getElementById('userManagementTab');
+    const userManagementContent = document.getElementById('tab-user-management');
+    
+    if (userManagementTab && currentUser && currentUser.role === 'admin') {
+        userManagementTab.style.display = 'flex';
+        if (userManagementContent) {
+            userManagementContent.style.display = 'block';
+        }
+    } else {
+        if (userManagementTab) {
+            userManagementTab.style.display = 'none';
+        }
+        if (userManagementContent) {
+            userManagementContent.style.display = 'none';
+        }
+    }
+
+    // Create user button
+    const createUserBtn = document.getElementById('createUserBtn');
+    if (createUserBtn) {
+        createUserBtn.addEventListener('click', createUser);
+    }
+
+    // Refresh users button
+    const refreshUsersBtn = document.getElementById('refreshUsersBtn');
+    if (refreshUsersBtn) {
+        refreshUsersBtn.addEventListener('click', loadUsers);
+    }
+
+    // User form submit
+    const userForm = document.getElementById('userForm');
+    if (userForm) {
+        userForm.addEventListener('submit', saveUser);
+    }
+
+    // Close modal buttons
+    const closeUserModal = document.getElementById('closeUserModal');
+    const cancelUserBtn = document.getElementById('cancelUserBtn');
+    if (closeUserModal) {
+        closeUserModal.addEventListener('click', () => {
+            document.getElementById('userModal').style.display = 'none';
+            resetUserForm(); // Clear form when closing
+        });
+    }
+    if (cancelUserBtn) {
+        cancelUserBtn.addEventListener('click', () => {
+            document.getElementById('userModal').style.display = 'none';
+            resetUserForm(); // Clear form when canceling
+        });
+    }
+
+    // Close modal when clicking outside
+    const userModal = document.getElementById('userModal');
+    if (userModal) {
+        userModal.addEventListener('click', (e) => {
+            if (e.target === userModal) {
+                userModal.style.display = 'none';
+                resetUserForm(); // Clear form when clicking outside
+            }
+        });
     }
 }
 
