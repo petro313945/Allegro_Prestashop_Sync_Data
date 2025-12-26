@@ -2147,8 +2147,10 @@ app.get('/api/oauth/authorize', authMiddleware, (req, res) => {
 
 /**
  * OAuth Callback endpoint - handles authorization code and exchanges for tokens
+ * Note: This endpoint does NOT require authentication as it's the entry point
+ * where users are redirected after authorizing with Allegro
  */
-app.get('/api/oauth/callback', authMiddleware, async (req, res) => {
+app.get('/api/oauth/callback', async (req, res) => {
   try {
     const { code, state, error } = req.query;
     

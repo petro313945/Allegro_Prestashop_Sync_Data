@@ -82,6 +82,8 @@ async function authFetch(url, options = {}) {
     // If unauthorized, clear token and show login
     if (response.status === 401) {
         clearAuth();
+        // Show user-friendly message about token expiration
+        showToast('Your session has expired. Please log in again to continue.', 'error', 8000);
         showLoginScreen();
         throw new Error('Session expired. Please log in again.');
     }
@@ -200,6 +202,11 @@ async function checkAuth() {
         }
     } catch (error) {
         console.error('Auth check failed:', error);
+        // If error is about session expiration, it's already handled in authFetch
+        // Only show additional message if it's a different error
+        if (error.message && !error.message.includes('Session expired')) {
+            showToast('Authentication check failed. Please log in again.', 'error', 6000);
+        }
         showLoginScreen();
         return false;
     }
@@ -6054,9 +6061,7 @@ function setupUserManagement() {
     
     if (userManagementTab && currentUser && currentUser.role === 'admin') {
         userManagementTab.style.display = 'flex';
-        if (userManagementContent) {
-            userManagementContent.style.display = 'block';
-        }
+        // Don't force display - let tab switching logic handle visibility
     } else {
         if (userManagementTab) {
             userManagementTab.style.display = 'none';
