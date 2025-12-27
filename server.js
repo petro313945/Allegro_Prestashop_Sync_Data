@@ -5104,6 +5104,8 @@ async function syncStockFromAllegroToPrestashop() {
         let productName = null;
         let categoryName = null;
         let offerId = null;
+        let prestashopPrice = null;
+        let allegroPrice = null;
         
         try {
           const prestashopProductId = prestashopProduct.id?.toString();
@@ -5113,14 +5115,14 @@ async function syncStockFromAllegroToPrestashop() {
           }
           
           // Fetch full product details - list endpoint only returns basic fields (doesn't include reference)
-          // We need to fetch individual product to get the reference field and name
+          // We need to fetch individual product to get the reference field, name, and price
           let fullProduct = prestashopProduct;
           try {
             // Try with display parameter first to explicitly request needed fields
             // Note: associations field is not available via display parameter, so we use id_category_default instead
             let productData;
             try {
-              productData = await prestashopApiRequest(`products/${prestashopProductId}?display=[id,name,reference,id_category_default]`, 'GET');
+              productData = await prestashopApiRequest(`products/${prestashopProductId}?display=[id,name,reference,id_category_default,price]`, 'GET');
             } catch (displayError) {
               // If display parameter fails, try without it (some PrestaShop versions might not support it)
               productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET');
@@ -5133,6 +5135,14 @@ async function syncStockFromAllegroToPrestashop() {
               fullProduct = productData.products[0].product || productData.products[0];
             } else if (productData.id) {
               fullProduct = productData;
+            }
+            
+            // Extract price from PrestaShop product
+            if (fullProduct.price !== undefined && fullProduct.price !== null) {
+              const priceValue = fullProduct.price;
+              if (typeof priceValue === 'string' || typeof priceValue === 'number') {
+                prestashopPrice = parseFloat(priceValue) || null;
+              }
             }
           } catch (fetchError) {
             console.warn(`Failed to fetch full details for product ${prestashopProductId}, using basic data:`, fetchError.message);
@@ -5169,7 +5179,9 @@ async function syncStockFromAllegroToPrestashop() {
               categoryName: categoryName,
               offerId: null,
               prestashopProductId: prestashopProductId,
-              stockChange: null
+              stockChange: null,
+              allegroPrice: null,
+              prestashopPrice: prestashopPrice
             });
             return;
           }
@@ -5186,7 +5198,9 @@ async function syncStockFromAllegroToPrestashop() {
               productName: productName || `Product ID ${prestashopProductId}`,
               offerId: offerId,
               prestashopProductId: prestashopProductId,
-              stockChange: null
+              stockChange: null,
+              allegroPrice: null,
+              prestashopPrice: prestashopPrice
             });
             return;
           }
@@ -5202,40 +5216,66 @@ async function syncStockFromAllegroToPrestashop() {
             categoryName: categoryName,
             offerId: offerId,
             prestashopProductId: prestashopProductId,
-            stockChange: null
+            stockChange: null,
+            allegroPrice: null,
+            prestashopPrice: prestashopPrice
           });
 
-          // Get current stock from Allegro for this offer ID
+          // Get current stock and price from Allegro for this offer ID
           // Use the new /sale/product-offers/{offerId} endpoint (old /sale/offers/{offerId} was deprecated in 2024)
-          // Try to get stock from the parts endpoint first (more efficient), fallback to full offer data
+          // Try to get stock and price from the parts endpoint first (more efficient), fallback to full offer data
           let allegroStock = 0;
           try {
-            // First try the parts endpoint for stock information (more efficient)
-            // This endpoint allows fetching only specific parts like stock without the full offer data
+            // First try the parts endpoint for stock and price information (more efficient)
+            // This endpoint allows fetching only specific parts like stock and price without the full offer data
             // Format: ?include=stock&include=price (multiple include parameters)
             let stockData = null;
+            let priceData = null;
             try {
-              // Pass include as array - axios will convert to multiple query params: ?include=stock
-              const partsData = await allegroApiRequest(`/sale/product-offers/${offerId}/parts`, { include: ['stock'] }, true);
+              // Pass include as array - axios will convert to multiple query params: ?include=stock&include=price
+              const partsData = await allegroApiRequest(`/sale/product-offers/${offerId}/parts`, { include: ['stock', 'price'] }, true);
               // Check if stock information is in the parts response
               if (partsData.stock) {
                 stockData = partsData.stock;
+              }
+              // Check if price information is in the parts response
+              if (partsData.price || partsData.sellingMode?.price) {
+                priceData = partsData.price || partsData.sellingMode?.price;
               }
             } catch (partsError) {
               // If parts endpoint fails (might not be available or might need different params), fall back to full offer data
               // This is expected for some API versions, so we don't log it as an error
             }
             
-            // If we didn't get stock from parts, fetch full offer data
-            if (!stockData) {
+            // If we didn't get stock or price from parts, fetch full offer data
+            if (!stockData || !priceData) {
               const offerData = await allegroApiRequest(`/sale/product-offers/${offerId}`, {}, true);
               // Stock is in stock.available according to Allegro API documentation
-              stockData = offerData.stock;
+              if (!stockData && offerData.stock) {
+                stockData = offerData.stock;
+              }
+              // Price is in sellingMode.price.amount according to Allegro API documentation
+              if (!priceData && (offerData.sellingMode?.price || offerData.price)) {
+                priceData = offerData.sellingMode?.price || offerData.price;
+              }
             }
             
             // Extract stock value from stock object
             if (stockData && stockData.available !== undefined) {
               allegroStock = parseInt(stockData.available) || 0;
+            }
+            
+            // Extract price value from price object
+            if (priceData) {
+              if (typeof priceData === 'object') {
+                allegroPrice = priceData.amount || priceData.value || null;
+              } else if (typeof priceData === 'number' || typeof priceData === 'string') {
+                allegroPrice = priceData;
+              }
+              // Convert to number if it's a string
+              if (allegroPrice !== null && typeof allegroPrice === 'string') {
+                allegroPrice = parseFloat(allegroPrice) || null;
+              }
             }
             
             // Reset 403 counter on success
@@ -5274,7 +5314,9 @@ async function syncStockFromAllegroToPrestashop() {
               categoryName: categoryName,
               offerId: offerId,
               prestashopProductId: prestashopProductId,
-              stockChange: null
+              stockChange: null,
+              allegroPrice: null,
+              prestashopPrice: prestashopPrice
             });
             errorCount++;
             return;
@@ -5356,7 +5398,9 @@ async function syncStockFromAllegroToPrestashop() {
               categoryName: categoryName,
               offerId: offerId,
               prestashopProductId: prestashopProductId,
-              stockChange: null
+              stockChange: null,
+              allegroPrice: allegroPrice,
+              prestashopPrice: prestashopPrice
             });
             errorCount++;
             return;
@@ -5454,7 +5498,9 @@ async function syncStockFromAllegroToPrestashop() {
                         stockChange: {
                           from: prestashopStockNum,
                           to: allegroStockNum
-                        }
+                        },
+                        allegroPrice: allegroPrice,
+                        prestashopPrice: prestashopPrice
                       });
                       return;
                     }
@@ -5472,7 +5518,9 @@ async function syncStockFromAllegroToPrestashop() {
                   categoryName: categoryName,
                   offerId: offerId,
                   prestashopProductId: prestashopProductId,
-                  stockChange: null
+                  stockChange: null,
+                  allegroPrice: allegroPrice,
+                  prestashopPrice: prestashopPrice
                 });
                 skippedCount++;
                 return;
@@ -5489,7 +5537,9 @@ async function syncStockFromAllegroToPrestashop() {
                 stockChange: {
                   from: prestashopStockNum,
                   to: allegroStockNum
-                }
+                },
+                allegroPrice: allegroPrice,
+                prestashopPrice: prestashopPrice
               });
             } catch (error) {
               console.error(`Error updating PrestaShop stock for product ${prestashopProductId}:`, error.message);
@@ -5503,7 +5553,9 @@ async function syncStockFromAllegroToPrestashop() {
                 stockChange: {
                   from: prestashopStockNum,
                   to: allegroStockNum
-                }
+                },
+                allegroPrice: allegroPrice,
+                prestashopPrice: prestashopPrice
               });
               errorCount++;
             }
@@ -5520,7 +5572,9 @@ async function syncStockFromAllegroToPrestashop() {
               stockChange: {
                 from: prestashopStockNum,
                 to: allegroStockNum
-              }
+              },
+              allegroPrice: allegroPrice,
+              prestashopPrice: prestashopPrice
             });
           }
         } catch (error) {
@@ -5533,7 +5587,9 @@ async function syncStockFromAllegroToPrestashop() {
             categoryName: categoryName,
             offerId: offerId,
             prestashopProductId: prestashopProductId,
-            stockChange: null
+            stockChange: null,
+            allegroPrice: null,
+            prestashopPrice: null
           });
           errorCount++;
         }

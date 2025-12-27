@@ -36,6 +36,7 @@ const API_BASE = '';
 // Authentication state
 let authToken = null;
 let currentUser = null;
+let sessionExpiredMessageShown = false; // Flag to prevent showing multiple session expired messages
 
 // Auth token management
 function getAuthToken() {
@@ -59,6 +60,8 @@ function clearAuth() {
     currentUser = null;
     localStorage.removeItem('auth_token');
     localStorage.removeItem('current_user');
+    // Reset session expired message flag when clearing auth
+    sessionExpiredMessageShown = false;
 }
 
 // Authenticated fetch wrapper
@@ -82,8 +85,11 @@ async function authFetch(url, options = {}) {
     // If unauthorized, clear token and show login
     if (response.status === 401) {
         clearAuth();
-        // Show user-friendly message about token expiration
-        showToast('Your session has expired. Please log in again to continue.', 'error', 8000);
+        // Show user-friendly message about token expiration only once
+        if (!sessionExpiredMessageShown) {
+            showToast('Your session has expired. Please log in again to continue.', 'error', 8000);
+            sessionExpiredMessageShown = true;
+        }
         showLoginScreen();
         throw new Error('Session expired. Please log in again.');
     }
@@ -128,6 +134,9 @@ async function login(email, password) {
         setAuthToken(data.token);
         currentUser = data.user;
         localStorage.setItem('current_user', JSON.stringify(data.user));
+        
+        // Reset session expired message flag on successful login
+        sessionExpiredMessageShown = false;
         
         // Update user email display
         updateUserDisplay(data.user);
@@ -5419,6 +5428,15 @@ function displaySyncLogs(logs) {
                 stockInfo = `<span class="product-check-stock">Stock: ${log.stockChange.from} → ${log.stockChange.to}</span>`;
             }
             
+            let priceInfo = '';
+            if (log.allegroPrice !== null && log.allegroPrice !== undefined || log.prestashopPrice !== null && log.prestashopPrice !== undefined) {
+                const formatPrice = (price) => {
+                    if (price === null || price === undefined) return 'N/A';
+                    return typeof price === 'number' ? price.toFixed(2) : parseFloat(price).toFixed(2);
+                };
+                priceInfo = `<span class="product-check-price">Price: Allegro ${formatPrice(log.allegroPrice)} PLN | PrestaShop ${formatPrice(log.prestashopPrice)} PLN</span>`;
+            }
+            
             let idsInfo = '';
             if (log.offerId || log.prestashopProductId) {
                 const parts = [];
@@ -5465,6 +5483,7 @@ function displaySyncLogs(logs) {
                         <div class="product-check-details">
                             <span>${statusText}</span>
                             ${stockInfo}
+                            ${priceInfo}
                             ${idsInfo}
                         </div>
                     </div>
@@ -5494,6 +5513,22 @@ function displaySyncLogs(logs) {
             stockChangeHtml = `
                 <div class="sync-log-stock-change">
                     Stock: ${log.stockChange.from} <span class="stock-arrow">→</span> ${log.stockChange.to}
+                </div>
+            `;
+        }
+        
+        // Display prices from Allegro and PrestaShop
+        let priceHtml = '';
+        if (log.allegroPrice !== null && log.allegroPrice !== undefined || log.prestashopPrice !== null && log.prestashopPrice !== undefined) {
+            const formatPrice = (price) => {
+                if (price === null || price === undefined) return 'N/A';
+                return typeof price === 'number' ? price.toFixed(2) : parseFloat(price).toFixed(2);
+            };
+            priceHtml = `
+                <div class="sync-log-price" style="font-size: 0.9em; color: #555; margin-top: 4px;">
+                    <span style="font-weight: 500;">Price:</span> 
+                    Allegro: <span style="color: #2196F3;">${formatPrice(log.allegroPrice)} PLN</span> | 
+                    PrestaShop: <span style="color: #4CAF50;">${formatPrice(log.prestashopPrice)} PLN</span>
                 </div>
             `;
         }
@@ -5547,6 +5582,7 @@ function displaySyncLogs(logs) {
                     ${productInfo}
                     <div class="sync-log-message">${escapeHtml(log.message || '')}</div>
                     ${stockChangeHtml}
+                    ${priceHtml}
                     ${detailsHtml}
                 </div>
             </div>
