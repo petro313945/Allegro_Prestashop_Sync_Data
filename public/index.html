@@ -263,15 +263,34 @@
                 <!-- Tab Content: Sync Stock Log -->
                 <div class="tab-content" id="tab-sync-log">
                     <div class="section-card">
+                        <div class="section-header" style="margin-bottom: 15px;">
+                            <h2 style="margin: 0;">Stock & Price Sync Control</h2>
+                            <div class="section-actions">
+                                <button id="startSyncBtn" class="btn btn-success" disabled>
+                                    <span id="startSyncBtnText">Start Sync Timer</span>
+                                </button>
+                                <button id="stopSyncBtn" class="btn btn-danger" style="display: none;">
+                                    <span>Stop Sync Timer</span>
+                                </button>
+                                <button id="triggerSyncBtn" class="btn btn-primary" disabled>
+                                    <span>Run Sync Now</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div id="syncPrerequisitesMsg" class="message" style="display: none; margin-bottom: 15px;"></div>
                         <div class="sync-log-info">
                             <div class="sync-log-info-header">
                                 <div class="sync-log-info-content">
                                     <p class="info-text">
-                                        <strong>Automatic Stock Sync:</strong> Stock is automatically synced from Allegro to PrestaShop.
-                                        <br><strong>Sync Schedule:</strong> Runs once immediately after server starts (10 seconds delay), then automatically every 5 minutes.
+                                        <strong>Automatic Stock Sync:</strong> Stock and price are automatically synced from Allegro to PrestaShop.
+                                        <br><strong>Sync Schedule:</strong> Runs every 5 minutes when timer is active.
                                         <br><strong>Sync Method:</strong> Only products that exist in PrestaShop are checked and synced. Stock changes in PrestaShop do not affect Allegro stock.
                                     </p>
                                     <div class="sync-status" id="syncStatus">
+                                        <div class="sync-status-row">
+                                            <span class="sync-status-label">Sync Status:</span>
+                                            <span id="syncTimerStatus" class="sync-status-value">Stopped</span>
+                                        </div>
                                         <div class="sync-status-row">
                                             <span class="sync-status-label">Last Sync:</span>
                                             <span id="lastSyncTime" class="sync-status-value">Never</span>

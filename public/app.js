@@ -679,6 +679,20 @@ function setupEventListeners() {
     if (clearBtn) {
         clearBtn.addEventListener('click', clearCredentials);
     }
+    
+    // Sync timer control buttons
+    const startSyncBtn = document.getElementById('startSyncBtn');
+    if (startSyncBtn) {
+        startSyncBtn.addEventListener('click', startSyncTimerControl);
+    }
+    const stopSyncBtn = document.getElementById('stopSyncBtn');
+    if (stopSyncBtn) {
+        stopSyncBtn.addEventListener('click', stopSyncTimerControl);
+    }
+    const triggerSyncBtn = document.getElementById('triggerSyncBtn');
+    if (triggerSyncBtn) {
+        triggerSyncBtn.addEventListener('click', triggerSyncNow);
+    }
     const authorizeAccountBtn = document.getElementById('authorizeAccountBtn');
     if (authorizeAccountBtn) {
         authorizeAccountBtn.addEventListener('click', authorizeAccount);
@@ -920,6 +934,34 @@ async function saveCredentials() {
     
     if (!clientId || !clientSecret) {
         showToast('Please enter both Client ID and Client Secret', 'error');
+        return;
+    }
+    
+    // Check if session is still valid before proceeding
+    const token = getAuthToken();
+    if (!token) {
+        showToast('Your session has expired. Please log in again to configure Allegro.', 'error', 8000);
+        showLoginScreen();
+        return;
+    }
+    
+    // Validate and refresh session by checking health endpoint
+    // Temporarily suppress duplicate session expired messages
+    const originalSessionExpiredFlag = sessionExpiredMessageShown;
+    sessionExpiredMessageShown = true; // Prevent duplicate message from authFetch
+    
+    try {
+        const healthCheck = await authFetch(`${API_BASE}/api/health`);
+        if (!healthCheck.ok) {
+            // Session invalid - authFetch already handled the error and showed login screen
+            sessionExpiredMessageShown = originalSessionExpiredFlag; // Restore flag
+            return;
+        }
+        // Session is valid and refreshed, restore the flag
+        sessionExpiredMessageShown = originalSessionExpiredFlag;
+    } catch (error) {
+        // Session expired or invalid - error already handled by authFetch (shows login screen)
+        sessionExpiredMessageShown = originalSessionExpiredFlag; // Restore flag
         return;
     }
     
@@ -5270,6 +5312,8 @@ function setupTabNavigation() {
                 // Load sync logs when sync-log tab is opened
                 if (targetTab === 'sync-log') {
                     loadSyncLogs();
+                    checkSyncPrerequisites();
+                    updateSyncControlButtons();
                     // Auto-refresh sync logs every 2 seconds when tab is active for real-time updates
                     if (window.syncLogInterval) {
                         clearInterval(window.syncLogInterval);
@@ -5277,6 +5321,7 @@ function setupTabNavigation() {
                     window.syncLogInterval = setInterval(() => {
                         if (targetContent.classList.contains('active')) {
                             loadSyncLogs();
+                            updateSyncStatusFromServer();
                         }
                     }, 2000); // Poll every 2 seconds for real-time updates
                     
@@ -5723,6 +5768,193 @@ function formatTimeRemaining(seconds) {
         const hours = Math.floor(seconds / 3600);
         const minutes = Math.floor((seconds % 3600) / 60);
         return `${hours}h ${minutes}m`;
+    }
+}
+
+// ============================================
+// Sync Timer Control Functions
+// ============================================
+
+// Check if prerequisites are met for sync
+async function checkSyncPrerequisites() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/sync/prerequisites`);
+        const data = await response.json();
+        
+        const msgEl = document.getElementById('syncPrerequisitesMsg');
+        if (!msgEl) return;
+        
+        if (data.success && data.prerequisitesMet) {
+            msgEl.style.display = 'none';
+            return true;
+        } else {
+            msgEl.style.display = 'block';
+            msgEl.className = 'message error';
+            const missing = [];
+            if (!data.details.prestashopConfigured) missing.push('PrestaShop');
+            if (!data.details.allegroConfigured) missing.push('Allegro');
+            if (!data.details.hasOAuthToken) missing.push('Allegro OAuth');
+            msgEl.textContent = `Missing prerequisites: ${missing.join(', ')}. Please configure all required settings first.`;
+            return false;
+        }
+    } catch (error) {
+        console.error('Error checking prerequisites:', error);
+        return false;
+    }
+}
+
+// Update sync control buttons based on status
+async function updateSyncControlButtons() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/sync/status`);
+        const data = await response.json();
+        
+        const startBtn = document.getElementById('startSyncBtn');
+        const stopBtn = document.getElementById('stopSyncBtn');
+        const triggerBtn = document.getElementById('triggerSyncBtn');
+        const statusEl = document.getElementById('syncTimerStatus');
+        
+        const prerequisitesMet = await checkSyncPrerequisites();
+        
+        if (startBtn) {
+            startBtn.disabled = !prerequisitesMet || data.timerActive;
+            if (data.timerActive) {
+                startBtn.style.display = 'none';
+            } else {
+                startBtn.style.display = 'inline-block';
+            }
+        }
+        
+        if (stopBtn) {
+            stopBtn.style.display = data.timerActive ? 'inline-block' : 'none';
+        }
+        
+        if (triggerBtn) {
+            triggerBtn.disabled = !prerequisitesMet;
+        }
+        
+        if (statusEl) {
+            statusEl.textContent = data.timerActive ? 'Running' : 'Stopped';
+            statusEl.style.color = data.timerActive ? '#34a853' : '#ea4335';
+        }
+        
+        // Update sync times
+        if (data.lastSyncTime || data.nextSyncTime) {
+            updateSyncStatus(data.lastSyncTime, data.nextSyncTime);
+        }
+    } catch (error) {
+        console.error('Error updating sync control buttons:', error);
+    }
+}
+
+// Update sync status from server
+async function updateSyncStatusFromServer() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/sync/status`);
+        const data = await response.json();
+        
+        const statusEl = document.getElementById('syncTimerStatus');
+        if (statusEl) {
+            statusEl.textContent = data.timerActive ? 'Running' : 'Stopped';
+            statusEl.style.color = data.timerActive ? '#34a853' : '#ea4335';
+        }
+        
+        if (data.lastSyncTime || data.nextSyncTime) {
+            updateSyncStatus(data.lastSyncTime, data.nextSyncTime);
+        }
+    } catch (error) {
+        console.error('Error updating sync status:', error);
+    }
+}
+
+// Start sync timer
+async function startSyncTimerControl() {
+    const startBtn = document.getElementById('startSyncBtn');
+    if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.querySelector('span').textContent = 'Starting...';
+    }
+    
+    try {
+        const response = await authFetch(`${API_BASE}/api/sync/start`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Sync timer started successfully', 'success');
+            await updateSyncControlButtons();
+        } else {
+            showToast(data.error || 'Failed to start sync timer', 'error');
+            await updateSyncControlButtons();
+        }
+    } catch (error) {
+        console.error('Error starting sync timer:', error);
+        showToast('Failed to start sync timer: ' + error.message, 'error');
+        await updateSyncControlButtons();
+    }
+}
+
+// Stop sync timer
+async function stopSyncTimerControl() {
+    const stopBtn = document.getElementById('stopSyncBtn');
+    if (stopBtn) {
+        stopBtn.disabled = true;
+        stopBtn.querySelector('span').textContent = 'Stopping...';
+    }
+    
+    try {
+        const response = await authFetch(`${API_BASE}/api/sync/stop`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Sync timer stopped successfully', 'info');
+            await updateSyncControlButtons();
+        } else {
+            showToast(data.error || 'Failed to stop sync timer', 'error');
+            await updateSyncControlButtons();
+        }
+    } catch (error) {
+        console.error('Error stopping sync timer:', error);
+        showToast('Failed to stop sync timer: ' + error.message, 'error');
+        await updateSyncControlButtons();
+    }
+}
+
+// Trigger sync now
+async function triggerSyncNow() {
+    const triggerBtn = document.getElementById('triggerSyncBtn');
+    if (triggerBtn) {
+        triggerBtn.disabled = true;
+        triggerBtn.querySelector('span').textContent = 'Running...';
+    }
+    
+    try {
+        const response = await authFetch(`${API_BASE}/api/sync/trigger`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Sync triggered successfully', 'success');
+            // Refresh logs after a short delay
+            setTimeout(() => {
+                loadSyncLogs();
+                updateSyncStatusFromServer();
+            }, 2000);
+        } else {
+            showToast(data.error || 'Failed to trigger sync', 'error');
+        }
+    } catch (error) {
+        console.error('Error triggering sync:', error);
+        showToast('Failed to trigger sync: ' + error.message, 'error');
+    } finally {
+        if (triggerBtn) {
+            triggerBtn.disabled = false;
+            triggerBtn.querySelector('span').textContent = 'Run Sync Now';
+        }
     }
 }
 

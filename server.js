@@ -46,20 +46,27 @@ if (dotenvResult.error) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Token storage file path
-const TOKEN_STORAGE_FILE = path.join(__dirname, '.tokens.json');
-const CREDENTIALS_STORAGE_FILE = path.join(__dirname, '.credentials.json');
-const PRESTASHOP_CREDENTIALS_FILE = path.join(__dirname, '.prestashop.json');
+// Product mappings and other file paths (not migrated to database)
 const PRODUCT_MAPPINGS_FILE = path.join(__dirname, '.product_mappings.json');
 const CATEGORY_CACHE_FILE = path.join(__dirname, '.category_cache.json');
 const SYNC_LOG_FILE = path.join(__dirname, '.sync_log.json');
 
-// MariaDB configuration (environment variables)
-const DB_HOST = process.env.DB_HOST || 'localhost';
+// MariaDB configuration (environment variables - REQUIRED)
+const DB_HOST = process.env.DB_HOST;
 const DB_PORT = process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : 3306;
-const DB_USER = process.env.DB_USER || 'root';
-const DB_PASSWORD = process.env.DB_PASSWORD || '';
-const DB_NAME = process.env.DB_NAME || 'allegro_prestashop_sync';
+const DB_USER = process.env.DB_USER;
+const DB_PASSWORD = process.env.DB_PASSWORD;
+const DB_NAME = process.env.DB_NAME;
+
+// Validate required database configuration
+if (!DB_HOST || !DB_USER || !DB_NAME) {
+  console.error('❌ ERROR: Required database configuration missing in .env file:');
+  if (!DB_HOST) console.error('   Missing: DB_HOST');
+  if (!DB_USER) console.error('   Missing: DB_USER');
+  if (!DB_NAME) console.error('   Missing: DB_NAME');
+  console.error('Please set all required database variables in your .env file.');
+  process.exit(1);
+}
 
 // Log database configuration (without showing password)
 console.log('Database Configuration:');
@@ -275,6 +282,60 @@ async function initDatabase() {
     console.warn('Warning: Could not add is_active column:', error.message);
   }
 
+  // Create allegro_credentials table (single row configuration)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS allegro_credentials (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      client_id VARCHAR(255) NULL,
+      client_secret VARCHAR(255) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY single_row (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // Create oauth_tokens table (single row configuration)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      access_token TEXT NULL,
+      refresh_token TEXT NULL,
+      expires_at BIGINT NULL,
+      user_id VARCHAR(255) NULL,
+      client_access_token TEXT NULL,
+      client_token_expiry BIGINT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY single_row (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // Create prestashop_credentials table (single row configuration)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS prestashop_credentials (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      base_url VARCHAR(500) NULL,
+      api_key VARCHAR(255) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY single_row (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // Initialize single row for each configuration table if not exists
+  await dbPool.query(`
+    INSERT IGNORE INTO allegro_credentials (id, client_id, client_secret) VALUES (1, NULL, NULL)
+  `);
+  await dbPool.query(`
+    INSERT IGNORE INTO oauth_tokens (id, access_token, refresh_token, expires_at, user_id, client_access_token, client_token_expiry) 
+    VALUES (1, NULL, NULL, NULL, NULL, NULL, NULL)
+  `);
+  await dbPool.query(`
+    INSERT IGNORE INTO prestashop_credentials (id, base_url, api_key) VALUES (1, NULL, NULL)
+  `);
+
+  console.log('✓ Configuration tables created/verified');
+
   // Ensure at least one admin user exists if ADMIN_EMAIL / ADMIN_PASSWORD are provided
   const adminEmail = process.env.ADMIN_EMAIL;
   const adminPassword = process.env.ADMIN_PASSWORD;
@@ -421,56 +482,81 @@ let lastSyncTime = null;
 let nextSyncTime = null;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
+// Sync timer control
+let syncTimerInterval = null; // Store interval ID for stopping
+let syncTimerActive = false; // Track if timer is running
+
 // Configuration: Use setInterval timer (true) or rely on external cron (false)
 // Set to false on Ubuntu to use system cron instead
 const USE_INTERVAL_TIMER = process.env.USE_INTERVAL_TIMER !== 'false'; // Default: true (for Windows dev)
 
 /**
- * Save tokens to file (persistent storage)
+ * Save tokens to database (persistent storage)
  */
-function saveTokens() {
+async function saveTokens() {
   try {
-    const tokenData = {
-      userOAuthTokens: userOAuthTokens,
-      accessToken: accessToken,
-      tokenExpiry: tokenExpiry,
-      savedAt: new Date().toISOString()
-    };
-    fs.writeFileSync(TOKEN_STORAGE_FILE, JSON.stringify(tokenData, null, 2), 'utf8');
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot save tokens');
+      return;
+    }
+    
+    await dbPool.query(`
+      UPDATE oauth_tokens SET
+        access_token = ?,
+        refresh_token = ?,
+        expires_at = ?,
+        user_id = ?,
+        client_access_token = ?,
+        client_token_expiry = ?,
+        updated_at = NOW()
+      WHERE id = 1
+    `, [
+      userOAuthTokens.accessToken || null,
+      userOAuthTokens.refreshToken || null,
+      userOAuthTokens.expiresAt || null,
+      userOAuthTokens.userId || null,
+      accessToken || null,
+      tokenExpiry || null
+    ]);
   } catch (error) {
-    console.error('Error saving tokens:', error.message);
+    console.error('Error saving tokens to database:', error.message);
   }
 }
 
 /**
- * Load tokens from file (on server startup)
+ * Load tokens from database (on server startup)
  */
-function loadTokens() {
+async function loadTokens() {
   try {
-    if (fs.existsSync(TOKEN_STORAGE_FILE)) {
-      const tokenData = JSON.parse(fs.readFileSync(TOKEN_STORAGE_FILE, 'utf8'));
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot load tokens');
+      return;
+    }
+    
+    const [rows] = await dbPool.query('SELECT * FROM oauth_tokens WHERE id = 1');
+    
+    if (rows.length > 0) {
+      const row = rows[0];
       
-      // Restore tokens - replace entire object to ensure we get the latest values
-      if (tokenData.userOAuthTokens) {
-        userOAuthTokens = { ...tokenData.userOAuthTokens };
+      // Restore user OAuth tokens
+      if (row.access_token || row.refresh_token) {
+        userOAuthTokens = {
+          accessToken: row.access_token || null,
+          refreshToken: row.refresh_token || null,
+          expiresAt: row.expires_at || null,
+          userId: row.user_id || null
+        };
       }
-      if (tokenData.accessToken) {
-        accessToken = tokenData.accessToken;
-      }
-      if (tokenData.tokenExpiry) {
-        tokenExpiry = tokenData.tokenExpiry;
-      }
-      // Check if refresh token is still valid (not expired)
-      if (userOAuthTokens.refreshToken && userOAuthTokens.expiresAt) {
-        const timeUntilExpiry = userOAuthTokens.expiresAt - Date.now();
-        if (!(timeUntilExpiry > 0)) {
-          // Access token expired, will use refresh token on next request
-        }
+      
+      // Restore client credentials token
+      if (row.client_access_token) {
+        accessToken = row.client_access_token;
+        tokenExpiry = row.client_token_expiry || null;
       }
     }
   } catch (error) {
-    console.error('Error loading tokens:', error.message);
-    // If file is corrupted, start fresh
+    console.error('Error loading tokens from database:', error.message);
+    // If database error, start fresh
     userOAuthTokens = {
       accessToken: null,
       refreshToken: null,
@@ -481,66 +567,97 @@ function loadTokens() {
 }
 
 /**
- * Save credentials to file (persistent storage)
+ * Save credentials to database (persistent storage)
  */
-function saveCredentials() {
+async function saveCredentials() {
   try {
-    const credData = {
-      clientId: userCredentials.clientId,
-      clientSecret: userCredentials.clientSecret,
-      savedAt: new Date().toISOString()
-    };
-    fs.writeFileSync(CREDENTIALS_STORAGE_FILE, JSON.stringify(credData, null, 2), 'utf8');
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot save credentials');
+      return;
+    }
+    
+    await dbPool.query(`
+      UPDATE allegro_credentials SET
+        client_id = ?,
+        client_secret = ?,
+        updated_at = NOW()
+      WHERE id = 1
+    `, [
+      userCredentials.clientId || null,
+      userCredentials.clientSecret || null
+    ]);
   } catch (error) {
-    console.error('Error saving credentials:', error.message);
+    console.error('Error saving credentials to database:', error.message);
   }
 }
 
 /**
- * Load credentials from file (on server startup)
+ * Load credentials from database (on server startup)
  */
-function loadCredentials() {
+async function loadCredentials() {
   try {
-    if (fs.existsSync(CREDENTIALS_STORAGE_FILE)) {
-      const credData = JSON.parse(fs.readFileSync(CREDENTIALS_STORAGE_FILE, 'utf8'));
-      
-      if (credData.clientId && credData.clientSecret) {
-        userCredentials.clientId = credData.clientId;
-        userCredentials.clientSecret = credData.clientSecret;
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot load credentials');
+      return;
+    }
+    
+    const [rows] = await dbPool.query('SELECT * FROM allegro_credentials WHERE id = 1');
+    
+    if (rows.length > 0) {
+      const row = rows[0];
+      if (row.client_id && row.client_secret) {
+        userCredentials.clientId = row.client_id;
+        userCredentials.clientSecret = row.client_secret;
       }
     }
   } catch (error) {
-    console.error('Error loading credentials:', error.message);
+    console.error('Error loading credentials from database:', error.message);
   }
 }
 
 /**
- * Save PrestaShop credentials to file
+ * Save PrestaShop credentials to database
  */
-function savePrestashopCredentials() {
+async function savePrestashopCredentials() {
   try {
-    const credData = {
-      baseUrl: prestashopCredentials.baseUrl,
-      apiKey: prestashopCredentials.apiKey,
-      savedAt: new Date().toISOString()
-    };
-    fs.writeFileSync(PRESTASHOP_CREDENTIALS_FILE, JSON.stringify(credData, null, 2), 'utf8');
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot save PrestaShop credentials');
+      return;
+    }
+    
+    await dbPool.query(`
+      UPDATE prestashop_credentials SET
+        base_url = ?,
+        api_key = ?,
+        updated_at = NOW()
+      WHERE id = 1
+    `, [
+      prestashopCredentials.baseUrl || null,
+      prestashopCredentials.apiKey || null
+    ]);
   } catch (error) {
-    console.error('Error saving PrestaShop credentials:', error.message);
+    console.error('Error saving PrestaShop credentials to database:', error.message);
   }
 }
 
 /**
- * Load PrestaShop credentials from file
+ * Load PrestaShop credentials from database
  */
-function loadPrestashopCredentials() {
+async function loadPrestashopCredentials() {
   try {
-    if (fs.existsSync(PRESTASHOP_CREDENTIALS_FILE)) {
-      const credData = JSON.parse(fs.readFileSync(PRESTASHOP_CREDENTIALS_FILE, 'utf8'));
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot load PrestaShop credentials');
+      return;
+    }
+    
+    const [rows] = await dbPool.query('SELECT * FROM prestashop_credentials WHERE id = 1');
+    
+    if (rows.length > 0) {
+      const row = rows[0];
       
       // Only load if both values exist and are non-empty strings (after trimming)
-      const baseUrl = credData.baseUrl ? String(credData.baseUrl).trim() : '';
-      const apiKey = credData.apiKey ? String(credData.apiKey).trim() : '';
+      const baseUrl = row.base_url ? String(row.base_url).trim() : '';
+      const apiKey = row.api_key ? String(row.api_key).trim() : '';
       
       if (baseUrl && apiKey) {
         prestashopCredentials.baseUrl = baseUrl;
@@ -552,7 +669,7 @@ function loadPrestashopCredentials() {
       }
     }
   } catch (error) {
-    console.error('Error loading PrestaShop credentials:', error.message);
+    console.error('Error loading PrestaShop credentials from database:', error.message);
     // Clear credentials on error
     prestashopCredentials.baseUrl = null;
     prestashopCredentials.apiKey = null;
@@ -768,20 +885,20 @@ function updateCategoryCache(normalizedName, categoryId) {
   }
 }
 
-// Load tokens and credentials on server startup
-loadCredentials();
-loadTokens();
-loadPrestashopCredentials();
-loadProductMappings();
-// Sync logs are stored in memory only - no file loading needed
-// Category cache loading is disabled – categories are always checked
-// directly against PrestaShop instead of using a persisted cache.
-loadCategoryCache();
-
 // Initialize MariaDB database (creates DB and users table if they do not exist)
+// Then load tokens and credentials from database
 initDatabase()
-  .then(() => {
+  .then(async () => {
     console.log(`MariaDB database '${DB_NAME}' initialized`);
+    // Load configuration from database (after database is initialized)
+    await loadCredentials();
+    await loadTokens();
+    await loadPrestashopCredentials();
+    loadProductMappings();
+    // Sync logs are stored in memory only - no file loading needed
+    // Category cache loading is disabled – categories are always checked
+    // directly against PrestaShop instead of using a persisted cache.
+    loadCategoryCache();
   })
   .catch((error) => {
     console.error('Error initializing MariaDB database:', error.message);
@@ -1199,24 +1316,8 @@ app.delete('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res
   }
 });
 
-// Watch PrestaShop credentials file for external changes (make config dynamic)
-try {
-  if (fs.existsSync(PRESTASHOP_CREDENTIALS_FILE)) {
-    fs.watch(PRESTASHOP_CREDENTIALS_FILE, { persistent: false }, (eventType) => {
-      if (eventType === 'change' || eventType === 'rename') {
-        console.log('Detected change in .prestashop.json, reloading PrestaShop credentials...');
-        try {
-          loadPrestashopCredentials();
-          console.log('PrestaShop credentials reloaded successfully from .prestashop.json');
-        } catch (watchError) {
-          console.error('Error reloading PrestaShop credentials after file change:', watchError.message);
-        }
-      }
-    });
-  }
-} catch (watchInitError) {
-  console.warn('Unable to watch .prestashop.json for changes:', watchInitError.message);
-}
+// File watcher removed - credentials are now stored in database
+// Changes are automatically reflected when loadPrestashopCredentials() is called
 
 // Store visitor logs (in-memory storage)
 // In production, use proper database storage
@@ -1225,14 +1326,14 @@ let visitorLogs = [];
 /**
  * Set user credentials
  */
-function setCredentials(clientId, clientSecret) {
+async function setCredentials(clientId, clientSecret) {
   userCredentials.clientId = clientId;
   userCredentials.clientSecret = clientSecret;
   // Invalidate existing token when credentials change
   accessToken = null;
   tokenExpiry = null;
-  // Save credentials to file
-  saveCredentials();
+  // Save credentials to database
+  await saveCredentials();
 }
 
 /**
@@ -1299,8 +1400,8 @@ async function getAccessToken() {
     const expiresIn = response.data.expires_in || 3600;
     tokenExpiry = Date.now() + (expiresIn - 60) * 1000;
 
-    // Save tokens to file
-    saveTokens();
+    // Save tokens to database
+    await saveTokens();
 
     return accessToken;
   } catch (error) {
@@ -1327,20 +1428,28 @@ async function getAccessToken() {
  */
 async function getUserAccessToken() {
   try {
-    // Reload tokens from file to ensure we have the latest token
+    // Reload tokens from database to ensure we have the latest token
     // This is important because tokens can be updated by OAuth callback
     // while the server is running
     try {
-      if (fs.existsSync(TOKEN_STORAGE_FILE)) {
-        const tokenData = JSON.parse(fs.readFileSync(TOKEN_STORAGE_FILE, 'utf8'));
-        if (tokenData.userOAuthTokens) {
-          // Replace the entire object, don't merge, to ensure we get the latest values
-          userOAuthTokens = { ...tokenData.userOAuthTokens };
+      if (dbPool) {
+        const [rows] = await dbPool.query('SELECT * FROM oauth_tokens WHERE id = 1');
+        if (rows.length > 0) {
+          const row = rows[0];
+          if (row.access_token || row.refresh_token) {
+            // Replace the entire object, don't merge, to ensure we get the latest values
+            userOAuthTokens = {
+              accessToken: row.access_token || null,
+              refreshToken: row.refresh_token || null,
+              expiresAt: row.expires_at || null,
+              userId: row.user_id || null
+            };
+          }
         }
       }
     } catch (reloadError) {
       // If reload fails, continue with in-memory token
-      console.warn('Warning: Could not reload tokens from file:', reloadError.message);
+      console.warn('Warning: Could not reload tokens from database:', reloadError.message);
     }
 
     // Check if token is still valid
@@ -1369,8 +1478,8 @@ async function getUserAccessToken() {
         const expiresIn = response.data.expires_in || 3600;
         userOAuthTokens.expiresAt = Date.now() + (expiresIn - 60) * 1000;
 
-        // Save tokens to file
-        saveTokens();
+        // Save tokens to database
+        await saveTokens();
 
         return userOAuthTokens.accessToken;
       } catch (refreshError) {
@@ -1382,7 +1491,7 @@ async function getUserAccessToken() {
           expiresAt: null,
           userId: null
         };
-        saveTokens(); // Save cleared tokens
+        await saveTokens(); // Save cleared tokens
         throw new Error('Token refresh failed. Please reconnect your account.');
       }
     }
@@ -2101,7 +2210,7 @@ async function allegroApiRequest(endpoint, params = {}, useUserToken = false, cu
 /**
  * Set credentials endpoint
  */
-app.post('/api/credentials', authMiddleware, (req, res) => {
+app.post('/api/credentials', authMiddleware, async (req, res) => {
   try {
     const { clientId, clientSecret } = req.body;
     
@@ -2112,7 +2221,7 @@ app.post('/api/credentials', authMiddleware, (req, res) => {
       });
     }
 
-    setCredentials(clientId, clientSecret);
+    await setCredentials(clientId, clientSecret);
     
     res.json({
       success: true
@@ -2137,7 +2246,7 @@ app.get('/api/credentials/status', authMiddleware, (req, res) => {
 /**
  * Health check endpoint
  */
-app.get('/api/health', (req, res) => {
+app.get('/api/health', authMiddleware, (req, res) => {
   res.json({ 
     status: 'ok', 
     configured: !!(userCredentials.clientId && userCredentials.clientSecret),
@@ -2288,8 +2397,8 @@ app.get('/api/oauth/callback', async (req, res) => {
       } catch (userInfoError) {
       }
       
-      // Save tokens to file (persistent storage)
-      saveTokens();
+      // Save tokens to database (persistent storage)
+      await saveTokens();
       
       // Redirect to success page
       return res.send(`
@@ -2376,7 +2485,7 @@ app.get('/api/oauth/status', authMiddleware, async (req, res) => {
 /**
  * Disconnect OAuth (clear user tokens)
  */
-app.post('/api/oauth/disconnect', authMiddleware, (req, res) => {
+app.post('/api/oauth/disconnect', authMiddleware, async (req, res) => {
   userOAuthTokens = {
     accessToken: null,
     refreshToken: null,
@@ -2384,8 +2493,8 @@ app.post('/api/oauth/disconnect', authMiddleware, (req, res) => {
     userId: null
   };
   
-  // Save cleared tokens to file
-  saveTokens();
+  // Save cleared tokens to database
+  await saveTokens();
   
   res.json({
     success: true,
@@ -2898,7 +3007,7 @@ app.get('/api/test-auth', authMiddleware, async (req, res) => {
 /**
  * Configure PrestaShop credentials
  */
-app.post('/api/prestashop/configure', authMiddleware, (req, res) => {
+app.post('/api/prestashop/configure', authMiddleware, async (req, res) => {
   try {
     const { baseUrl, apiKey } = req.body;
     
@@ -2916,7 +3025,7 @@ app.post('/api/prestashop/configure', authMiddleware, (req, res) => {
     prestashopCredentials.baseUrl = trimmedBaseUrl;
     prestashopCredentials.apiKey = trimmedApiKey;
     
-    savePrestashopCredentials();
+    await savePrestashopCredentials();
     
     res.json({
       success: true,
@@ -2931,74 +3040,66 @@ app.post('/api/prestashop/configure', authMiddleware, (req, res) => {
 });
 
 /**
- * Disconnect PrestaShop (clear all configuration files)
+ * Disconnect PrestaShop (clear all configuration from database)
  */
-app.post('/api/prestashop/disconnect', authMiddleware, (req, res) => {
+app.post('/api/prestashop/disconnect', authMiddleware, async (req, res) => {
   try {
     // Clear PrestaShop credentials
     prestashopCredentials.baseUrl = null;
     prestashopCredentials.apiKey = null;
     
-    // Clear PrestaShop credentials file
-    try {
-      if (fs.existsSync(PRESTASHOP_CREDENTIALS_FILE)) {
-        fs.writeFileSync(PRESTASHOP_CREDENTIALS_FILE, JSON.stringify({
-          baseUrl: '',
-          apiKey: '',
-          savedAt: new Date().toISOString()
-        }, null, 2), 'utf8');
+    // Clear PrestaShop credentials from database
+    if (dbPool) {
+      try {
+        await dbPool.query('UPDATE prestashop_credentials SET base_url = NULL, api_key = NULL, updated_at = NOW() WHERE id = 1');
+      } catch (error) {
+        console.error('Error clearing PrestaShop credentials from database:', error.message);
       }
-    } catch (error) {
-      console.error('Error clearing PrestaShop credentials file:', error.message);
     }
     
-    // Clear Allegro credentials file
-    try {
-      if (fs.existsSync(CREDENTIALS_STORAGE_FILE)) {
-        fs.writeFileSync(CREDENTIALS_STORAGE_FILE, JSON.stringify({
-          clientId: '',
-          clientSecret: '',
-          savedAt: new Date().toISOString()
-        }, null, 2), 'utf8');
+    // Clear Allegro credentials from database
+    if (dbPool) {
+      try {
+        await dbPool.query('UPDATE allegro_credentials SET client_id = NULL, client_secret = NULL, updated_at = NOW() WHERE id = 1');
+        // Also clear in-memory credentials
+        userCredentials.clientId = null;
+        userCredentials.clientSecret = null;
+      } catch (error) {
+        console.error('Error clearing Allegro credentials from database:', error.message);
       }
-      // Also clear in-memory credentials
-      userCredentials.clientId = null;
-      userCredentials.clientSecret = null;
-    } catch (error) {
-      console.error('Error clearing credentials file:', error.message);
     }
     
-    // Clear tokens file
-    try {
-      if (fs.existsSync(TOKEN_STORAGE_FILE)) {
-        fs.writeFileSync(TOKEN_STORAGE_FILE, JSON.stringify({
-          userOAuthTokens: {
-            accessToken: null,
-            refreshToken: null,
-            expiresAt: null,
-            userId: null
-          },
+    // Clear tokens from database
+    if (dbPool) {
+      try {
+        await dbPool.query(`
+          UPDATE oauth_tokens SET
+            access_token = NULL,
+            refresh_token = NULL,
+            expires_at = NULL,
+            user_id = NULL,
+            client_access_token = NULL,
+            client_token_expiry = NULL,
+            updated_at = NOW()
+          WHERE id = 1
+        `);
+        // Also clear in-memory tokens
+        userOAuthTokens = {
           accessToken: null,
-          tokenExpiry: null,
-          savedAt: new Date().toISOString()
-        }, null, 2), 'utf8');
+          refreshToken: null,
+          expiresAt: null,
+          userId: null
+        };
+        accessToken = null;
+        tokenExpiry = null;
+      } catch (error) {
+        console.error('Error clearing tokens from database:', error.message);
       }
-      // Also clear in-memory tokens
-      userOAuthTokens = {
-        accessToken: null,
-        refreshToken: null,
-        expiresAt: null,
-        userId: null
-      };
-      accessToken = null;
-      tokenExpiry = null;
-    } catch (error) {
-      console.error('Error clearing tokens file:', error.message);
     }
     
     res.json({
       success: true,
-      message: 'All configuration files cleared successfully'
+      message: 'All configuration cleared successfully from database'
     });
   } catch (error) {
     res.status(500).json({
@@ -5856,10 +5957,12 @@ function startStockSyncCron() {
     }, 10000); // Wait 10 seconds after server starts
 
     // Then run every 5 minutes
-    setInterval(() => {
+    syncTimerInterval = setInterval(() => {
       nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
       syncStockFromAllegroToPrestashop();
     }, SYNC_INTERVAL_MS);
+    
+    syncTimerActive = true;
 
     console.log('Stock sync timer started (runs every 5 minutes using setInterval)');
   } else {
@@ -5867,6 +5970,51 @@ function startStockSyncCron() {
     console.log('Stock sync timer disabled. Use system cron to call /api/sync/trigger endpoint.');
     console.log('On Ubuntu, add to crontab: */5 * * * * curl -X POST http://localhost:3000/api/sync/trigger');
   }
+}
+
+/**
+ * Stop the sync timer
+ */
+function stopStockSyncCron() {
+  if (syncTimerInterval) {
+    clearInterval(syncTimerInterval);
+    syncTimerInterval = null;
+    syncTimerActive = false;
+    nextSyncTime = null;
+    console.log('Stock sync timer stopped');
+  }
+}
+
+/**
+ * Start the sync timer manually
+ */
+function startStockSyncCronManual() {
+  if (syncTimerActive) {
+    return { success: false, error: 'Sync timer is already running' };
+  }
+  
+  if (!USE_INTERVAL_TIMER) {
+    return { success: false, error: 'Internal timer is disabled. Use external cron instead.' };
+  }
+  
+  // Clear any existing interval
+  if (syncTimerInterval) {
+    clearInterval(syncTimerInterval);
+  }
+  
+  // Start new interval
+  const now = Date.now();
+  nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
+  
+  syncTimerInterval = setInterval(() => {
+    nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
+    syncStockFromAllegroToPrestashop();
+  }, SYNC_INTERVAL_MS);
+  
+  syncTimerActive = true;
+  console.log('Stock sync timer started manually (runs every 5 minutes)');
+  
+  return { success: true, message: 'Sync timer started' };
 }
 
 /**
@@ -5926,8 +6074,10 @@ app.post('/api/sync/logs/clear', authMiddleware, (req, res) => {
 /**
  * API: Trigger manual stock sync
  * Can be called manually or by external cron (Ubuntu)
+ * Note: Does not require user session auth - sync runs independently using server-stored credentials
+ * The sync function itself validates that Allegro OAuth tokens and PrestaShop credentials exist in DB
  */
-app.post('/api/sync/trigger', authMiddleware, async (req, res) => {
+app.post('/api/sync/trigger', async (req, res) => {
   try {
     if (syncJobRunning) {
       return res.status(400).json({
@@ -5937,6 +6087,11 @@ app.post('/api/sync/trigger', authMiddleware, async (req, res) => {
     }
 
     // Run sync in background (don't wait for completion)
+    // syncStockFromAllegroToPrestashop() uses server-stored credentials from DB:
+    // - userOAuthTokens (Allegro OAuth tokens)
+    // - userCredentials (Allegro Client ID/Secret)
+    // - prestashopCredentials (PrestaShop API keys)
+    // These are independent of user login sessions
     syncStockFromAllegroToPrestashop().catch(error => {
       console.error('Sync error:', error);
     });
@@ -5956,6 +6111,106 @@ app.post('/api/sync/trigger', authMiddleware, async (req, res) => {
 });
 
 /**
+ * API: Check if prerequisites are met for sync
+ */
+app.get('/api/sync/prerequisites', authMiddleware, (req, res) => {
+  try {
+    const hasPrestashopConfig =
+      !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey);
+    const hasAllegroConfig =
+      !!(
+        (userOAuthTokens.accessToken || userOAuthTokens.refreshToken) &&
+        userCredentials.clientId &&
+        userCredentials.clientSecret
+      );
+
+    const prerequisitesMet = hasPrestashopConfig && hasAllegroConfig;
+
+    res.json({
+      success: true,
+      prerequisitesMet,
+      details: {
+        prestashopConfigured: hasPrestashopConfig,
+        allegroConfigured: hasAllegroConfig,
+        hasOAuthToken: !!(userOAuthTokens.accessToken || userOAuthTokens.refreshToken),
+        hasClientCredentials: !!(userCredentials.clientId && userCredentials.clientSecret)
+      },
+      message: prerequisitesMet
+        ? 'All prerequisites are met. Sync can be started.'
+        : 'Missing prerequisites. Please configure Allegro and PrestaShop first.'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Start sync timer
+ */
+app.post('/api/sync/start', authMiddleware, (req, res) => {
+  try {
+    // Check prerequisites first
+    const hasPrestashopConfig =
+      !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey);
+    const hasAllegroConfig =
+      !!(
+        (userOAuthTokens.accessToken || userOAuthTokens.refreshToken) &&
+        userCredentials.clientId &&
+        userCredentials.clientSecret
+      );
+
+    if (!hasPrestashopConfig || !hasAllegroConfig) {
+      return res.status(400).json({
+        success: false,
+        error: 'Prerequisites not met. Please configure Allegro and PrestaShop first.',
+        prerequisitesMet: false
+      });
+    }
+
+    const result = startStockSyncCronManual();
+    if (result.success) {
+      res.json({
+        success: true,
+        message: result.message,
+        timerActive: syncTimerActive
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        error: result.error
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Stop sync timer
+ */
+app.post('/api/sync/stop', authMiddleware, (req, res) => {
+  try {
+    stopStockSyncCron();
+    res.json({
+      success: true,
+      message: 'Sync timer stopped',
+      timerActive: syncTimerActive
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * API: Get sync status (for cron monitoring)
  */
 app.get('/api/sync/status', authMiddleware, (req, res) => {
@@ -5964,6 +6219,7 @@ app.get('/api/sync/status', authMiddleware, (req, res) => {
     running: syncJobRunning,
     lastSyncTime: lastSyncTime,
     nextSyncTime: nextSyncTime,
+    timerActive: syncTimerActive,
     useIntervalTimer: USE_INTERVAL_TIMER
   });
 });
@@ -5991,8 +6247,8 @@ if (hasSSLCertificates) {
     const httpsServer = https.createServer(httpsOptions, app);
     httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
       console.log(`HTTPS Server running on port ${HTTPS_PORT} (accessible from all network interfaces)`);
-      // Start the stock sync cron job
-      startStockSyncCron();
+      // Sync timer is now controlled by user via UI - don't auto-start
+      console.log('Sync timer is stopped. Use the UI to start/stop sync timer.');
     });
 
     // Optionally redirect HTTP to HTTPS
@@ -6015,8 +6271,8 @@ if (hasSSLCertificates) {
     console.log('Falling back to HTTP server...');
     http.createServer(app).listen(PORT, '0.0.0.0', () => {
       console.log(`HTTP Server running on port ${PORT} (accessible from all network interfaces)`);
-      // Start the stock sync cron job
-      startStockSyncCron();
+      // Sync timer is now controlled by user via UI - don't auto-start
+      console.log('Sync timer is stopped. Use the UI to start/stop sync timer.');
     });
   }
 } else {
@@ -6027,8 +6283,8 @@ if (hasSSLCertificates) {
       console.log('Note: HTTPS not configured. SSL certificates not found.');
       console.log(`Expected paths: ${SSL_KEY_PATH}, ${SSL_CERT_PATH}`);
     }
-    // Start the stock sync cron job
-    startStockSyncCron();
+    // Sync timer is now controlled by user via UI - don't auto-start
+    console.log('Sync timer is stopped. Use the UI to start/stop sync timer.');
   });
 }
 
