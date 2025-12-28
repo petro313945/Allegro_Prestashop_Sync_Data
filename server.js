@@ -46,9 +46,7 @@ if (dotenvResult.error) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Product mappings and other file paths (not migrated to database)
-const PRODUCT_MAPPINGS_FILE = path.join(__dirname, '.product_mappings.json');
-const CATEGORY_CACHE_FILE = path.join(__dirname, '.category_cache.json');
+// Sync log file path (only for logs, not for product mappings or category cache)
 const SYNC_LOG_FILE = path.join(__dirname, '.sync_log.json');
 
 // MariaDB configuration (environment variables - REQUIRED)
@@ -98,6 +96,9 @@ const LOGIN_LOCK_DURATION_MS = 60 * 1000; // 60 seconds
 
 // Database connection pool (initialized later)
 let dbPool = null;
+
+// Product mappings and category cache are now stored in MariaDB/MySQL database
+// No Redis dependency - using database with proper indexes for fast performance
 
 // In-memory session store (token -> session data)
 // NOTE: Tokens are not persisted across server restarts by design.
@@ -336,6 +337,38 @@ async function initDatabase() {
   `);
 
   console.log('✓ Configuration tables created/verified');
+
+  // Create product_mappings table with proper indexes for fast lookups
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS product_mappings (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      allegro_offer_id VARCHAR(255) NOT NULL,
+      prestashop_product_id INT NOT NULL,
+      synced_at DATETIME NULL,
+      last_stock_sync DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_allegro_offer (allegro_offer_id),
+      INDEX idx_prestashop_product (prestashop_product_id),
+      UNIQUE KEY unique_allegro_offer (allegro_offer_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // Create category_cache table with proper indexes for fast lookups
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS category_cache (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      category_name VARCHAR(255) NOT NULL,
+      category_id INT NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_category_name (category_name),
+      INDEX idx_category_id (category_id),
+      UNIQUE KEY unique_category_name (category_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  console.log('✓ Product mappings and category cache tables created/verified');
 
   // Ensure at least one admin user exists if ADMIN_EMAIL / ADMIN_PASSWORD are provided
   const adminEmail = process.env.ADMIN_EMAIL;
@@ -677,30 +710,8 @@ async function loadPrestashopCredentials() {
   }
 }
 
-/**
- * Save product mappings to file
- */
-function saveProductMappings() {
-  try {
-    fs.writeFileSync(PRODUCT_MAPPINGS_FILE, JSON.stringify(productMappings, null, 2), 'utf8');
-  } catch (error) {
-    console.error('Error saving product mappings:', error.message);
-  }
-}
-
-/**
- * Load product mappings from file
- */
-function loadProductMappings() {
-  try {
-    if (fs.existsSync(PRODUCT_MAPPINGS_FILE)) {
-      productMappings = JSON.parse(fs.readFileSync(PRODUCT_MAPPINGS_FILE, 'utf8'));
-    }
-  } catch (error) {
-    console.error('Error loading product mappings:', error.message);
-    productMappings = {};
-  }
-}
+// Product mappings and category cache are now stored in MariaDB/MySQL database
+// File-based storage has been removed
 
 // Sync logs are stored in memory only - no file persistence
 // Logs are cleared when sync starts to show only current session logs
@@ -839,67 +850,271 @@ function addSyncLog(entry) {
   }
 }
 
-/**
- * Save category cache to file (persistent storage)
- */
-function saveCategoryCache() {
-  try {
-    // Convert Map to plain object for JSON serialization
-    const cacheObject = {};
-    categoryCache.forEach((value, key) => {
-      // Only save valid category IDs, not 'creating' markers
-      if (value !== 'creating' && !isNaN(value)) {
-        cacheObject[key] = value;
-      }
-    });
-    const cacheData = {
-      categories: cacheObject,
-      savedAt: new Date().toISOString()
-    };
-    fs.writeFileSync(CATEGORY_CACHE_FILE, JSON.stringify(cacheData, null, 2), 'utf8');
-  } catch (error) {
-    console.error('Error saving category cache:', error.message);
-  }
-}
-
-/**
- * Load category cache from file (on server startup)
- */
-function loadCategoryCache() {
-  // Cache loading from disk has been disabled.
-  // Categories are now always resolved directly from PrestaShop
-  // to ensure we work with the latest data and avoid stale cache issues.
-  categoryCache = new Map();
-}
+// Category cache is now stored in MariaDB/MySQL database
+// File-based storage has been removed
 
 /**
  * Update category cache and save to file
  * Only saves valid category IDs (not 'creating' markers)
  */
-function updateCategoryCache(normalizedName, categoryId) {
+async function updateCategoryCache(normalizedName, categoryId) {
+  await CategoryCacheDB.set(normalizedName, categoryId);
+}
+
+/**
+ * Database wrapper functions for Product Mappings
+ * Uses MariaDB/MySQL with proper indexes for fast performance
+ */
+const ProductMappingsDB = {
+  /**
+   * Get a product mapping by Allegro offer ID
+   */
+  async get(offerId) {
+    if (!dbPool) {
+      throw new Error('Database connection not available. Product mappings require database.');
+    }
+
+    try {
+      const [rows] = await dbPool.query(
+        'SELECT * FROM product_mappings WHERE allegro_offer_id = ? LIMIT 1',
+        [offerId.toString()]
+      );
+
+      if (rows.length > 0) {
+        const mapping = {
+          prestashopProductId: rows[0].prestashop_product_id,
+          allegroOfferId: rows[0].allegro_offer_id,
+          syncedAt: rows[0].synced_at ? new Date(rows[0].synced_at).toISOString() : null,
+          lastStockSync: rows[0].last_stock_sync ? new Date(rows[0].last_stock_sync).toISOString() : null
+        };
+        // Update in-memory cache for fast access
+        productMappings[offerId.toString()] = mapping;
+        return mapping;
+      }
+      return null;
+    } catch (error) {
+      console.error('Database get error for product mapping:', error.message);
+      throw error;
+    }
+  },
+
+  /**
+   * Set a product mapping
+   */
+  async set(offerId, mapping) {
+    if (!dbPool) {
+      throw new Error('Database connection not available. Product mappings require database.');
+    }
+
+    // Update in-memory cache for fast access
+    productMappings[offerId.toString()] = mapping;
+
+    try {
+      await dbPool.query(`
+        INSERT INTO product_mappings (allegro_offer_id, prestashop_product_id, synced_at, last_stock_sync)
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          prestashop_product_id = VALUES(prestashop_product_id),
+          synced_at = VALUES(synced_at),
+          last_stock_sync = VALUES(last_stock_sync),
+          updated_at = CURRENT_TIMESTAMP
+      `, [
+        offerId.toString(),
+        mapping.prestashopProductId,
+        mapping.syncedAt || null,
+        mapping.lastStockSync || null
+      ]);
+    } catch (error) {
+      console.error('Database set error for product mapping:', error.message);
+      throw error;
+    }
+  },
+
+  /**
+   * Delete a product mapping
+   */
+  async delete(offerId) {
+    if (!dbPool) {
+      throw new Error('Database connection not available. Product mappings require database.');
+    }
+
+    delete productMappings[offerId.toString()];
+
+    try {
+      await dbPool.query(
+        'DELETE FROM product_mappings WHERE allegro_offer_id = ?',
+        [offerId.toString()]
+      );
+    } catch (error) {
+      console.error('Database delete error for product mapping:', error.message);
+      throw error;
+    }
+  },
+
+  /**
+   * Get all product mappings
+   */
+  async getAll() {
+    if (!dbPool) {
+      throw new Error('Database connection not available. Product mappings require database.');
+      }
+
+    try {
+      const [rows] = await dbPool.query('SELECT * FROM product_mappings');
+      const result = {};
+      for (const row of rows) {
+        result[row.allegro_offer_id] = {
+          prestashopProductId: row.prestashop_product_id,
+          allegroOfferId: row.allegro_offer_id,
+          syncedAt: row.synced_at ? new Date(row.synced_at).toISOString() : null,
+          lastStockSync: row.last_stock_sync ? new Date(row.last_stock_sync).toISOString() : null
+        };
+      }
+      // Update in-memory cache
+      Object.assign(productMappings, result);
+      return result;
+  } catch (error) {
+      console.error('Database getAll error for product mappings:', error.message);
+      throw error;
+  }
+  },
+
+/**
+   * Load all mappings from database into memory
+   */
+  async loadAll() {
+    if (!dbPool) {
+      console.warn('Database not connected. Product mappings will be empty until database is available.');
+      productMappings = {};
+      return;
+    }
+
+    try {
+      const [rows] = await dbPool.query('SELECT * FROM product_mappings');
+      productMappings = {};
+      for (const row of rows) {
+        productMappings[row.allegro_offer_id] = {
+          prestashopProductId: row.prestashop_product_id,
+          allegroOfferId: row.allegro_offer_id,
+          syncedAt: row.synced_at ? new Date(row.synced_at).toISOString() : null,
+          lastStockSync: row.last_stock_sync ? new Date(row.last_stock_sync).toISOString() : null
+        };
+      }
+      console.log(`✓ Loaded ${Object.keys(productMappings).length} product mappings from database`);
+    } catch (error) {
+      console.error('Error loading product mappings from database:', error.message);
+      productMappings = {};
+    }
+  }
+};
+
+/**
+ * Database wrapper functions for Category Cache
+ * Uses MariaDB/MySQL with proper indexes for fast performance
+ */
+const CategoryCacheDB = {
+  /**
+   * Get a category ID by normalized name
+   */
+  async get(normalizedName) {
+    if (!dbPool) {
+      // Return from in-memory cache if available
+      return categoryCache.get(normalizedName) || null;
+}
+
+    try {
+      const [rows] = await dbPool.query(
+        'SELECT category_id FROM category_cache WHERE category_name = ? LIMIT 1',
+        [normalizedName]
+      );
+
+      if (rows.length > 0) {
+        const categoryId = rows[0].category_id;
+        // Update in-memory cache
+        categoryCache.set(normalizedName, categoryId);
+        return categoryId;
+      }
+      return null;
+    } catch (error) {
+      console.error('Database get error for category cache:', error.message);
+      // Return from in-memory cache if available
+      return categoryCache.get(normalizedName) || null;
+    }
+  },
+
+  /**
+   * Set a category mapping
+   */
+  async set(normalizedName, categoryId) {
+    // Update in-memory cache
   if (categoryId && categoryId !== 'creating' && !isNaN(categoryId)) {
     categoryCache.set(normalizedName, categoryId);
-    saveCategoryCache();
   } else if (categoryId === 'creating') {
-    // Allow 'creating' marker but don't save it
-    categoryCache.set(normalizedName, categoryId);
+      categoryCache.set(normalizedName, 'creating');
+      return; // Don't save 'creating' markers to database
+    } else {
+      return;
+    }
+
+    if (!dbPool) {
+      console.warn('Database not connected. Category cache will not be persisted.');
+      return;
+    }
+
+    try {
+      await dbPool.query(`
+        INSERT INTO category_cache (category_name, category_id)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE
+          category_id = VALUES(category_id),
+          updated_at = CURRENT_TIMESTAMP
+      `, [normalizedName, categoryId]);
+    } catch (error) {
+      console.error('Database set error for category cache:', error.message);
+      throw error;
+    }
+  },
+
+  /**
+   * Load all categories from database into memory
+   */
+  async loadAll() {
+    if (!dbPool) {
+      console.warn('Database not connected. Category cache will be empty until database is available.');
+      categoryCache = new Map();
+      return;
+    }
+
+    try {
+      const [rows] = await dbPool.query('SELECT * FROM category_cache');
+      categoryCache = new Map();
+      for (const row of rows) {
+        categoryCache.set(row.category_name, row.category_id);
+      }
+      console.log(`✓ Loaded ${categoryCache.size} category mappings from database`);
+    } catch (error) {
+      console.error('Error loading category cache from database:', error.message);
+      categoryCache = new Map();
   }
 }
+};
 
 // Initialize MariaDB database (creates DB and users table if they do not exist)
 // Then load tokens and credentials from database
 initDatabase()
   .then(async () => {
     console.log(`MariaDB database '${DB_NAME}' initialized`);
+    
     // Load configuration from database (after database is initialized)
     await loadCredentials();
     await loadTokens();
     await loadPrestashopCredentials();
-    loadProductMappings();
-    // Sync logs are stored in memory only - no file loading needed
-    // Category cache loading is disabled – categories are always checked
-    // directly against PrestaShop instead of using a persisted cache.
-    loadCategoryCache();
+    
+    // Load product mappings from database (with proper indexes for fast performance)
+    await ProductMappingsDB.loadAll();
+    
+    // Load category cache from database
+    await CategoryCacheDB.loadAll();
   })
   .catch((error) => {
     console.error('Error initializing MariaDB database:', error.message);
@@ -3592,8 +3807,8 @@ async function findCategoryByName(categoryName) {
 async function findProductByReference(reference) {
   try {
     // First check if we have a mapping for this reference
-    if (productMappings[reference]) {
-      const mapping = productMappings[reference];
+    const mapping = await ProductMappingsDB.get(reference);
+    if (mapping) {
       const existingProductId = mapping.prestashopProductId;
       
       // Verify the product still exists in PrestaShop
@@ -3604,8 +3819,7 @@ async function findProductByReference(reference) {
       } catch (verifyError) {
         // Product doesn't exist anymore, remove from mapping
         console.log(`Product ${existingProductId} no longer exists in PrestaShop, removing from mapping`);
-        delete productMappings[reference];
-        saveProductMappings();
+        await ProductMappingsDB.delete(reference);
       }
     }
     
@@ -3668,12 +3882,11 @@ async function findProductByReference(reference) {
         if (productId) {
           console.log(`Found existing product in PrestaShop: reference "${reference}" -> PrestaShop ID ${productId}`);
           // Update mapping for future lookups
-          productMappings[reference] = {
+          await ProductMappingsDB.set(reference, {
             prestashopProductId: productId,
             allegroOfferId: reference,
             syncedAt: new Date().toISOString()
-          };
-          saveProductMappings();
+          });
           return productId;
         }
       }
@@ -3999,12 +4212,11 @@ app.post('/api/prestashop/products', async (req, res) => {
       console.log(`Created new product "${baseName}" (ID: ${prestashopProductId}) from Allegro offer ID: ${offer.id}`);
       
       // Save mapping immediately after creation to prevent duplicates
-      productMappings[offer.id.toString()] = {
+      await ProductMappingsDB.set(offer.id.toString(), {
         prestashopProductId: prestashopProductId,
         allegroOfferId: offer.id.toString(),
         syncedAt: new Date().toISOString()
-      };
-      saveProductMappings();
+      });
     }
 
     // Update stock
@@ -4166,12 +4378,11 @@ app.post('/api/prestashop/products', async (req, res) => {
 
     // Store product mapping (update if not already saved, or refresh timestamp)
     const offerIdStr = offer.id.toString();
-    productMappings[offerIdStr] = {
+    await ProductMappingsDB.set(offerIdStr, {
       prestashopProductId: prestashopProductId,
       allegroOfferId: offerIdStr,
       syncedAt: new Date().toISOString()
-    };
-    saveProductMappings();
+    });
 
     // Fetch full product details from PrestaShop to return to frontend
     let fullProductDetails = null;
@@ -4369,11 +4580,19 @@ app.put('/api/prestashop/products/:productId/stock', async (req, res) => {
 /**
  * Get product mappings
  */
-app.get('/api/prestashop/mappings', (req, res) => {
+app.get('/api/prestashop/mappings', async (req, res) => {
+  try {
+    const mappings = await ProductMappingsDB.getAll();
   res.json({
     success: true,
-    mappings: productMappings
+      mappings: mappings
   });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 /**
@@ -4391,7 +4610,7 @@ app.post('/api/prestashop/sync/stock', async (req, res) => {
     }
 
     // Find PrestaShop product ID from mapping
-    const mapping = productMappings[offerId];
+    const mapping = await ProductMappingsDB.get(offerId);
     if (!mapping || !mapping.prestashopProductId) {
       return res.status(404).json({
         success: false,
@@ -4429,7 +4648,7 @@ app.post('/api/prestashop/sync/stock', async (req, res) => {
 
     // Update mapping sync time
     mapping.lastStockSync = new Date().toISOString();
-    saveProductMappings();
+    await ProductMappingsDB.set(offerId, mapping);
 
     res.json({
       success: true,
