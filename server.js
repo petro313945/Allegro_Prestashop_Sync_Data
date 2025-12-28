@@ -91,7 +91,7 @@ if (ADMIN_EMAIL && ADMIN_PASSWORD) {
 }
 
 // Session and security configuration
-const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const SESSION_IDLE_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes - user will be logged out after 20 minutes of inactivity
 const SESSION_MAX_LIFETIME_MS = 20 * 60 * 1000; // 20 minutes
 const MAX_FAILED_LOGINS = 5;
 const LOGIN_LOCK_DURATION_MS = 60 * 1000; // 60 seconds
@@ -138,6 +138,7 @@ function createSession(user) {
   const now = Date.now();
   sessions.set(token, {
     userId: user.id,
+    email: user.email,
     role: user.role,
     createdAt: now,
     lastActivity: now
@@ -1038,6 +1039,23 @@ app.post('/api/logout', (req, res) => {
 });
 
 /**
+ * Validate session endpoint
+ * - Validates the session token and updates lastActivity
+ * - Returns user info if session is valid
+ * - Used on browser refresh to keep session alive
+ */
+app.get('/api/auth/validate', authMiddleware, (req, res) => {
+  res.json({
+    success: true,
+    user: {
+      id: req.user.userId,
+      email: req.user.email,
+      role: req.user.role
+    }
+  });
+});
+
+/**
  * Admin: create user account
  * - Only admins can create accounts
  * - Users cannot self‑register
@@ -1315,9 +1333,6 @@ app.delete('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res
     });
   }
 });
-
-// File watcher removed - credentials are now stored in database
-// Changes are automatically reflected when loadPrestashopCredentials() is called
 
 // Store visitor logs (in-memory storage)
 // In production, use proper database storage
@@ -2210,7 +2225,7 @@ async function allegroApiRequest(endpoint, params = {}, useUserToken = false, cu
 /**
  * Set credentials endpoint
  */
-app.post('/api/credentials', authMiddleware, async (req, res) => {
+app.post('/api/credentials', async (req, res) => {
   try {
     const { clientId, clientSecret } = req.body;
     
@@ -2237,7 +2252,7 @@ app.post('/api/credentials', authMiddleware, async (req, res) => {
 /**
  * Check if credentials are configured
  */
-app.get('/api/credentials/status', authMiddleware, (req, res) => {
+app.get('/api/credentials/status', (req, res) => {
   res.json({
     configured: !!(userCredentials.clientId && userCredentials.clientSecret)
   });
@@ -2246,7 +2261,7 @@ app.get('/api/credentials/status', authMiddleware, (req, res) => {
 /**
  * Health check endpoint
  */
-app.get('/api/health', authMiddleware, (req, res) => {
+app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     configured: !!(userCredentials.clientId && userCredentials.clientSecret),
@@ -2258,7 +2273,7 @@ app.get('/api/health', authMiddleware, (req, res) => {
 /**
  * OAuth Authorization endpoint - returns authorization URL for frontend to open
  */
-app.get('/api/oauth/authorize', authMiddleware, (req, res) => {
+app.get('/api/oauth/authorize', (req, res) => {
   if (!userCredentials.clientId) {
     return res.status(400).json({
       success: false,
@@ -2451,7 +2466,7 @@ app.get('/api/oauth/callback', async (req, res) => {
  * Check OAuth connection status
  * Attempts to refresh token if expired but refresh token exists
  */
-app.get('/api/oauth/status', authMiddleware, async (req, res) => {
+app.get('/api/oauth/status', async (req, res) => {
   try {
     // Check if token is still valid
     let isConnected = !!(userOAuthTokens.accessToken && userOAuthTokens.expiresAt && Date.now() < userOAuthTokens.expiresAt);
@@ -2485,7 +2500,7 @@ app.get('/api/oauth/status', authMiddleware, async (req, res) => {
 /**
  * Disconnect OAuth (clear user tokens)
  */
-app.post('/api/oauth/disconnect', authMiddleware, async (req, res) => {
+app.post('/api/oauth/disconnect', async (req, res) => {
   userOAuthTokens = {
     accessToken: null,
     refreshToken: null,
@@ -2506,7 +2521,7 @@ app.post('/api/oauth/disconnect', authMiddleware, async (req, res) => {
  * Get user's own offers from Allegro
  * Uses user OAuth token to fetch user's own offers
  */
-app.get('/api/offers', authMiddleware, async (req, res) => {
+app.get('/api/offers', async (req, res) => {
   try {
     let { limit = 20, offset = 0, sellerId, status } = req.query;
     
@@ -2693,19 +2708,12 @@ app.get('/api/offers', authMiddleware, async (req, res) => {
   }
 });
 
-// NOTE: Former /api/offers/:offerId endpoint removed because
-// Allegro blocked access to /sale/offers/{id}. All required
-// data is now taken directly from the list response in
-// /api/offers above. If you need additional details in the
-// future, consider migrating to the newer /sale/product-offers
-// resources described in Allegro's documentation.
-
 /**
  * Get offer details by offer ID (including description)
  * Uses user OAuth token to access own offers
  * Updated to use /sale/product-offers/{offerId} (old /sale/offers/{offerId} was deprecated in 2024)
  */
-app.get('/api/offers/:offerId', authMiddleware, async (req, res) => {
+app.get('/api/offers/:offerId', async (req, res) => {
   try {
     const { offerId } = req.params;
     
@@ -2763,7 +2771,7 @@ app.get('/api/offers/:offerId', authMiddleware, async (req, res) => {
  * - GET /sale/product-offers/{offerId} - Get product data from offer ID (includes images, description, details)
  * - GET /sale/products/{productId} - Get product details by product ID (UUID)
  */
-app.get('/api/products/:productId', authMiddleware, async (req, res) => {
+app.get('/api/products/:productId', async (req, res) => {
   try {
     const { productId } = req.params;
     const { language, 'category.id': categoryId } = req.query;
@@ -2910,7 +2918,7 @@ app.get('/api/products/:productId', authMiddleware, async (req, res) => {
 /**
  * Get categories
  */
-app.get('/api/categories', authMiddleware, async (req, res) => {
+app.get('/api/categories', async (req, res) => {
   try {
     const { parentId } = req.query;
     const params = parentId ? { 'parent.id': parentId } : {};
@@ -2950,7 +2958,7 @@ app.get('/api/categories', authMiddleware, async (req, res) => {
 /**
  * Get category by ID
  */
-app.get('/api/categories/:categoryId', authMiddleware, async (req, res) => {
+app.get('/api/categories/:categoryId', async (req, res) => {
   try {
     const { categoryId } = req.params;
     
@@ -2980,7 +2988,7 @@ app.get('/api/categories/:categoryId', authMiddleware, async (req, res) => {
 /**
  * Test authentication
  */
-app.get('/api/test-auth', authMiddleware, async (req, res) => {
+app.get('/api/test-auth', async (req, res) => {
   try {
     const token = await getAccessToken();
     res.json({
@@ -3007,7 +3015,7 @@ app.get('/api/test-auth', authMiddleware, async (req, res) => {
 /**
  * Configure PrestaShop credentials
  */
-app.post('/api/prestashop/configure', authMiddleware, async (req, res) => {
+app.post('/api/prestashop/configure', async (req, res) => {
   try {
     const { baseUrl, apiKey } = req.body;
     
@@ -3042,7 +3050,7 @@ app.post('/api/prestashop/configure', authMiddleware, async (req, res) => {
 /**
  * Disconnect PrestaShop (clear all configuration from database)
  */
-app.post('/api/prestashop/disconnect', authMiddleware, async (req, res) => {
+app.post('/api/prestashop/disconnect', async (req, res) => {
   try {
     // Clear PrestaShop credentials
     prestashopCredentials.baseUrl = null;
@@ -3112,7 +3120,7 @@ app.post('/api/prestashop/disconnect', authMiddleware, async (req, res) => {
 /**
  * Get PrestaShop configuration status
  */
-app.get('/api/prestashop/status', authMiddleware, (req, res) => {
+app.get('/api/prestashop/status', (req, res) => {
   // Check if both values exist and are non-empty strings (after trimming)
   const baseUrl = prestashopCredentials.baseUrl ? String(prestashopCredentials.baseUrl).trim() : '';
   const apiKey = prestashopCredentials.apiKey ? String(prestashopCredentials.apiKey).trim() : '';
@@ -3127,7 +3135,7 @@ app.get('/api/prestashop/status', authMiddleware, (req, res) => {
 /**
  * Test PrestaShop connection
  */
-app.get('/api/prestashop/test', authMiddleware, async (req, res) => {
+app.get('/api/prestashop/test', async (req, res) => {
   try {
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       return res.status(400).json({
@@ -3685,7 +3693,7 @@ async function findProductByReference(reference) {
 /**
  * Get PrestaShop categories
  */
-app.get('/api/prestashop/categories', authMiddleware, async (req, res) => {
+app.get('/api/prestashop/categories', async (req, res) => {
   try {
     const { limit = 1000, offset = 0 } = req.query;
     const data = await prestashopApiRequest(`categories?limit=${limit}&offset=${offset}`, 'GET');
@@ -3717,7 +3725,7 @@ app.get('/api/prestashop/categories', authMiddleware, async (req, res) => {
 /**
  * Create category in PrestaShop
  */
-app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
+app.post('/api/prestashop/categories', async (req, res) => {
   try {
     const { name, idParent = 2, active = 1 } = req.body;
     
@@ -3775,7 +3783,7 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
 /**
  * Create product in PrestaShop
  */
-app.post('/api/prestashop/products', authMiddleware, async (req, res) => {
+app.post('/api/prestashop/products', async (req, res) => {
   try {
     let { offer, categoryId, categories } = req.body;
     
@@ -4210,7 +4218,7 @@ app.post('/api/prestashop/products', authMiddleware, async (req, res) => {
 /**
  * Get PrestaShop product by ID
  */
-app.get('/api/prestashop/products/:productId', authMiddleware, async (req, res) => {
+app.get('/api/prestashop/products/:productId', async (req, res) => {
   try {
     const { productId } = req.params;
     
@@ -4303,7 +4311,7 @@ app.get('/api/prestashop/products/:productId', authMiddleware, async (req, res) 
 /**
  * Update product stock in PrestaShop
  */
-app.put('/api/prestashop/products/:productId/stock', authMiddleware, async (req, res) => {
+app.put('/api/prestashop/products/:productId/stock', async (req, res) => {
   try {
     const { productId } = req.params;
     const { quantity } = req.body;
@@ -4361,7 +4369,7 @@ app.put('/api/prestashop/products/:productId/stock', authMiddleware, async (req,
 /**
  * Get product mappings
  */
-app.get('/api/prestashop/mappings', authMiddleware, (req, res) => {
+app.get('/api/prestashop/mappings', (req, res) => {
   res.json({
     success: true,
     mappings: productMappings
@@ -4371,7 +4379,7 @@ app.get('/api/prestashop/mappings', authMiddleware, (req, res) => {
 /**
  * Sync stock from Allegro to PrestaShop
  */
-app.post('/api/prestashop/sync/stock', authMiddleware, async (req, res) => {
+app.post('/api/prestashop/sync/stock', async (req, res) => {
   try {
     const { offerId, quantity } = req.body;
     
@@ -5036,7 +5044,7 @@ async function exportProductsToCsv() {
 /**
  * Export categories CSV endpoint
  */
-app.get('/api/export/categories.csv', authMiddleware, async (req, res) => {
+app.get('/api/export/categories.csv', async (req, res) => {
   try {
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       return res.status(400).json({
@@ -5061,7 +5069,7 @@ app.get('/api/export/categories.csv', authMiddleware, async (req, res) => {
 /**
  * Export products CSV endpoint
  */
-app.get('/api/export/products.csv', authMiddleware, async (req, res) => {
+app.get('/api/export/products.csv', async (req, res) => {
   try {
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       return res.status(400).json({
@@ -6020,7 +6028,7 @@ function startStockSyncCronManual() {
 /**
  * API: Get sync logs
  */
-app.get('/api/sync/logs', authMiddleware, (req, res) => {
+app.get('/api/sync/logs', (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
     const status = req.query.status; // Optional filter by status
@@ -6055,7 +6063,7 @@ app.get('/api/sync/logs', authMiddleware, (req, res) => {
 /**
  * API: Clear sync logs
  */
-app.post('/api/sync/logs/clear', authMiddleware, (req, res) => {
+app.post('/api/sync/logs/clear', (req, res) => {
   try {
     syncLogs = [];
     // Logs are in-memory only - no file saving needed
@@ -6113,7 +6121,7 @@ app.post('/api/sync/trigger', async (req, res) => {
 /**
  * API: Check if prerequisites are met for sync
  */
-app.get('/api/sync/prerequisites', authMiddleware, (req, res) => {
+app.get('/api/sync/prerequisites', (req, res) => {
   try {
     const hasPrestashopConfig =
       !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey);
@@ -6150,7 +6158,7 @@ app.get('/api/sync/prerequisites', authMiddleware, (req, res) => {
 /**
  * API: Start sync timer
  */
-app.post('/api/sync/start', authMiddleware, (req, res) => {
+app.post('/api/sync/start', (req, res) => {
   try {
     // Check prerequisites first
     const hasPrestashopConfig =
@@ -6194,7 +6202,7 @@ app.post('/api/sync/start', authMiddleware, (req, res) => {
 /**
  * API: Stop sync timer
  */
-app.post('/api/sync/stop', authMiddleware, (req, res) => {
+app.post('/api/sync/stop', (req, res) => {
   try {
     stopStockSyncCron();
     res.json({
@@ -6213,7 +6221,7 @@ app.post('/api/sync/stop', authMiddleware, (req, res) => {
 /**
  * API: Get sync status (for cron monitoring)
  */
-app.get('/api/sync/status', authMiddleware, (req, res) => {
+app.get('/api/sync/status', (req, res) => {
   res.json({
     success: true,
     running: syncJobRunning,

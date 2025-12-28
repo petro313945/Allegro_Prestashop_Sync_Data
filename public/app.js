@@ -6,7 +6,6 @@ let currentOffset = 0; // Kept for display purposes
 let currentLimit = 30; // Default products per page
 let totalCount = 0; // Current page product count
 let totalProductsSeen = 0; // Total products seen across all pages in current category
-let isAuthenticated = false;
 let isOAuthConnected = false; // Track OAuth connection status
 let allCategories = [];
 let categoriesWithProducts = []; // Categories that have products
@@ -64,7 +63,22 @@ function clearAuth() {
     sessionExpiredMessageShown = false;
 }
 
-// Authenticated fetch wrapper
+// API fetch wrapper (no authentication required for Allegro/Prestashop operations)
+async function apiFetch(url, options = {}) {
+    const headers = {
+        'Content-Type': 'application/json',
+        ...options.headers
+    };
+
+    const response = await fetch(url, {
+        ...options,
+        headers
+    });
+
+    return response;
+}
+
+// Authenticated fetch wrapper (only for user management operations)
 async function authFetch(url, options = {}) {
     const token = getAuthToken();
     if (!token) {
@@ -180,6 +194,7 @@ function showLoginScreen() {
 }
 
 // Check if user is logged in on page load
+// Validates session with server to update lastActivity timestamp
 async function checkAuth() {
     const token = getAuthToken();
     if (!token) {
@@ -187,16 +202,18 @@ async function checkAuth() {
         return false;
     }
 
-    // Verify token is still valid by checking a protected endpoint
     try {
-        const response = await authFetch(`${API_BASE}/api/health`);
-        if (response.ok) {
-            const savedUser = localStorage.getItem('current_user');
-            if (savedUser) {
-                currentUser = JSON.parse(savedUser);
-                // Update user display
-                updateUserDisplay(currentUser);
-            }
+        // Validate session with server - this updates the session's lastActivity
+        const response = await authFetch(`${API_BASE}/api/auth/validate`);
+        const data = await response.json();
+        
+        if (data.success && data.user) {
+            // Update current user from server response
+            currentUser = data.user;
+            localStorage.setItem('current_user', JSON.stringify(data.user));
+            
+            // Update user display
+            updateUserDisplay(currentUser);
             showMainInterface();
             
             // Show message that user is already logged in
@@ -208,20 +225,19 @@ async function checkAuth() {
             }
             
             return true;
+        } else {
+            // Session validation failed
+            clearAuth();
+            showLoginScreen();
+            return false;
         }
     } catch (error) {
-        console.error('Auth check failed:', error);
-        // If error is about session expiration, it's already handled in authFetch
-        // Only show additional message if it's a different error
-        if (error.message && !error.message.includes('Session expired')) {
-            showToast('Authentication check failed. Please log in again.', 'error', 6000);
+        // Session expired or invalid - authFetch already handles 401 and shows login
+        if (error.message !== 'Session expired. Please log in again.') {
+            console.error('Error validating session:', error);
         }
-        showLoginScreen();
         return false;
     }
-
-    showLoginScreen();
-    return false;
 }
 
 // Initialize app
@@ -307,7 +323,7 @@ async function autoLoadOffersIfReady() {
     if (!loadOffersBtn) return;
 
     // Require Allegro auth + OAuth + PrestaShop authorization
-    if (!isAuthenticated || !isOAuthConnected || !prestashopAuthorized) {
+    if (!checkAuthentication() || !isOAuthConnected || !prestashopAuthorized) {
         return;
     }
 
@@ -356,7 +372,7 @@ async function loadSavedCredentials() {
         
         // Send credentials to backend to ensure they're loaded
         try {
-            const credentialsResponse = await authFetch(`${API_BASE}/api/credentials`, {
+            const credentialsResponse = await apiFetch(`${API_BASE}/api/credentials`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -379,12 +395,11 @@ async function loadSavedCredentials() {
             }
             
             // Check if credentials are still valid by testing authentication
-            const authResponse = await authFetch(`${API_BASE}/api/test-auth`);
+            const authResponse = await apiFetch(`${API_BASE}/api/test-auth`);
             const authData = await authResponse.json();
             
             if (authData.success) {
                 // Credentials are valid - restore authentication state
-                isAuthenticated = true;
                 const authStatusEl = document.getElementById('authStatus');
                 if (authStatusEl) {
                     authStatusEl.textContent = 'Allegro Auth: Authenticated';
@@ -424,7 +439,7 @@ function updateConfigStatuses() {
     // Update Allegro status
     const allegroStatus = document.getElementById('allegroConfigStatus');
     if (allegroStatus) {
-        if (isAuthenticated) {
+        if (checkAuthentication()) {
             allegroStatus.textContent = 'Connected';
             allegroStatus.className = 'config-status success';
         } else {
@@ -436,7 +451,7 @@ function updateConfigStatuses() {
     // Update Allegro quick status
     const allegroQuickStatus = document.getElementById('allegroQuickStatus');
     if (allegroQuickStatus) {
-        if (isAuthenticated) {
+        if (checkAuthentication()) {
             allegroQuickStatus.textContent = 'Allegro: Connected';
             allegroQuickStatus.className = 'quick-status-badge success';
         } else {
@@ -497,7 +512,7 @@ function updateButtonStates() {
     const authorizeBtn = document.getElementById('authorizeAccountBtn');
     
     if (allegroConnectBtn) {
-        if (isAuthenticated) {
+        if (checkAuthentication()) {
             // Connected state: grey, disabled, shows "Connected"
             allegroConnectBtn.textContent = 'Connected';
             allegroConnectBtn.className = 'btn btn-connected';
@@ -796,7 +811,6 @@ function setupEventListeners() {
         });
     }
     
-    // Removed loadCategoriesBtn and clearCategoryBtn - categories load automatically after OAuth
     document.getElementById('clearImportedBtn').addEventListener('click', clearImportedProducts);
     document.getElementById('exportToPrestashopBtn').addEventListener('click', exportToPrestashop);
     
@@ -828,8 +842,6 @@ function setupEventListeners() {
         });
     }
     
-    // Removed Created Products feature - no longer needed
-    
     // PrestaShop event listeners
     const testPrestashopBtn = document.getElementById('testPrestashopBtn');
     if (testPrestashopBtn) {
@@ -853,8 +865,6 @@ function setupEventListeners() {
     if (exportProductsCsvBtn) {
         exportProductsCsvBtn.addEventListener('click', exportProductsCsv);
     }
-    
-    // Sync Stock Log event listeners (removed - logs auto-clear on sync start)
     
     // Load PrestaShop config on startup
     loadPrestashopConfig();
@@ -947,21 +957,15 @@ async function saveCredentials() {
     
     // Validate and refresh session by checking health endpoint
     // Temporarily suppress duplicate session expired messages
-    const originalSessionExpiredFlag = sessionExpiredMessageShown;
-    sessionExpiredMessageShown = true; // Prevent duplicate message from authFetch
-    
+    // Check if service is available (no session required for API operations)
     try {
-        const healthCheck = await authFetch(`${API_BASE}/api/health`);
+        const healthCheck = await apiFetch(`${API_BASE}/api/health`);
         if (!healthCheck.ok) {
-            // Session invalid - authFetch already handled the error and showed login screen
-            sessionExpiredMessageShown = originalSessionExpiredFlag; // Restore flag
+            showToast('Service unavailable. Please try again later.', 'error');
             return;
         }
-        // Session is valid and refreshed, restore the flag
-        sessionExpiredMessageShown = originalSessionExpiredFlag;
     } catch (error) {
-        // Session expired or invalid - error already handled by authFetch (shows login screen)
-        sessionExpiredMessageShown = originalSessionExpiredFlag; // Restore flag
+        showToast('Failed to connect to service. Please try again later.', 'error');
         return;
     }
     
@@ -971,7 +975,7 @@ async function saveCredentials() {
     
     try {
         // Step 1: Send credentials to backend
-        const credentialsResponse = await authFetch(`${API_BASE}/api/credentials`, {
+        const credentialsResponse = await apiFetch(`${API_BASE}/api/credentials`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -989,7 +993,7 @@ async function saveCredentials() {
         }
         
         // Step 2: Test authentication immediately
-        const authResponse = await authFetch(`${API_BASE}/api/test-auth`);
+        const authResponse = await apiFetch(`${API_BASE}/api/test-auth`);
         
         // Check for 401 status before parsing JSON
         if (!authResponse.ok && authResponse.status === 401) {
@@ -1008,8 +1012,6 @@ async function saveCredentials() {
             // Show main content
             showMainInterface();
             
-            // Set authenticated state
-            isAuthenticated = true;
             const authStatusEl = document.getElementById('authStatus');
             if (authStatusEl) {
                 authStatusEl.textContent = 'Allegro Auth: Authenticated';
@@ -1054,11 +1056,9 @@ async function saveCredentials() {
     }
 }
 
-// This function is no longer used - authentication happens in saveCredentials()
-// Keeping for backward compatibility if needed elsewhere
 async function sendCredentialsToBackend(clientId, clientSecret) {
     try {
-        const response = await authFetch(`${API_BASE}/api/credentials`, {
+        const response = await apiFetch(`${API_BASE}/api/credentials`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1113,7 +1113,7 @@ async function clearCredentials() {
     
     // Disconnect OAuth
     try {
-        await authFetch(`${API_BASE}/api/oauth/disconnect`, {
+        await apiFetch(`${API_BASE}/api/oauth/disconnect`, {
             method: 'POST'
         });
     } catch (error) {
@@ -1136,7 +1136,6 @@ async function clearCredentials() {
         oauthStatusEl.textContent = 'Account: Not Connected';
         oauthStatusEl.className = 'quick-status-badge error';
     }
-    isAuthenticated = false;
     isOAuthConnected = false;
     updateUIState(false);
     
@@ -1188,7 +1187,7 @@ async function clearPrestashopConfig() {
     
     // Clear backend configuration and all JSON files (prestashop.json, credentials.json, tokens.json)
     try {
-        const response = await authFetch(`${API_BASE}/api/prestashop/disconnect`, {
+        const response = await apiFetch(`${API_BASE}/api/prestashop/disconnect`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
         });
@@ -1268,8 +1267,6 @@ function updateUIState(configured) {
     }
     
     // Disable Allegro Categories and Load Offers until PrestaShop is authorized
-    // Removed loadCategoriesBtn - categories load automatically after OAuth
-    
     if (loadOffersBtn) {
         // Disable Load Offers until OAuth is connected (Authorize Account)
         loadOffersBtn.disabled = !authenticated || !isOAuthConnected || !prestashopAuthorized;
@@ -1300,10 +1297,9 @@ function updateUIState(configured) {
     }
 }
 
-// Check API status (no longer displayed in header, but still used for internal checks)
 async function checkApiStatus() {
     try {
-        const response = await authFetch(`${API_BASE}/api/health`);
+        const response = await apiFetch(`${API_BASE}/api/health`);
         const data = await response.json();
         // Status is now shown in Allegro API Configuration panel
         updateConfigStatuses();
@@ -1316,7 +1312,7 @@ async function checkApiStatus() {
 // Check OAuth connection status
 async function checkOAuthStatus() {
     try {
-        const response = await authFetch(`${API_BASE}/api/oauth/status`);
+        const response = await apiFetch(`${API_BASE}/api/oauth/status`);
         const data = await response.json();
         
         const oauthStatusEl = document.getElementById('oauthStatus');
@@ -1354,7 +1350,7 @@ async function checkOAuthStatus() {
         
         // Show/hide authorize button based on authentication and OAuth status
         if (authorizeBtn) {
-            if (isAuthenticated) {
+            if (checkAuthentication()) {
                 if (isOAuthConnected) {
                     authorizeBtn.style.display = 'none';
                 } else {
@@ -1393,14 +1389,14 @@ async function checkOAuthStatus() {
 
 // Authorize account (OAuth flow)
 async function authorizeAccount() {
-    if (!isAuthenticated) {
+    if (!checkAuthentication()) {
         showToast('Please connect with Client ID and Secret first', 'error');
         return;
     }
     
     try {
         // Get OAuth authorization URL from backend
-        const response = await authFetch(`${API_BASE}/api/oauth/authorize`);
+        const response = await apiFetch(`${API_BASE}/api/oauth/authorize`);
         const data = await response.json();
         
         if (!data.success || !data.authUrl) {
@@ -1486,7 +1482,7 @@ async function testAuthentication() {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/test-auth`);
+        const response = await apiFetch(`${API_BASE}/api/test-auth`);
         
         // Check for 401 status before parsing JSON
         if (!response.ok && response.status === 401) {
@@ -1500,7 +1496,6 @@ async function testAuthentication() {
                 authStatusEl.textContent = 'Allegro Auth: Authenticated';
                 authStatusEl.className = 'quick-status-badge success';
             }
-            isAuthenticated = true;
             updateUIState(true);
             showToast('Authentication successful', 'success');
             // Categories will be loaded automatically after OAuth authorization
@@ -1509,7 +1504,6 @@ async function testAuthentication() {
                 authStatusEl.textContent = 'Allegro Auth: Failed';
                 authStatusEl.className = 'quick-status-badge error';
             }
-            isAuthenticated = false;
             updateUIState(false);
             showToast('Authentication failed. Please check your credentials.', 'error');
         }
@@ -1518,7 +1512,6 @@ async function testAuthentication() {
             authStatusEl.textContent = 'Allegro Auth: Error';
             authStatusEl.className = 'quick-status-badge error';
         }
-        isAuthenticated = false;
         updateUIState(false);
         // Show user-friendly error message
         let errorMessage = 'Authentication failed. Please check your credentials.';
@@ -1528,10 +1521,7 @@ async function testAuthentication() {
         showToast(errorMessage, 'error');
     }
 }
-
 // Handle product count change
-// Product count is now fixed to 30 per page and the UI selector was removed,
-// so this function is kept as a no-op for backward compatibility.
 async function handleProductCountChange() {
     return;
 }
@@ -1575,7 +1565,7 @@ async function fetchAllOffers() {
             params.append('offset', offset);
             params.append('limit', limit);
             
-            const response = await authFetch(`${API_BASE}/api/offers?${params}`);
+            const response = await apiFetch(`${API_BASE}/api/offers?${params}`);
             
             // Check for 401 status before parsing JSON
             if (!response.ok && response.status === 401) {
@@ -1777,7 +1767,7 @@ async function fetchOffers(offset = 0, limit = 20) {
         params.append('offset', offset);
         params.append('limit', limit);
         
-        const response = await authFetch(`${API_BASE}/api/offers?${params}`);
+        const response = await apiFetch(`${API_BASE}/api/offers?${params}`);
         
         // Check for 401 status before parsing JSON
         if (!response.ok && response.status === 401) {
@@ -2030,7 +2020,6 @@ function startImageRotation(card, imageUrls, imgElement) {
     // Function to rotate to next image
     const rotateImage = () => {
         if (!card.isConnected || !document.contains(card)) {
-            // Card was removed from DOM, stop rotation
             if (card.dataset.rotationInterval) {
                 clearInterval(parseInt(card.dataset.rotationInterval));
                 delete card.dataset.rotationInterval;
@@ -2232,7 +2221,7 @@ async function fetchProductDetails(offerId) {
         
         // Use /api/products/{offerId} which uses /sale/product-offers/{offerId}
         // This endpoint only works for the user's own offers
-        const response = await authFetch(`${API_BASE}/api/products/${offerId}`);
+        const response = await apiFetch(`${API_BASE}/api/products/${offerId}`);
         let product = null;
         
         if (response.ok) {
@@ -2248,7 +2237,7 @@ async function fetchProductDetails(offerId) {
         } else {
             // For other errors, try the offers endpoint as fallback (only if it's a user offer)
             if (isUserOffer) {
-                const offerResponse = await authFetch(`${API_BASE}/api/offers/${offerId}`);
+                const offerResponse = await apiFetch(`${API_BASE}/api/offers/${offerId}`);
                 if (offerResponse.ok) {
                     const offerResult = await offerResponse.json();
                     if (offerResult.success && offerResult.data) {
@@ -3645,7 +3634,7 @@ async function savePrestashopConfig() {
     if (messageEl) messageEl.style.display = 'none';
     
     try {
-        const response = await authFetch(`${API_BASE}/api/prestashop/configure`, {
+        const response = await apiFetch(`${API_BASE}/api/prestashop/configure`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -3700,7 +3689,7 @@ async function testPrestashopConnection() {
     
     try {
         // Save temporarily for test
-        const response = await authFetch(`${API_BASE}/api/prestashop/configure`, {
+        const response = await apiFetch(`${API_BASE}/api/prestashop/configure`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -3715,7 +3704,7 @@ async function testPrestashopConnection() {
         }
         
         // Test connection
-        const testResponse = await authFetch(`${API_BASE}/api/prestashop/test`);
+        const testResponse = await apiFetch(`${API_BASE}/api/prestashop/test`);
         const testData = await testResponse.json();
         
         if (testData.success) {
@@ -3797,7 +3786,7 @@ function hidePrestashopSavedConfigDisplay() {
 
 async function checkPrestashopStatus() {
     try {
-        const response = await authFetch(`${API_BASE}/api/prestashop/status`);
+        const response = await apiFetch(`${API_BASE}/api/prestashop/status`);
         const data = await response.json();
         
         prestashopConfigured = data.configured;
@@ -3806,7 +3795,7 @@ async function checkPrestashopStatus() {
         // Only set authorized to true if we can successfully test the connection
         if (prestashopConfigured) {
             try {
-                const testResponse = await authFetch(`${API_BASE}/api/prestashop/test`);
+                const testResponse = await apiFetch(`${API_BASE}/api/prestashop/test`);
                 const testData = await testResponse.json();
                 prestashopAuthorized = testData.success || false;
             } catch (error) {
@@ -3831,7 +3820,6 @@ async function checkPrestashopStatus() {
             hidePrestashopSavedConfigDisplay();
         }
         
-        // Update config panel status (header status removed) and button states
         updateConfigStatuses();
         updateExportButtonState();
         updateUIState(true); // Update UI state to reflect PrestaShop authorization status
@@ -3992,7 +3980,7 @@ async function syncCategoriesToPrestashop() {
             }
 
             try {
-                const response = await authFetch(`${API_BASE}/api/prestashop/categories`, {
+                const response = await apiFetch(`${API_BASE}/api/prestashop/categories`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -4046,10 +4034,6 @@ async function syncCategoriesToPrestashop() {
         }
     }
 }
-
-// Removed loadPrestashopCategories() and displayPrestashopCategories() functions
-// Categories are automatically managed by the backend during export
-// The backend checks for existing categories and creates them if needed
 
 function updateExportButtonState() {
     const exportBtn = document.getElementById('exportToPrestashopBtn');
@@ -4155,7 +4139,7 @@ async function exportToPrestashop() {
                 }
             }
             
-            const response = await authFetch(`${API_BASE}/api/prestashop/products`, {
+            const response = await apiFetch(`${API_BASE}/api/prestashop/products`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -4236,7 +4220,7 @@ async function exportCategoriesCsv() {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/export/categories.csv`);
+        const response = await apiFetch(`${API_BASE}/api/export/categories.csv`);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to export categories' }));
@@ -4283,7 +4267,7 @@ async function exportProductsCsv() {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/export/products.csv`);
+        const response = await apiFetch(`${API_BASE}/api/export/products.csv`);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to export products' }));
@@ -4336,10 +4320,6 @@ function loadImportedOffers() {
     }
 }
 
-// Removed Created Products feature - no longer needed
-
-// Removed localStorage caching - data is always loaded fresh from Allegro API
-
 // Clear search + selection - reset search field and unselect all products
 function clearSearch() {
     // Clear search input field
@@ -4382,7 +4362,7 @@ async function fetchCategoryData(categoryId) {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/categories/${categoryId}`);
+        const response = await apiFetch(`${API_BASE}/api/categories/${categoryId}`);
         if (!response.ok) {
             return null;
         }
@@ -4633,7 +4613,7 @@ async function loadCategoriesFromOffers() {
         
         while (hasMore) {
             // Filter by ACTIVE status to match Allegro website (which shows ACTIVE offers by default)
-            const response = await authFetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}&status=ACTIVE`);
+            const response = await apiFetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}&status=ACTIVE`);
             
             if (!response.ok) {
                 if (response.status === 401) {
@@ -4918,7 +4898,7 @@ async function fetchCategoryName(categoryId) {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/categories/${categoryId}`);
+        const response = await apiFetch(`${API_BASE}/api/categories/${categoryId}`);
         if (!response.ok) {
             return 'N/A';
         }
@@ -5262,7 +5242,7 @@ function setupConfigPanelToggle() {
     // Check if config is already set (both Allegro and PrestaShop)
     // Use safe checks for variables that might not be defined yet
     try {
-        const isConfigured = (typeof isAuthenticated !== 'undefined' && isAuthenticated) && 
+        const isConfigured = checkAuthentication() && 
                             (typeof prestashopConfigured !== 'undefined' && prestashopConfigured) && 
                             (typeof prestashopAuthorized !== 'undefined' && prestashopAuthorized);
         if (isConfigured) {
@@ -5778,7 +5758,7 @@ function formatTimeRemaining(seconds) {
 // Check if prerequisites are met for sync
 async function checkSyncPrerequisites() {
     try {
-        const response = await authFetch(`${API_BASE}/api/sync/prerequisites`);
+        const response = await apiFetch(`${API_BASE}/api/sync/prerequisites`);
         const data = await response.json();
         
         const msgEl = document.getElementById('syncPrerequisitesMsg');
@@ -5806,7 +5786,7 @@ async function checkSyncPrerequisites() {
 // Update sync control buttons based on status
 async function updateSyncControlButtons() {
     try {
-        const response = await authFetch(`${API_BASE}/api/sync/status`);
+        const response = await apiFetch(`${API_BASE}/api/sync/status`);
         const data = await response.json();
         
         const startBtn = document.getElementById('startSyncBtn');
@@ -5850,7 +5830,7 @@ async function updateSyncControlButtons() {
 // Update sync status from server
 async function updateSyncStatusFromServer() {
     try {
-        const response = await authFetch(`${API_BASE}/api/sync/status`);
+        const response = await apiFetch(`${API_BASE}/api/sync/status`);
         const data = await response.json();
         
         const statusEl = document.getElementById('syncTimerStatus');
@@ -5876,7 +5856,7 @@ async function startSyncTimerControl() {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/sync/start`, {
+        const response = await apiFetch(`${API_BASE}/api/sync/start`, {
             method: 'POST'
         });
         const data = await response.json();
@@ -5904,7 +5884,7 @@ async function stopSyncTimerControl() {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/sync/stop`, {
+        const response = await apiFetch(`${API_BASE}/api/sync/stop`, {
             method: 'POST'
         });
         const data = await response.json();
@@ -5932,7 +5912,7 @@ async function triggerSyncNow() {
     }
     
     try {
-        const response = await authFetch(`${API_BASE}/api/sync/trigger`, {
+        const response = await apiFetch(`${API_BASE}/api/sync/trigger`, {
             method: 'POST'
         });
         const data = await response.json();
