@@ -7,7 +7,8 @@ const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
 const mysql = require('mysql2/promise');
-const FormData = require('form-data'); 
+const FormData = require('form-data');
+const jwt = require('jsonwebtoken'); 
 
 // Load environment variables from .env file (explicitly from project root)
 const envPath = path.join(__dirname, '.env');
@@ -88,9 +89,9 @@ if (ADMIN_EMAIL && ADMIN_PASSWORD) {
   if (!ADMIN_PASSWORD) console.warn('    Missing: ADMIN_PASSWORD');
 }
 
-// Session and security configuration
-const SESSION_IDLE_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes - user will be logged out after 20 minutes of inactivity
-const SESSION_MAX_LIFETIME_MS = 20 * 60 * 1000; // 20 minutes
+// JWT and security configuration
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h'; // 24 hours default
 const MAX_FAILED_LOGINS = 5;
 const LOGIN_LOCK_DURATION_MS = 60 * 1000; // 60 seconds
 
@@ -99,10 +100,6 @@ let dbPool = null;
 
 // Product mappings and category cache are now stored in MariaDB/MySQL database
 // No Redis dependency - using database with proper indexes for fast performance
-
-// In-memory session store (token -> session data)
-// NOTE: Tokens are not persisted across server restarts by design.
-const sessions = new Map();
 
 /**
  * Hash a password using PBKDF2 with per-user salt
@@ -132,59 +129,35 @@ function verifyPassword(password, storedHash, storedSalt) {
 }
 
 /**
- * Create a new session token for a user
+ * Create a JWT token for a user
  */
-function createSession(user) {
-  const token = crypto.randomBytes(32).toString('hex');
-  const now = Date.now();
-  sessions.set(token, {
+function createJWT(user) {
+  const payload = {
     userId: user.id,
     email: user.email,
-    role: user.role,
-    createdAt: now,
-    lastActivity: now
-  });
-  return token;
+    role: user.role
+  };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
 /**
- * Validate a session token and enforce idle / absolute timeouts
+ * Verify and decode a JWT token
  */
-function validateSession(token) {
-  if (!token) return null;
-  const session = sessions.get(token);
-  if (!session) return null;
-
-  const now = Date.now();
-
-  // Absolute timeout
-  if (now - session.createdAt > SESSION_MAX_LIFETIME_MS) {
-    sessions.delete(token);
-    return null;
-  }
-
-  // Idle timeout
-  if (now - session.lastActivity > SESSION_IDLE_TIMEOUT_MS) {
-    sessions.delete(token);
-    return null;
-  }
-
-  // Refresh activity timestamp
-  session.lastActivity = now;
-  return session;
-}
-
-/**
- * Invalidate a session token
- */
-function invalidateSession(token) {
-  if (token) {
-    sessions.delete(token);
+function verifyJWT(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      throw new Error('Token expired');
+    } else if (error.name === 'JsonWebTokenError') {
+      throw new Error('Invalid token');
+    }
+    throw error;
   }
 }
 
 /**
- * Express middleware: authenticate requests using Bearer token
+ * Express middleware: authenticate requests using JWT Bearer token
  */
 function authMiddleware(req, res, next) {
   const authHeader = req.headers['authorization'] || '';
@@ -192,16 +165,29 @@ function authMiddleware(req, res, next) {
     ? authHeader.substring(7)
     : null;
 
-  const session = validateSession(token);
-  if (!session) {
+  if (!token) {
     return res.status(401).json({
       success: false,
-      error: 'Unauthorized'
+      error: 'Authentication required. Please log in to access this feature.'
     });
   }
 
-  req.user = session;
-  next();
+  try {
+    const decoded = verifyJWT(token);
+    req.user = {
+      userId: decoded.userId,
+      email: decoded.email,
+      role: decoded.role
+    };
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      error: error.message === 'Token expired' 
+        ? 'Your session has expired. Please log in again.'
+        : 'Invalid authentication token. Please log in again.'
+    });
+  }
 }
 
 /**
@@ -235,6 +221,9 @@ async function initDatabase() {
   await rootConnection.end();
 
   // Create pool bound to the application database
+  // Increased connection limit for multi-user support (50+ users)
+  // Formula: connectionLimit = max concurrent users + buffer (recommended: users * 2)
+  const connectionLimit = parseInt(process.env.DB_CONNECTION_LIMIT) || 100;
   dbPool = mysql.createPool({
     host: DB_HOST,
     port: DB_PORT,
@@ -242,7 +231,7 @@ async function initDatabase() {
     password: DB_PASSWORD,
     database: DB_NAME,
     waitForConnections: true,
-    connectionLimit: 10,
+    connectionLimit: connectionLimit,
     queueLimit: 0
   });
 
@@ -284,64 +273,150 @@ async function initDatabase() {
     console.warn('Warning: Could not add is_active column:', error.message);
   }
 
-  // Create allegro_credentials table (single row configuration)
+  // Create allegro_credentials table (multi-user configuration)
   await dbPool.query(`
     CREATE TABLE IF NOT EXISTS allegro_credentials (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
       client_id VARCHAR(255) NULL,
       client_secret VARCHAR(255) NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY single_row (id)
+      UNIQUE KEY unique_user (app_user_id),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
-  // Create oauth_tokens table (single row configuration)
+  // Create oauth_tokens table (multi-user configuration)
   await dbPool.query(`
     CREATE TABLE IF NOT EXISTS oauth_tokens (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
       access_token TEXT NULL,
       refresh_token TEXT NULL,
       expires_at BIGINT NULL,
-      user_id VARCHAR(255) NULL,
+      allegro_user_id VARCHAR(255) NULL,
       client_access_token TEXT NULL,
       client_token_expiry BIGINT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY single_row (id)
+      UNIQUE KEY unique_user (app_user_id),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
-  // Create prestashop_credentials table (single row configuration)
+  // Create prestashop_credentials table (multi-user configuration)
   await dbPool.query(`
     CREATE TABLE IF NOT EXISTS prestashop_credentials (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
       base_url VARCHAR(500) NULL,
       api_key VARCHAR(255) NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY single_row (id)
+      UNIQUE KEY unique_user (app_user_id),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
-  // Initialize single row for each configuration table if not exists
-  await dbPool.query(`
-    INSERT IGNORE INTO allegro_credentials (id, client_id, client_secret) VALUES (1, NULL, NULL)
-  `);
-  await dbPool.query(`
-    INSERT IGNORE INTO oauth_tokens (id, access_token, refresh_token, expires_at, user_id, client_access_token, client_token_expiry) 
-    VALUES (1, NULL, NULL, NULL, NULL, NULL, NULL)
-  `);
-  await dbPool.query(`
-    INSERT IGNORE INTO prestashop_credentials (id, base_url, api_key) VALUES (1, NULL, NULL)
-  `);
+  // Migrate existing data if tables have old structure (backward compatibility)
+  try {
+    // Check if allegro_credentials has app_user_id column
+    const [allegroCols] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'allegro_credentials' 
+      AND COLUMN_NAME = 'app_user_id'
+    `);
+    
+    if (allegroCols.length === 0) {
+      // Migrate allegro_credentials table
+      await dbPool.query(`
+        ALTER TABLE allegro_credentials 
+        ADD COLUMN app_user_id INT UNSIGNED NULL AFTER id,
+        DROP INDEX IF EXISTS single_row
+      `);
+      
+      // If there's existing data with id=1, we need to assign it to a default user
+      // For now, we'll just add the column and let users reconfigure
+      await dbPool.query(`
+        ALTER TABLE allegro_credentials 
+        MODIFY COLUMN app_user_id INT UNSIGNED NOT NULL,
+        ADD UNIQUE KEY unique_user (app_user_id),
+        ADD FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+      `);
+    }
+  } catch (error) {
+    console.warn('Migration note for allegro_credentials:', error.message);
+  }
+
+  try {
+    // Check if oauth_tokens has app_user_id column
+    const [oauthCols] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'oauth_tokens' 
+      AND COLUMN_NAME = 'app_user_id'
+    `);
+    
+    if (oauthCols.length === 0) {
+      // Migrate oauth_tokens table
+      await dbPool.query(`
+        ALTER TABLE oauth_tokens 
+        ADD COLUMN app_user_id INT UNSIGNED NULL AFTER id,
+        CHANGE COLUMN user_id allegro_user_id VARCHAR(255) NULL,
+        DROP INDEX IF EXISTS single_row
+      `);
+      
+      await dbPool.query(`
+        ALTER TABLE oauth_tokens 
+        MODIFY COLUMN app_user_id INT UNSIGNED NOT NULL,
+        ADD UNIQUE KEY unique_user (app_user_id),
+        ADD FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+      `);
+    }
+  } catch (error) {
+    console.warn('Migration note for oauth_tokens:', error.message);
+  }
+
+  try {
+    // Check if prestashop_credentials has app_user_id column
+    const [prestashopCols] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'prestashop_credentials' 
+      AND COLUMN_NAME = 'app_user_id'
+    `);
+    
+    if (prestashopCols.length === 0) {
+      // Migrate prestashop_credentials table
+      await dbPool.query(`
+        ALTER TABLE prestashop_credentials 
+        ADD COLUMN app_user_id INT UNSIGNED NULL AFTER id,
+        DROP INDEX IF EXISTS single_row
+      `);
+      
+      await dbPool.query(`
+        ALTER TABLE prestashop_credentials 
+        MODIFY COLUMN app_user_id INT UNSIGNED NOT NULL,
+        ADD UNIQUE KEY unique_user (app_user_id),
+        ADD FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+      `);
+    }
+  } catch (error) {
+    console.warn('Migration note for prestashop_credentials:', error.message);
+  }
 
   console.log('✓ Configuration tables created/verified');
 
-  // Create product_mappings table with proper indexes for fast lookups
+  // Create product_mappings table with proper indexes for fast lookups (per-user)
   await dbPool.query(`
     CREATE TABLE IF NOT EXISTS product_mappings (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
       allegro_offer_id VARCHAR(255) NOT NULL,
       prestashop_product_id INT NOT NULL,
       synced_at DATETIME NULL,
@@ -350,25 +425,140 @@ async function initDatabase() {
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       INDEX idx_allegro_offer (allegro_offer_id),
       INDEX idx_prestashop_product (prestashop_product_id),
-      UNIQUE KEY unique_allegro_offer (allegro_offer_id)
+      INDEX idx_user_allegro (app_user_id, allegro_offer_id),
+      UNIQUE KEY unique_user_allegro_offer (app_user_id, allegro_offer_id),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
-  // Create category_cache table with proper indexes for fast lookups
+  // Migrate existing product_mappings to add app_user_id if column doesn't exist
+  try {
+    const [mappingCols] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'product_mappings' 
+      AND COLUMN_NAME = 'app_user_id'
+    `);
+    
+    if (mappingCols.length === 0) {
+      // Add app_user_id column (nullable first for migration)
+      await dbPool.query(`
+        ALTER TABLE product_mappings 
+        ADD COLUMN app_user_id INT UNSIGNED NULL AFTER id,
+        DROP INDEX IF EXISTS unique_allegro_offer
+      `);
+      
+      // For existing data, we'll leave app_user_id as NULL (orphaned mappings)
+      // Users will need to re-export products to create new mappings with their user ID
+      // Add the unique constraint and foreign key
+      await dbPool.query(`
+        ALTER TABLE product_mappings 
+        ADD INDEX idx_user_allegro (app_user_id, allegro_offer_id),
+        ADD UNIQUE KEY unique_user_allegro_offer (app_user_id, allegro_offer_id),
+        ADD FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+      `);
+      
+      console.log('✓ Migrated product_mappings table to support per-user mappings');
+    }
+  } catch (error) {
+    console.warn('Migration note for product_mappings:', error.message);
+  }
+
+  // Create category_cache table with proper indexes for fast lookups (per-user)
   await dbPool.query(`
     CREATE TABLE IF NOT EXISTS category_cache (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
       category_name VARCHAR(255) NOT NULL,
       category_id INT NOT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       INDEX idx_category_name (category_name),
       INDEX idx_category_id (category_id),
-      UNIQUE KEY unique_category_name (category_name)
+      INDEX idx_user_category (app_user_id, category_name),
+      UNIQUE KEY unique_user_category_name (app_user_id, category_name),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
+  // Migrate existing category_cache to add app_user_id if column doesn't exist
+  try {
+    const [columns] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'category_cache'
+      AND COLUMN_NAME = 'app_user_id'
+    `);
+
+    if (columns.length === 0) {
+      console.log('Migrating category_cache table to add app_user_id column...');
+      
+      // Delete orphaned entries (entries without user context are not useful)
+      // Since category cache is per-user, we'll clear old entries
+      await dbPool.query(`DELETE FROM category_cache`);
+      console.log('Cleared existing category_cache entries (will be recreated per-user)');
+
+      // Add app_user_id column and constraints
+      await dbPool.query(`
+        ALTER TABLE category_cache
+        ADD COLUMN app_user_id INT UNSIGNED NOT NULL AFTER id,
+        DROP INDEX IF EXISTS unique_category_name,
+        ADD INDEX idx_user_category (app_user_id, category_name),
+        ADD UNIQUE KEY unique_user_category_name (app_user_id, category_name),
+        ADD FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+      `);
+      console.log('✓ Migration complete: category_cache now supports per-user caching');
+    }
+  } catch (error) {
+    console.warn('Migration note for category_cache:', error.message);
+  }
+
   console.log('✓ Product mappings and category cache tables created/verified');
+
+  // Create sync_logs table (per-user sync logs)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS sync_logs (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
+      status VARCHAR(50) NOT NULL,
+      message TEXT NOT NULL,
+      product_name VARCHAR(500) NULL,
+      offer_id VARCHAR(255) NULL,
+      prestashop_product_id INT NULL,
+      stock_change_from INT NULL,
+      stock_change_to INT NULL,
+      allegro_price DECIMAL(10,2) NULL,
+      prestashop_price DECIMAL(10,2) NULL,
+      category_name VARCHAR(255) NULL,
+      timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_user_timestamp (app_user_id, timestamp),
+      INDEX idx_user_status (app_user_id, status),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  console.log('✓ Sync logs table created/verified');
+
+  // Create user_sync_settings table (per-user sync settings and state persistence)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS user_sync_settings (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
+      auto_sync_enabled TINYINT(1) NOT NULL DEFAULT 0,
+      sync_interval_ms INT UNSIGNED NOT NULL DEFAULT 300000,
+      last_sync_time DATETIME NULL,
+      next_sync_time DATETIME NULL,
+      sync_timer_active TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user (app_user_id),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  console.log('✓ User sync settings table created/verified');
 
   // Ensure at least one admin user exists if ADMIN_EMAIL / ADMIN_PASSWORD are provided
   const adminEmail = process.env.ADMIN_EMAIL;
@@ -483,10 +673,9 @@ let userCredentials = {
 let accessToken = null;
 let tokenExpiry = null;
 
-// Category cache (legacy, now disabled for lookups)
-// Left as an empty Map so existing code paths that used it for
-// concurrency control won't crash, but category existence is now
-// always validated directly against PrestaShop instead of this cache.
+// Category cache (per-user in-memory cache)
+// In-memory cache for category name -> PrestaShop category ID mappings per user
+// Format: Map<userId, Map<normalizedName, categoryId>>
 let categoryCache = new Map();
 
 // Store user OAuth tokens (for user-level authentication)
@@ -503,22 +692,89 @@ let prestashopCredentials = {
   apiKey: null
 };
 
-// Store product mappings (Allegro offer ID → PrestaShop product ID)
-let productMappings = {};
+// Per-user sync job state
+let userSyncStates = new Map(); // Map<userId, {running: boolean, lastSyncTime: string, nextSyncTime: string}>
 
-// Store sync logs in memory only (cleared when sync starts - only current session logs)
-let syncLogs = [];
-const MAX_SYNC_LOGS = 1000; // Keep last 1000 log entries
-
-// Sync job state
-let syncJobRunning = false;
-let lastSyncTime = null;
-let nextSyncTime = null;
+// Per-user sync timers
+let userSyncTimers = new Map(); // Map<userId, {intervalId: number, active: boolean}>
 const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
-// Sync timer control
-let syncTimerInterval = null; // Store interval ID for stopping
-let syncTimerActive = false; // Track if timer is running
+// Sync queue system for managing concurrent syncs (prevents resource exhaustion)
+const syncQueue = {
+  queue: [], // Array of {appUserId, priority, timestamp}
+  running: new Set(), // Set of currently running user IDs
+  maxConcurrent: parseInt(process.env.MAX_CONCURRENT_SYNCS) || 10, // Max concurrent syncs (default: 10)
+  processing: false
+};
+
+/**
+ * Add user to sync queue
+ * @param {number} appUserId - User ID to sync
+ * @param {number} priority - Priority (lower = higher priority, default: Date.now())
+ */
+function enqueueSync(appUserId, priority = null) {
+  if (syncQueue.running.has(appUserId)) {
+    console.log(`User ${appUserId} sync already running, skipping queue`);
+    return;
+  }
+  
+  if (syncQueue.queue.some(item => item.appUserId === appUserId)) {
+    console.log(`User ${appUserId} already in queue, skipping duplicate`);
+    return;
+  }
+  
+  syncQueue.queue.push({
+    appUserId,
+    priority: priority || Date.now(),
+    timestamp: Date.now()
+  });
+  
+  // Sort by priority (lower priority number = higher priority)
+  syncQueue.queue.sort((a, b) => a.priority - b.priority);
+  
+  console.log(`User ${appUserId} added to sync queue (position: ${syncQueue.queue.length})`);
+  processSyncQueue();
+}
+
+/**
+ * Process sync queue - runs syncs up to maxConcurrent limit
+ */
+async function processSyncQueue() {
+  if (syncQueue.processing) {
+    return; // Already processing
+  }
+  
+  syncQueue.processing = true;
+  
+  while (syncQueue.queue.length > 0 && syncQueue.running.size < syncQueue.maxConcurrent) {
+    const item = syncQueue.queue.shift();
+    const { appUserId } = item;
+    
+    if (syncQueue.running.has(appUserId)) {
+      continue; // Skip if already running
+    }
+    
+    syncQueue.running.add(appUserId);
+    console.log(`Starting sync for user ${appUserId} (${syncQueue.running.size}/${syncQueue.maxConcurrent} concurrent)`);
+    
+    // Run sync in background
+    syncStockFromAllegroToPrestashop(appUserId)
+      .then(() => {
+        syncQueue.running.delete(appUserId);
+        console.log(`Sync completed for user ${appUserId} (${syncQueue.running.size}/${syncQueue.maxConcurrent} concurrent)`);
+        // Process next item in queue
+        processSyncQueue();
+      })
+      .catch((error) => {
+        syncQueue.running.delete(appUserId);
+        console.error(`Sync error for user ${appUserId}:`, error.message);
+        // Process next item in queue
+        processSyncQueue();
+      });
+  }
+  
+  syncQueue.processing = false;
+}
 
 // Configuration: Use setInterval timer (true) or rely on external cron (false)
 // Set to false on Ubuntu to use system cron instead
@@ -526,48 +782,79 @@ const USE_INTERVAL_TIMER = process.env.USE_INTERVAL_TIMER !== 'false'; // Defaul
 
 /**
  * Save tokens to database (persistent storage)
+ * @param {number} appUserId - Application user ID
  */
-async function saveTokens() {
+async function saveTokens(appUserId) {
   try {
     if (!dbPool) {
-      console.warn('Database not initialized, cannot save tokens');
-      return;
+      const error = new Error('Database not initialized, cannot save tokens');
+      console.error('Error saving tokens:', error.message);
+      throw error;
     }
     
-    await dbPool.query(`
-      UPDATE oauth_tokens SET
-        access_token = ?,
-        refresh_token = ?,
-        expires_at = ?,
-        user_id = ?,
-        client_access_token = ?,
-        client_token_expiry = ?,
+    if (!appUserId) {
+      const error = new Error('User ID is required to save tokens');
+      console.error('Error saving tokens:', error.message);
+      throw error;
+    }
+    
+    // Only save user OAuth tokens (from authorization_code flow)
+    // Client credentials tokens should NOT be saved - they are temporary and in-memory only
+    const [result] = await dbPool.query(`
+      INSERT INTO oauth_tokens (app_user_id, access_token, refresh_token, expires_at, allegro_user_id, client_access_token, client_token_expiry, updated_at)
+      VALUES (?, ?, ?, ?, ?, NULL, NULL, NOW())
+      ON DUPLICATE KEY UPDATE
+        access_token = VALUES(access_token),
+        refresh_token = VALUES(refresh_token),
+        expires_at = VALUES(expires_at),
+        allegro_user_id = VALUES(allegro_user_id),
+        client_access_token = NULL,
+        client_token_expiry = NULL,
         updated_at = NOW()
-      WHERE id = 1
     `, [
+      appUserId,
       userOAuthTokens.accessToken || null,
       userOAuthTokens.refreshToken || null,
       userOAuthTokens.expiresAt || null,
-      userOAuthTokens.userId || null,
-      accessToken || null,
-      tokenExpiry || null
+      userOAuthTokens.userId || null
     ]);
+    
+    console.log(`✓ Saved OAuth tokens for user ${appUserId}`, {
+      affectedRows: result.affectedRows,
+      insertId: result.insertId,
+      hasAccessToken: !!userOAuthTokens.accessToken,
+      hasRefreshToken: !!userOAuthTokens.refreshToken
+    });
   } catch (error) {
-    console.error('Error saving tokens to database:', error.message);
+    console.error('Error saving tokens to database:', {
+      message: error.message,
+      code: error.code,
+      errno: error.errno,
+      sqlState: error.sqlState,
+      sqlMessage: error.sqlMessage,
+      stack: error.stack
+    });
+    throw error; // Re-throw so caller knows it failed
   }
 }
 
 /**
- * Load tokens from database (on server startup)
+ * Load tokens from database for a specific user
+ * @param {number} appUserId - Application user ID
  */
-async function loadTokens() {
+async function loadTokens(appUserId) {
   try {
     if (!dbPool) {
       console.warn('Database not initialized, cannot load tokens');
       return;
     }
     
-    const [rows] = await dbPool.query('SELECT * FROM oauth_tokens WHERE id = 1');
+    if (!appUserId) {
+      console.warn('User ID is required to load tokens');
+      return;
+    }
+    
+    const [rows] = await dbPool.query('SELECT * FROM oauth_tokens WHERE app_user_id = ?', [appUserId]);
     
     if (rows.length > 0) {
       const row = rows[0];
@@ -578,15 +865,23 @@ async function loadTokens() {
           accessToken: row.access_token || null,
           refreshToken: row.refresh_token || null,
           expiresAt: row.expires_at || null,
-          userId: row.user_id || null
+          userId: row.allegro_user_id || null
         };
       }
       
-      // Restore client credentials token
-      if (row.client_access_token) {
-        accessToken = row.client_access_token;
-        tokenExpiry = row.client_token_expiry || null;
-      }
+      // NOTE: Client credentials tokens are NOT loaded from database
+      // They are temporary and should only exist in memory
+      // They will be regenerated when needed via getAccessToken()
+    } else {
+      // No tokens found for this user, reset to empty
+      userOAuthTokens = {
+        accessToken: null,
+        refreshToken: null,
+        expiresAt: null,
+        userId: null
+      };
+      accessToken = null;
+      tokenExpiry = null;
     }
   } catch (error) {
     console.error('Error loading tokens from database:', error.message);
@@ -597,94 +892,170 @@ async function loadTokens() {
       expiresAt: null,
       userId: null
     };
+    accessToken = null;
+    tokenExpiry = null;
   }
 }
 
 /**
  * Save credentials to database (persistent storage)
+ * @param {number} appUserId - Application user ID
  */
-async function saveCredentials() {
+async function saveCredentials(appUserId) {
   try {
     if (!dbPool) {
-      console.warn('Database not initialized, cannot save credentials');
-      return;
+      const error = new Error('Database not initialized, cannot save credentials');
+      console.error('Error saving credentials:', error.message);
+      throw error;
     }
     
-    await dbPool.query(`
-      UPDATE allegro_credentials SET
-        client_id = ?,
-        client_secret = ?,
+    if (!appUserId) {
+      const error = new Error('User ID is required to save credentials');
+      console.error('Error saving credentials:', error.message);
+      throw error;
+    }
+    
+    // Upsert pattern: INSERT if new user, UPDATE if user already exists
+    // Uses UNIQUE KEY on app_user_id to determine insert vs update
+    const [result] = await dbPool.query(`
+      INSERT INTO allegro_credentials (app_user_id, client_id, client_secret, updated_at)
+      VALUES (?, ?, ?, NOW())
+      ON DUPLICATE KEY UPDATE
+        client_id = VALUES(client_id),
+        client_secret = VALUES(client_secret),
         updated_at = NOW()
-      WHERE id = 1
     `, [
+      appUserId,
       userCredentials.clientId || null,
       userCredentials.clientSecret || null
     ]);
+    
+    console.log(`✓ Saved Allegro credentials for user ${appUserId}`, {
+      affectedRows: result.affectedRows,
+      insertId: result.insertId
+    });
   } catch (error) {
-    console.error('Error saving credentials to database:', error.message);
+    console.error('Error saving credentials to database:', {
+      message: error.message,
+      code: error.code,
+      errno: error.errno,
+      sqlState: error.sqlState,
+      sqlMessage: error.sqlMessage,
+      stack: error.stack
+    });
+    throw error; // Re-throw so caller knows it failed
   }
 }
 
 /**
- * Load credentials from database (on server startup)
+ * Load credentials from database for a specific user
+ * @param {number} appUserId - Application user ID
  */
-async function loadCredentials() {
+async function loadCredentials(appUserId) {
   try {
     if (!dbPool) {
       console.warn('Database not initialized, cannot load credentials');
       return;
     }
     
-    const [rows] = await dbPool.query('SELECT * FROM allegro_credentials WHERE id = 1');
+    if (!appUserId) {
+      console.warn('User ID is required to load credentials');
+      return;
+    }
+    
+    const [rows] = await dbPool.query('SELECT * FROM allegro_credentials WHERE app_user_id = ?', [appUserId]);
     
     if (rows.length > 0) {
       const row = rows[0];
       if (row.client_id && row.client_secret) {
         userCredentials.clientId = row.client_id;
         userCredentials.clientSecret = row.client_secret;
+      } else {
+        userCredentials.clientId = null;
+        userCredentials.clientSecret = null;
       }
+    } else {
+      userCredentials.clientId = null;
+      userCredentials.clientSecret = null;
     }
   } catch (error) {
     console.error('Error loading credentials from database:', error.message);
+    userCredentials.clientId = null;
+    userCredentials.clientSecret = null;
   }
 }
 
 /**
  * Save PrestaShop credentials to database
+ * @param {number} appUserId - Application user ID
  */
-async function savePrestashopCredentials() {
+async function savePrestashopCredentials(appUserId) {
   try {
     if (!dbPool) {
-      console.warn('Database not initialized, cannot save PrestaShop credentials');
-      return;
+      const error = new Error('Database not initialized, cannot save PrestaShop credentials');
+      console.error('Error saving PrestaShop credentials:', error.message);
+      throw error;
     }
     
-    await dbPool.query(`
-      UPDATE prestashop_credentials SET
-        base_url = ?,
-        api_key = ?,
+    if (!appUserId) {
+      const error = new Error('User ID is required to save PrestaShop credentials');
+      console.error('Error saving PrestaShop credentials:', error.message);
+      throw error;
+    }
+    
+    // Upsert pattern: INSERT if new user, UPDATE if user already exists
+    // Uses UNIQUE KEY on app_user_id to determine insert vs update
+    const [result] = await dbPool.query(`
+      INSERT INTO prestashop_credentials (app_user_id, base_url, api_key, updated_at)
+      VALUES (?, ?, ?, NOW())
+      ON DUPLICATE KEY UPDATE
+        base_url = VALUES(base_url),
+        api_key = VALUES(api_key),
         updated_at = NOW()
-      WHERE id = 1
     `, [
+      appUserId,
       prestashopCredentials.baseUrl || null,
       prestashopCredentials.apiKey || null
     ]);
+    
+    console.log(`✓ Saved PrestaShop credentials for user ${appUserId}`, {
+      affectedRows: result.affectedRows,
+      insertId: result.insertId,
+      baseUrl: prestashopCredentials.baseUrl ? '***' : null
+    });
   } catch (error) {
-    console.error('Error saving PrestaShop credentials to database:', error.message);
+    console.error('Error saving PrestaShop credentials to database:', {
+      message: error.message,
+      code: error.code,
+      errno: error.errno,
+      sqlState: error.sqlState,
+      sqlMessage: error.sqlMessage,
+      stack: error.stack
+    });
+    throw error; // Re-throw so caller knows it failed
   }
 }
 
 /**
  * Load PrestaShop credentials from database
  */
-async function loadPrestashopCredentials() {
+/**
+ * Load PrestaShop credentials from database for a specific user
+ * @param {number} appUserId - Application user ID
+ */
+async function loadPrestashopCredentials(appUserId) {
   try {
     if (!dbPool) {
       console.warn('Database not initialized, cannot load PrestaShop credentials');
       return;
     }
     
-    const [rows] = await dbPool.query('SELECT * FROM prestashop_credentials WHERE id = 1');
+    if (!appUserId) {
+      console.warn('User ID is required to load PrestaShop credentials');
+      return;
+    }
+    
+    const [rows] = await dbPool.query('SELECT * FROM prestashop_credentials WHERE app_user_id = ?', [appUserId]);
     
     if (rows.length > 0) {
       const row = rows[0];
@@ -701,6 +1072,9 @@ async function loadPrestashopCredentials() {
         prestashopCredentials.baseUrl = null;
         prestashopCredentials.apiKey = null;
       }
+    } else {
+      prestashopCredentials.baseUrl = null;
+      prestashopCredentials.apiKey = null;
     }
   } catch (error) {
     console.error('Error loading PrestaShop credentials from database:', error.message);
@@ -835,18 +1209,222 @@ async function extractCategoryNameFromPrestashop(productData) {
 }
 
 /**
- * Add a sync log entry
+ * Add a sync log entry to database (per-user)
+ * @param {object} entry - Log entry object
+ * @param {number} appUserId - Application user ID (required)
  */
-function addSyncLog(entry) {
-  const logEntry = {
-    ...entry,
-    timestamp: new Date().toISOString()
-  };
-  syncLogs.push(logEntry);
+async function addSyncLog(entry, appUserId) {
+  if (!appUserId) {
+    console.warn('addSyncLog called without appUserId, skipping log entry');
+    return;
+  }
 
-  // Enforce MAX_SYNC_LOGS limit
-  if (syncLogs.length > MAX_SYNC_LOGS) {
-    syncLogs = syncLogs.slice(-MAX_SYNC_LOGS);
+  try {
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot save sync log');
+      return;
+    }
+
+    const logEntry = {
+      ...entry,
+      timestamp: new Date().toISOString()
+    };
+
+    // Insert log entry into database
+    await dbPool.query(`
+      INSERT INTO sync_logs (
+        app_user_id, status, message, product_name, offer_id, 
+        prestashop_product_id, stock_change_from, stock_change_to,
+        allegro_price, prestashop_price, category_name, timestamp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      appUserId,
+      logEntry.status || 'info',
+      logEntry.message || '',
+      logEntry.productName || null,
+      logEntry.offerId || null,
+      logEntry.prestashopProductId || null,
+      logEntry.stockChange?.from ?? null,
+      logEntry.stockChange?.to ?? null,
+      logEntry.allegroPrice ?? null,
+      logEntry.prestashopPrice ?? null,
+      logEntry.categoryName || null,
+      logEntry.timestamp
+    ]);
+
+    // Clean up old logs for this user (keep last 1000 entries per user)
+    await dbPool.query(`
+      DELETE FROM sync_logs 
+      WHERE app_user_id = ? 
+      AND id NOT IN (
+        SELECT id FROM (
+          SELECT id FROM sync_logs 
+          WHERE app_user_id = ? 
+          ORDER BY timestamp DESC 
+          LIMIT 1000
+        ) AS keep_logs
+      )
+    `, [appUserId, appUserId]);
+  } catch (error) {
+    console.error('Error saving sync log to database:', error.message);
+    // Don't throw - logging failures shouldn't break sync
+  }
+}
+
+/**
+ * Load sync settings from database for a specific user
+ * @param {number} appUserId - Application user ID
+ * @returns {object} Sync settings object
+ */
+async function loadSyncSettings(appUserId) {
+  if (!appUserId) {
+    throw new Error('User ID is required to load sync settings');
+  }
+
+  try {
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot load sync settings');
+      return {
+        autoSyncEnabled: false,
+        syncIntervalMs: SYNC_INTERVAL_MS,
+        lastSyncTime: null,
+        nextSyncTime: null,
+        syncTimerActive: false
+      };
+    }
+
+    const [rows] = await dbPool.query(
+      'SELECT * FROM user_sync_settings WHERE app_user_id = ?',
+      [appUserId]
+    );
+
+    if (rows.length > 0) {
+      const row = rows[0];
+      return {
+        autoSyncEnabled: !!row.auto_sync_enabled,
+        syncIntervalMs: row.sync_interval_ms || SYNC_INTERVAL_MS,
+        lastSyncTime: row.last_sync_time ? new Date(row.last_sync_time).toISOString() : null,
+        nextSyncTime: row.next_sync_time ? new Date(row.next_sync_time).toISOString() : null,
+        syncTimerActive: !!row.sync_timer_active
+      };
+    } else {
+      // No settings found, return defaults
+      return {
+        autoSyncEnabled: false,
+        syncIntervalMs: SYNC_INTERVAL_MS,
+        lastSyncTime: null,
+        nextSyncTime: null,
+        syncTimerActive: false
+      };
+    }
+  } catch (error) {
+    console.error('Error loading sync settings from database:', error.message);
+    // Return defaults on error
+    return {
+      autoSyncEnabled: false,
+      syncIntervalMs: SYNC_INTERVAL_MS,
+      lastSyncTime: null,
+      nextSyncTime: null,
+      syncTimerActive: false
+    };
+  }
+}
+
+/**
+ * Save sync settings to database for a specific user
+ * @param {number} appUserId - Application user ID
+ * @param {object} settings - Sync settings object
+ */
+async function saveSyncSettings(appUserId, settings) {
+  if (!appUserId) {
+    throw new Error('User ID is required to save sync settings');
+  }
+
+  try {
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot save sync settings');
+      return;
+    }
+
+    const [result] = await dbPool.query(`
+      INSERT INTO user_sync_settings (
+        app_user_id, auto_sync_enabled, sync_interval_ms,
+        last_sync_time, next_sync_time, sync_timer_active, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, NOW())
+      ON DUPLICATE KEY UPDATE
+        auto_sync_enabled = VALUES(auto_sync_enabled),
+        sync_interval_ms = VALUES(sync_interval_ms),
+        last_sync_time = VALUES(last_sync_time),
+        next_sync_time = VALUES(next_sync_time),
+        sync_timer_active = VALUES(sync_timer_active),
+        updated_at = NOW()
+    `, [
+      appUserId,
+      settings.autoSyncEnabled ? 1 : 0,
+      settings.syncIntervalMs || SYNC_INTERVAL_MS,
+      settings.lastSyncTime || null,
+      settings.nextSyncTime || null,
+      settings.syncTimerActive ? 1 : 0
+    ]);
+
+    console.log(`✓ Saved sync settings for user ${appUserId}`);
+  } catch (error) {
+    console.error('Error saving sync settings to database:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Update sync state (lastSyncTime, nextSyncTime) in database
+ * @param {number} appUserId - Application user ID
+ * @param {object} state - State object with lastSyncTime and/or nextSyncTime
+ */
+async function updateSyncState(appUserId, state) {
+  if (!appUserId) {
+    return; // Silently skip if no user ID
+  }
+
+  try {
+    if (!dbPool) {
+      return; // Silently skip if database not initialized
+    }
+
+    const updates = [];
+    const params = [];
+
+    if (state.lastSyncTime !== undefined) {
+      updates.push('last_sync_time = ?');
+      params.push(state.lastSyncTime ? new Date(state.lastSyncTime).toISOString().slice(0, 19).replace('T', ' ') : null);
+    }
+
+    if (state.nextSyncTime !== undefined) {
+      updates.push('next_sync_time = ?');
+      params.push(state.nextSyncTime ? new Date(state.nextSyncTime).toISOString().slice(0, 19).replace('T', ' ') : null);
+    }
+
+    if (updates.length === 0) {
+      return; // Nothing to update
+    }
+
+    params.push(appUserId);
+
+    // First ensure the record exists
+    await dbPool.query(`
+      INSERT INTO user_sync_settings (app_user_id, auto_sync_enabled, sync_interval_ms, updated_at)
+      VALUES (?, 0, ?, NOW())
+      ON DUPLICATE KEY UPDATE updated_at = NOW()
+    `, [appUserId, SYNC_INTERVAL_MS]);
+
+    // Then update the state
+    await dbPool.query(`
+      UPDATE user_sync_settings
+      SET ${updates.join(', ')}, updated_at = NOW()
+      WHERE app_user_id = ?
+    `, params);
+  } catch (error) {
+    // Silently fail - state updates shouldn't break sync
+    console.error('Error updating sync state in database:', error.message);
   }
 }
 
@@ -854,11 +1432,17 @@ function addSyncLog(entry) {
 // File-based storage has been removed
 
 /**
- * Update category cache and save to file
+ * Update category cache for a specific user
  * Only saves valid category IDs (not 'creating' markers)
+ * @param {string} normalizedName - Normalized category name
+ * @param {number|string} categoryId - PrestaShop category ID
+ * @param {number} appUserId - Application user ID (required)
  */
-async function updateCategoryCache(normalizedName, categoryId) {
-  await CategoryCacheDB.set(normalizedName, categoryId);
+async function updateCategoryCache(normalizedName, categoryId, appUserId) {
+  if (!appUserId) {
+    throw new Error('User ID is required to update category cache.');
+  }
+  await CategoryCacheDB.set(normalizedName, categoryId, appUserId);
 }
 
 /**
@@ -867,17 +1451,23 @@ async function updateCategoryCache(normalizedName, categoryId) {
  */
 const ProductMappingsDB = {
   /**
-   * Get a product mapping by Allegro offer ID
+   * Get a product mapping by Allegro offer ID for a specific user
+   * @param {string} offerId - Allegro offer ID
+   * @param {number} appUserId - Application user ID (required)
    */
-  async get(offerId) {
+  async get(offerId, appUserId) {
     if (!dbPool) {
       throw new Error('Database connection not available. Product mappings require database.');
     }
 
+    if (!appUserId) {
+      throw new Error('User ID is required to get product mapping.');
+    }
+
     try {
       const [rows] = await dbPool.query(
-        'SELECT * FROM product_mappings WHERE allegro_offer_id = ? LIMIT 1',
-        [offerId.toString()]
+        'SELECT * FROM product_mappings WHERE allegro_offer_id = ? AND app_user_id = ? LIMIT 1',
+        [offerId.toString(), appUserId]
       );
 
       if (rows.length > 0) {
@@ -887,8 +1477,6 @@ const ProductMappingsDB = {
           syncedAt: rows[0].synced_at ? new Date(rows[0].synced_at).toISOString() : null,
           lastStockSync: rows[0].last_stock_sync ? new Date(rows[0].last_stock_sync).toISOString() : null
         };
-        // Update in-memory cache for fast access
-        productMappings[offerId.toString()] = mapping;
         return mapping;
       }
       return null;
@@ -899,26 +1487,31 @@ const ProductMappingsDB = {
   },
 
   /**
-   * Set a product mapping
+   * Set a product mapping for a specific user
+   * @param {string} offerId - Allegro offer ID
+   * @param {object} mapping - Mapping object
+   * @param {number} appUserId - Application user ID (required)
    */
-  async set(offerId, mapping) {
+  async set(offerId, mapping, appUserId) {
     if (!dbPool) {
       throw new Error('Database connection not available. Product mappings require database.');
     }
 
-    // Update in-memory cache for fast access
-    productMappings[offerId.toString()] = mapping;
+    if (!appUserId) {
+      throw new Error('User ID is required to set product mapping.');
+    }
 
     try {
       await dbPool.query(`
-        INSERT INTO product_mappings (allegro_offer_id, prestashop_product_id, synced_at, last_stock_sync)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO product_mappings (app_user_id, allegro_offer_id, prestashop_product_id, synced_at, last_stock_sync)
+        VALUES (?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           prestashop_product_id = VALUES(prestashop_product_id),
           synced_at = VALUES(synced_at),
           last_stock_sync = VALUES(last_stock_sync),
           updated_at = CURRENT_TIMESTAMP
       `, [
+        appUserId,
         offerId.toString(),
         mapping.prestashopProductId,
         mapping.syncedAt || null,
@@ -931,19 +1524,23 @@ const ProductMappingsDB = {
   },
 
   /**
-   * Delete a product mapping
+   * Delete a product mapping for a specific user
+   * @param {string} offerId - Allegro offer ID
+   * @param {number} appUserId - Application user ID (required)
    */
-  async delete(offerId) {
+  async delete(offerId, appUserId) {
     if (!dbPool) {
       throw new Error('Database connection not available. Product mappings require database.');
     }
 
-    delete productMappings[offerId.toString()];
+    if (!appUserId) {
+      throw new Error('User ID is required to delete product mapping.');
+    }
 
     try {
       await dbPool.query(
-        'DELETE FROM product_mappings WHERE allegro_offer_id = ?',
-        [offerId.toString()]
+        'DELETE FROM product_mappings WHERE allegro_offer_id = ? AND app_user_id = ?',
+        [offerId.toString(), appUserId]
       );
     } catch (error) {
       console.error('Database delete error for product mapping:', error.message);
@@ -952,15 +1549,20 @@ const ProductMappingsDB = {
   },
 
   /**
-   * Get all product mappings
+   * Get all product mappings for a specific user
+   * @param {number} appUserId - Application user ID (required)
    */
-  async getAll() {
+  async getAll(appUserId) {
     if (!dbPool) {
       throw new Error('Database connection not available. Product mappings require database.');
-      }
+    }
+
+    if (!appUserId) {
+      throw new Error('User ID is required to get all product mappings.');
+    }
 
     try {
-      const [rows] = await dbPool.query('SELECT * FROM product_mappings');
+      const [rows] = await dbPool.query('SELECT * FROM product_mappings WHERE app_user_id = ?', [appUserId]);
       const result = {};
       for (const row of rows) {
         result[row.allegro_offer_id] = {
@@ -970,87 +1572,115 @@ const ProductMappingsDB = {
           lastStockSync: row.last_stock_sync ? new Date(row.last_stock_sync).toISOString() : null
         };
       }
-      // Update in-memory cache
-      Object.assign(productMappings, result);
       return result;
-  } catch (error) {
+    } catch (error) {
       console.error('Database getAll error for product mappings:', error.message);
       throw error;
-  }
+    }
   },
 
-/**
-   * Load all mappings from database into memory
+  /**
+   * Load all mappings from database into memory for a specific user
+   * @param {number} appUserId - Application user ID (required)
    */
-  async loadAll() {
+  async loadAll(appUserId) {
     if (!dbPool) {
       console.warn('Database not connected. Product mappings will be empty until database is available.');
-      productMappings = {};
+      return;
+    }
+
+    if (!appUserId) {
+      console.warn('User ID is required to load product mappings.');
       return;
     }
 
     try {
-      const [rows] = await dbPool.query('SELECT * FROM product_mappings');
-      productMappings = {};
+      const [rows] = await dbPool.query('SELECT * FROM product_mappings WHERE app_user_id = ?', [appUserId]);
+      const userMappings = {};
       for (const row of rows) {
-        productMappings[row.allegro_offer_id] = {
+        userMappings[row.allegro_offer_id] = {
           prestashopProductId: row.prestashop_product_id,
           allegroOfferId: row.allegro_offer_id,
           syncedAt: row.synced_at ? new Date(row.synced_at).toISOString() : null,
           lastStockSync: row.last_stock_sync ? new Date(row.last_stock_sync).toISOString() : null
         };
       }
-      console.log(`✓ Loaded ${Object.keys(productMappings).length} product mappings from database`);
+      console.log(`✓ Loaded ${Object.keys(userMappings).length} product mappings for user ${appUserId} from database`);
+      return userMappings;
     } catch (error) {
       console.error('Error loading product mappings from database:', error.message);
-      productMappings = {};
+      return {};
     }
   }
 };
 
 /**
  * Database wrapper functions for Category Cache
- * Uses MariaDB/MySQL with proper indexes for fast performance
+ * Uses MariaDB/MySQL with proper indexes for fast performance (per-user)
  */
 const CategoryCacheDB = {
   /**
-   * Get a category ID by normalized name
+   * Get a category ID by normalized name for a specific user
+   * @param {string} normalizedName - Normalized category name
+   * @param {number} appUserId - Application user ID (required)
    */
-  async get(normalizedName) {
+  async get(normalizedName, appUserId) {
+    if (!appUserId) {
+      throw new Error('User ID is required to get category cache entry.');
+    }
+
     if (!dbPool) {
       // Return from in-memory cache if available
-      return categoryCache.get(normalizedName) || null;
-}
+      const userCache = categoryCache.get(appUserId);
+      return userCache ? (userCache.get(normalizedName) || null) : null;
+    }
 
     try {
       const [rows] = await dbPool.query(
-        'SELECT category_id FROM category_cache WHERE category_name = ? LIMIT 1',
-        [normalizedName]
+        'SELECT category_id FROM category_cache WHERE category_name = ? AND app_user_id = ? LIMIT 1',
+        [normalizedName, appUserId]
       );
 
       if (rows.length > 0) {
         const categoryId = rows[0].category_id;
         // Update in-memory cache
-        categoryCache.set(normalizedName, categoryId);
+        if (!categoryCache.has(appUserId)) {
+          categoryCache.set(appUserId, new Map());
+        }
+        categoryCache.get(appUserId).set(normalizedName, categoryId);
         return categoryId;
       }
       return null;
     } catch (error) {
       console.error('Database get error for category cache:', error.message);
       // Return from in-memory cache if available
-      return categoryCache.get(normalizedName) || null;
+      const userCache = categoryCache.get(appUserId);
+      return userCache ? (userCache.get(normalizedName) || null) : null;
     }
   },
 
   /**
-   * Set a category mapping
+   * Set a category mapping for a specific user
+   * @param {string} normalizedName - Normalized category name
+   * @param {number|string} categoryId - PrestaShop category ID
+   * @param {number} appUserId - Application user ID (required)
    */
-  async set(normalizedName, categoryId) {
+  async set(normalizedName, categoryId, appUserId) {
+    if (!appUserId) {
+      throw new Error('User ID is required to set category cache entry.');
+    }
+
     // Update in-memory cache
-  if (categoryId && categoryId !== 'creating' && !isNaN(categoryId)) {
-    categoryCache.set(normalizedName, categoryId);
-  } else if (categoryId === 'creating') {
-      categoryCache.set(normalizedName, 'creating');
+    if (categoryId && categoryId !== 'creating' && !isNaN(categoryId)) {
+      if (!categoryCache.has(appUserId)) {
+        categoryCache.set(appUserId, new Map());
+      }
+      categoryCache.get(appUserId).set(normalizedName, categoryId);
+    } else if (categoryId === 'creating') {
+      if (!categoryCache.has(appUserId)) {
+        categoryCache.set(appUserId, new Map());
+      }
+      categoryCache.get(appUserId).set(normalizedName, 'creating');
       return; // Don't save 'creating' markers to database
     } else {
       return;
@@ -1063,12 +1693,12 @@ const CategoryCacheDB = {
 
     try {
       await dbPool.query(`
-        INSERT INTO category_cache (category_name, category_id)
-        VALUES (?, ?)
+        INSERT INTO category_cache (app_user_id, category_name, category_id)
+        VALUES (?, ?, ?)
         ON DUPLICATE KEY UPDATE
           category_id = VALUES(category_id),
           updated_at = CURRENT_TIMESTAMP
-      `, [normalizedName, categoryId]);
+      `, [appUserId, normalizedName, categoryId]);
     } catch (error) {
       console.error('Database set error for category cache:', error.message);
       throw error;
@@ -1076,27 +1706,38 @@ const CategoryCacheDB = {
   },
 
   /**
-   * Load all categories from database into memory
+   * Load all categories from database into memory for a specific user
+   * @param {number} appUserId - Application user ID (required)
    */
-  async loadAll() {
+  async loadAll(appUserId) {
+    if (!appUserId) {
+      console.warn('User ID is required to load category cache.');
+      return;
+    }
+
     if (!dbPool) {
       console.warn('Database not connected. Category cache will be empty until database is available.');
-      categoryCache = new Map();
+      if (!categoryCache.has(appUserId)) {
+        categoryCache.set(appUserId, new Map());
+      }
       return;
     }
 
     try {
-      const [rows] = await dbPool.query('SELECT * FROM category_cache');
-      categoryCache = new Map();
+      const [rows] = await dbPool.query('SELECT * FROM category_cache WHERE app_user_id = ?', [appUserId]);
+      const userCache = new Map();
       for (const row of rows) {
-        categoryCache.set(row.category_name, row.category_id);
+        userCache.set(row.category_name, row.category_id);
       }
-      console.log(`✓ Loaded ${categoryCache.size} category mappings from database`);
+      categoryCache.set(appUserId, userCache);
+      console.log(`✓ Loaded ${userCache.size} category mappings for user ${appUserId} from database`);
     } catch (error) {
       console.error('Error loading category cache from database:', error.message);
-      categoryCache = new Map();
+      if (!categoryCache.has(appUserId)) {
+        categoryCache.set(appUserId, new Map());
+      }
+    }
   }
-}
 };
 
 // Initialize MariaDB database (creates DB and users table if they do not exist)
@@ -1105,16 +1746,10 @@ initDatabase()
   .then(async () => {
     console.log(`MariaDB database '${DB_NAME}' initialized`);
     
-    // Load configuration from database (after database is initialized)
-    await loadCredentials();
-    await loadTokens();
-    await loadPrestashopCredentials();
+    // Configuration is now loaded per-user on demand, not at startup
     
-    // Load product mappings from database (with proper indexes for fast performance)
-    await ProductMappingsDB.loadAll();
-    
-    // Load category cache from database
-    await CategoryCacheDB.loadAll();
+    // Product mappings and category cache are now loaded per-user on demand
+    // No need to load all at startup since they are user-specific
   })
   .catch((error) => {
     console.error('Error initializing MariaDB database:', error.message);
@@ -1213,7 +1848,7 @@ app.post('/api/login', async (req, res) => {
       [user.id]
     );
 
-    const token = createSession(user);
+    const token = createJWT(user);
 
     res.json({
       success: true,
@@ -1222,10 +1857,6 @@ app.post('/api/login', async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role
-      },
-      session: {
-        idleTimeoutMinutes: SESSION_IDLE_TIMEOUT_MS / 60000,
-        maxLifetimeMinutes: SESSION_MAX_LIFETIME_MS / 60000
       }
     });
   } catch (error) {
@@ -1240,24 +1871,20 @@ app.post('/api/login', async (req, res) => {
 /**
  * Logout endpoint
  */
-app.post('/api/logout', (req, res) => {
-  const authHeader = req.headers['authorization'] || '';
-  const token = authHeader.startsWith('Bearer ')
-    ? authHeader.substring(7)
-    : null;
-
-  invalidateSession(token);
-
+app.post('/api/logout', authMiddleware, (req, res) => {
+  // JWT is stateless, so logout is handled client-side by removing the token
+  // Server-side, we just confirm the request was authenticated
   res.json({
-    success: true
+    success: true,
+    message: 'Logged out successfully'
   });
 });
 
 /**
- * Validate session endpoint
- * - Validates the session token and updates lastActivity
- * - Returns user info if session is valid
- * - Used on browser refresh to keep session alive
+ * Validate JWT token endpoint
+ * - Validates the JWT token
+ * - Returns user info if token is valid
+ * - Used on browser refresh to verify authentication
  */
 app.get('/api/auth/validate', authMiddleware, (req, res) => {
   res.json({
@@ -1268,6 +1895,52 @@ app.get('/api/auth/validate', authMiddleware, (req, res) => {
       role: req.user.role
     }
   });
+});
+
+/**
+ * Get user's Allegro credentials from database
+ */
+app.get('/api/credentials', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    await loadCredentials(appUserId);
+    
+    res.json({
+      success: true,
+      credentials: {
+        clientId: userCredentials.clientId || null,
+        clientSecret: userCredentials.clientSecret ? '***' : null // Don't send actual secret
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get user's PrestaShop credentials from database
+ */
+app.get('/api/prestashop/credentials', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    await loadPrestashopCredentials(appUserId);
+    
+    res.json({
+      success: true,
+      credentials: {
+        baseUrl: prestashopCredentials.baseUrl || null,
+        apiKey: prestashopCredentials.apiKey ? '***' : null // Don't send actual key
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 /**
@@ -1555,21 +2228,25 @@ let visitorLogs = [];
 
 /**
  * Set user credentials
+ * @param {string} clientId - Allegro client ID
+ * @param {string} clientSecret - Allegro client secret
+ * @param {number} appUserId - Application user ID
  */
-async function setCredentials(clientId, clientSecret) {
+async function setCredentials(clientId, clientSecret, appUserId) {
   userCredentials.clientId = clientId;
   userCredentials.clientSecret = clientSecret;
   // Invalidate existing token when credentials change
   accessToken = null;
   tokenExpiry = null;
   // Save credentials to database
-  await saveCredentials();
+  await saveCredentials(appUserId);
 }
 
 /**
- * Get OAuth access token from Allegro
+ * Get OAuth access token from Allegro (client credentials)
+ * @param {number} appUserId - Optional application user ID for saving token
  */
-async function getAccessToken() {
+async function getAccessToken(appUserId = null) {
   try {
     // Check if token is still valid
     if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
@@ -1630,8 +2307,9 @@ async function getAccessToken() {
     const expiresIn = response.data.expires_in || 3600;
     tokenExpiry = Date.now() + (expiresIn - 60) * 1000;
 
-    // Save tokens to database
-    await saveTokens();
+    // NOTE: Client credentials tokens are NOT saved to database
+    // They are temporary and should only exist in memory
+    // Only user OAuth tokens (from authorization_code flow) are saved
 
     return accessToken;
   } catch (error) {
@@ -1654,33 +2332,22 @@ async function getAccessToken() {
 
 /**
  * Get user OAuth access token (refresh if needed)
- * Reloads tokens from file to ensure we're using the latest token
+ * Reloads tokens from database to ensure we're using the latest token
+ * @param {number} appUserId - Application user ID
  */
-async function getUserAccessToken() {
+async function getUserAccessToken(appUserId) {
   try {
+    if (!appUserId) {
+      throw new Error('User ID is required to get access token');
+    }
+    
+    // Load user's credentials first
+    await loadCredentials(appUserId);
+    
     // Reload tokens from database to ensure we have the latest token
     // This is important because tokens can be updated by OAuth callback
     // while the server is running
-    try {
-      if (dbPool) {
-        const [rows] = await dbPool.query('SELECT * FROM oauth_tokens WHERE id = 1');
-        if (rows.length > 0) {
-          const row = rows[0];
-          if (row.access_token || row.refresh_token) {
-            // Replace the entire object, don't merge, to ensure we get the latest values
-            userOAuthTokens = {
-              accessToken: row.access_token || null,
-              refreshToken: row.refresh_token || null,
-              expiresAt: row.expires_at || null,
-              userId: row.user_id || null
-            };
-          }
-        }
-      }
-    } catch (reloadError) {
-      // If reload fails, continue with in-memory token
-      console.warn('Warning: Could not reload tokens from database:', reloadError.message);
-    }
+    await loadTokens(appUserId);
 
     // Check if token is still valid
     if (userOAuthTokens.accessToken && userOAuthTokens.expiresAt && Date.now() < userOAuthTokens.expiresAt) {
@@ -1708,8 +2375,8 @@ async function getUserAccessToken() {
         const expiresIn = response.data.expires_in || 3600;
         userOAuthTokens.expiresAt = Date.now() + (expiresIn - 60) * 1000;
 
-        // Save tokens to database
-        await saveTokens();
+        // Save tokens to database with user_id
+        await saveTokens(appUserId);
 
         return userOAuthTokens.accessToken;
       } catch (refreshError) {
@@ -1721,7 +2388,7 @@ async function getUserAccessToken() {
           expiresAt: null,
           userId: null
         };
-        await saveTokens(); // Save cleared tokens
+        await saveTokens(appUserId); // Save cleared tokens
         throw new Error('Token refresh failed. Please reconnect your account.');
       }
     }
@@ -2186,9 +2853,18 @@ function buildProductPriceUpdateXml(productId, price) {
  *
  * If "data" is a string, it is sent as raw XML body.
  * If "data" is an object, it is sent as JSON.
+ * @param {string} endpoint - API endpoint path
+ * @param {string} method - HTTP method (GET, POST, PUT, PATCH, DELETE)
+ * @param {*} data - Request body data (string for XML, object for JSON)
+ * @param {number} appUserId - Optional application user ID to load per-user credentials
  */
-async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
+async function prestashopApiRequest(endpoint, method = 'GET', data = null, appUserId = null) {
   try {
+    // Load user-specific credentials if appUserId is provided
+    if (appUserId) {
+      await loadPrestashopCredentials(appUserId);
+    }
+    
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       throw new Error('PrestaShop credentials not configured');
     }
@@ -2381,21 +3057,24 @@ async function prestashopApiRequest(endpoint, method = 'GET', data = null) {
  * @param {boolean} useUserToken - Whether to use user OAuth token
  * @param {object} customHeaders - Custom headers to include in the request
  */
-async function allegroApiRequest(endpoint, params = {}, useUserToken = false, customHeaders = {}) {
+async function allegroApiRequest(endpoint, params = {}, useUserToken = false, customHeaders = {}, appUserId = null) {
   try {
     let token;
     
     if (useUserToken) {
       // Try to use user OAuth token first
+      if (!appUserId) {
+        throw new Error('User ID is required when using user token');
+      }
       try {
-        token = await getUserAccessToken();
+        token = await getUserAccessToken(appUserId);
       } catch (userTokenError) {
         // If user token is not available, throw error to indicate OAuth is required
         throw new Error('User OAuth authentication required');
       }
     } else {
-      // Use client credentials token
-      token = await getAccessToken();
+      // Use client credentials token (pass user_id if available)
+      token = await getAccessToken(appUserId);
     }
     
     // Log the actual request that will be made
@@ -2440,9 +3119,10 @@ async function allegroApiRequest(endpoint, params = {}, useUserToken = false, cu
 /**
  * Set credentials endpoint
  */
-app.post('/api/credentials', async (req, res) => {
+app.post('/api/credentials', authMiddleware, async (req, res) => {
   try {
     const { clientId, clientSecret } = req.body;
+    const appUserId = req.user.userId;
     
     if (!clientId || !clientSecret) {
       return res.status(400).json({
@@ -2451,7 +3131,10 @@ app.post('/api/credentials', async (req, res) => {
       });
     }
 
-    await setCredentials(clientId, clientSecret);
+    // Load user's existing credentials first
+    await loadCredentials(appUserId);
+    
+    await setCredentials(clientId, clientSecret, appUserId);
     
     res.json({
       success: true
@@ -2467,10 +3150,21 @@ app.post('/api/credentials', async (req, res) => {
 /**
  * Check if credentials are configured
  */
-app.get('/api/credentials/status', (req, res) => {
-  res.json({
-    configured: !!(userCredentials.clientId && userCredentials.clientSecret)
-  });
+app.get('/api/credentials/status', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    // Load user's credentials
+    await loadCredentials(appUserId);
+    
+    res.json({
+      configured: !!(userCredentials.clientId && userCredentials.clientSecret)
+    });
+  } catch (error) {
+    res.status(500).json({
+      configured: false,
+      error: error.message
+    });
+  }
 });
 
 /**
@@ -2486,54 +3180,91 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
+ * Helper function to construct OAuth redirect URI consistently
+ * This ensures the same redirect URI is used in both authorize and callback endpoints
+ */
+function getRedirectUri(req) {
+  // Use environment variable if set
+  if (process.env.OAUTH_REDIRECT_URI) {
+    return process.env.OAUTH_REDIRECT_URI;
+  }
+  
+  // Otherwise construct from request
+  // Try to get protocol from headers (for proxies/load balancers)
+  const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
+  
+  // Get host from request headers, fallback to localhost with PORT
+  let host = req.get('host');
+  if (!host) {
+    host = `localhost:${PORT}`;
+  }
+  
+  // Ensure protocol is correct (http for localhost, https for others if forwarded)
+  const finalProtocol = host.includes('localhost') ? 'http' : protocol;
+  
+  return `${finalProtocol}://${host}/api/oauth/callback`;
+}
+
+/**
  * OAuth Authorization endpoint - returns authorization URL for frontend to open
  */
-app.get('/api/oauth/authorize', (req, res) => {
-  if (!userCredentials.clientId) {
-    return res.status(400).json({
+app.get('/api/oauth/authorize', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    
+    // Load user's credentials
+    await loadCredentials(appUserId);
+    
+    if (!userCredentials.clientId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Client ID and Client Secret must be configured first'
+      });
+    }
+
+    // Generate state for CSRF protection and encode user_id
+    const randomState = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    // Encode user_id in state: format is "randomState|userId"
+    const state = `${randomState}|${appUserId}`;
+    
+    // Build redirect URI using helper function (ensures consistency)
+    const redirectUri = getRedirectUri(req);
+    
+    // Log redirect URI for debugging (important: this must match Allegro Developer Portal)
+    console.log(`[OAuth] Using redirect URI: ${redirectUri}`);
+    if (redirectUri.includes('localhost') && !process.env.OAUTH_REDIRECT_URI) {
+      console.warn(`[OAuth] WARNING: Using localhost redirect URI. Make sure "${redirectUri}" is registered in your Allegro Developer Portal app settings.`);
+    }
+    
+    const redirectUriEncoded = encodeURIComponent(redirectUri);
+    const clientId = encodeURIComponent(userCredentials.clientId);
+    const stateParam = encodeURIComponent(state);
+    
+    // Build authorization URL
+    // Note: Scope is determined by your app configuration in Allegro Developer Portal
+    // If you specify scope here, it must match what's configured in your app
+    // If not specified, Allegro will use the scopes configured for your app
+    let authUrl = `${ALLEGRO_AUTH_URL}/authorize?response_type=code&client_id=${clientId}&redirect_uri=${redirectUriEncoded}&state=${stateParam}`;
+    
+    // Optionally add scope if configured (check your app settings in Developer Portal)
+    // Common scopes: 'allegro:api:sale:offers:read' or leave empty to use app defaults
+    const requestedScope = process.env.OAUTH_SCOPE || ''; // Set OAUTH_SCOPE env var if needed
+    if (requestedScope) {
+      authUrl += `&scope=${encodeURIComponent(requestedScope)}`;
+    }
+    
+    // Return URL as JSON instead of redirecting (frontend will open it)
+    res.json({
+      success: true,
+      authUrl: authUrl,
+      redirectUri: redirectUri
+    });
+  } catch (error) {
+    res.status(500).json({
       success: false,
-      error: 'Client ID and Client Secret must be configured first'
+      error: error.message
     });
   }
-
-  // Generate state for CSRF protection
-  const state = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-  
-  // Build redirect URI - use environment variable or construct from request
-  // Default to the known server URL if available
-  let redirectUri;
-  if (process.env.OAUTH_REDIRECT_URI) {
-    redirectUri = process.env.OAUTH_REDIRECT_URI;
-  } else {
-    // Construct from request, but prefer http for local development
-    const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
-    const host = req.get('host') || `localhost:${PORT}`;
-    redirectUri = `${protocol}://${host}/api/oauth/callback`;
-  }
-  
-  const redirectUriEncoded = encodeURIComponent(redirectUri);
-  const clientId = encodeURIComponent(userCredentials.clientId);
-  const stateParam = encodeURIComponent(state);
-  
-  // Build authorization URL
-  // Note: Scope is determined by your app configuration in Allegro Developer Portal
-  // If you specify scope here, it must match what's configured in your app
-  // If not specified, Allegro will use the scopes configured for your app
-  let authUrl = `${ALLEGRO_AUTH_URL}/authorize?response_type=code&client_id=${clientId}&redirect_uri=${redirectUriEncoded}&state=${stateParam}`;
-  
-  // Optionally add scope if configured (check your app settings in Developer Portal)
-  // Common scopes: 'allegro:api:sale:offers:read' or leave empty to use app defaults
-  const requestedScope = process.env.OAUTH_SCOPE || ''; // Set OAUTH_SCOPE env var if needed
-  if (requestedScope) {
-    authUrl += `&scope=${encodeURIComponent(requestedScope)}`;
-  }
-  
-  // Return URL as JSON instead of redirecting (frontend will open it)
-  res.json({
-    success: true,
-    authUrl: authUrl,
-    redirectUri: redirectUri
-  });
 });
 
 /**
@@ -2543,16 +3274,53 @@ app.get('/api/oauth/authorize', (req, res) => {
  */
 app.get('/api/oauth/callback', async (req, res) => {
   try {
-    const { code, state, error } = req.query;
+    const { code, state, error, error_description } = req.query;
     
     if (error) {
+      // Build redirect URI to show in error message using helper function
+      const redirectUri = getRedirectUri(req);
+      
+      // Provide helpful error messages for common OAuth errors
+      let errorMessage = error;
+      let helpText = '';
+      
+      if (error === 'redirect_uri_mismatch' || error === 'invalid_request') {
+        errorMessage = 'Redirect URI Mismatch';
+        helpText = `
+          <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 5px; padding: 20px; margin: 20px 0; text-align: left; max-width: 600px; margin-left: auto; margin-right: auto;">
+            <h3 style="margin-top: 0; color: #856404;">How to Fix This:</h3>
+            <p><strong>The redirect URI must be exactly registered in your Allegro Developer Portal.</strong></p>
+            <p><strong>Current redirect URI:</strong> <code style="background: #f8f9fa; padding: 2px 6px; border-radius: 3px;">${redirectUri}</code></p>
+            <ol style="text-align: left; padding-left: 20px;">
+              <li>Go to <a href="https://developer.allegro.pl/" target="_blank">Allegro Developer Portal</a></li>
+              <li>Open your application settings</li>
+              <li>Find the "Redirect URIs" or "Callback URLs" section</li>
+              <li>Add this exact URL: <code style="background: #f8f9fa; padding: 2px 6px; border-radius: 3px;">${redirectUri}</code></li>
+              <li>Save the changes</li>
+              <li>Try authorizing again</li>
+            </ol>
+            <p style="margin-bottom: 0;"><strong>Alternative:</strong> If you're using a different redirect URI in production, set the <code>OAUTH_REDIRECT_URI</code> environment variable to match what's registered in Allegro.</p>
+          </div>
+        `;
+      } else if (error_description) {
+        helpText = `<p style="color: #666;">${error_description}</p>`;
+      }
+      
       return res.send(`
         <html>
-          <head><title>Authorization Failed</title></head>
-          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-            <h1>Authorization Failed</h1>
-            <p>${error}</p>
-            <p><a href="/">Return to application</a></p>
+          <head>
+            <title>Authorization Failed</title>
+            <style>
+              body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+              h1 { color: #dc3545; }
+              code { background: #f8f9fa; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; }
+            </style>
+          </head>
+          <body>
+            <h1>❌ Authorization Failed</h1>
+            <h2>${errorMessage}</h2>
+            ${helpText}
+            <p><a href="/" style="display: inline-block; margin-top: 20px; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px;">Return to Application</a></p>
           </body>
         </html>
       `);
@@ -2571,6 +3339,32 @@ app.get('/api/oauth/callback', async (req, res) => {
       `);
     }
     
+    // Extract user_id from state parameter (format: "randomState|userId")
+    let appUserId = null;
+    if (state && state.includes('|')) {
+      const parts = state.split('|');
+      appUserId = parseInt(parts[1], 10);
+      if (isNaN(appUserId)) {
+        appUserId = null;
+      }
+    }
+    
+    if (!appUserId) {
+      return res.send(`
+        <html>
+          <head><title>Authorization Failed</title></head>
+          <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1>Authorization Failed</h1>
+            <p>Invalid state parameter. Please try again.</p>
+            <p><a href="/">Return to application</a></p>
+          </body>
+        </html>
+      `);
+    }
+    
+    // Load user's credentials
+    await loadCredentials(appUserId);
+    
     if (!userCredentials.clientId || !userCredentials.clientSecret) {
       return res.send(`
         <html>
@@ -2585,15 +3379,8 @@ app.get('/api/oauth/callback', async (req, res) => {
     }
     
     // Exchange authorization code for tokens
-    // Use the same redirect URI construction as in authorize endpoint
-    let redirectUri;
-    if (process.env.OAUTH_REDIRECT_URI) {
-      redirectUri = process.env.OAUTH_REDIRECT_URI;
-    } else {
-      const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
-      const host = req.get('host') || `localhost:${PORT}`;
-      redirectUri = `${protocol}://${host}/api/oauth/callback`;
-    }
+    // Use the same redirect URI helper function as in authorize endpoint (ensures consistency)
+    const redirectUri = getRedirectUri(req);
     
     const credentials = Buffer.from(`${userCredentials.clientId}:${userCredentials.clientSecret}`).toString('base64');
     
@@ -2627,8 +3414,14 @@ app.get('/api/oauth/callback', async (req, res) => {
       } catch (userInfoError) {
       }
       
-      // Save tokens to database (persistent storage)
-      await saveTokens();
+      // Save tokens to database (persistent storage) with user_id
+      try {
+        await saveTokens(appUserId);
+      } catch (saveError) {
+        console.error('Failed to save OAuth tokens to database:', saveError);
+        // Still show success page since OAuth worked, but log the database error
+        // The tokens are in memory and will work for this session
+      }
       
       // Redirect to success page
       return res.send(`
@@ -2643,8 +3436,10 @@ app.get('/api/oauth/callback', async (req, res) => {
             </script>
           </head>
           <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
-            <h1 style="color: green;">✓ Authorization Successful!</h1>
-            <p>Your account has been connected. This window will close automatically.</p>
+            <h1 style="color: green;">✓ Allegro Account Connected Successfully!</h1>
+            <p>Your Allegro account has been authorized and connected to PrestaShop integration.</p>
+            <p>You can now sync offers, import products, and manage your inventory.</p>
+            <p>This window will close automatically.</p>
             <p>If it doesn't close, <a href="/">click here to return to the application</a></p>
           </body>
         </html>
@@ -2681,15 +3476,21 @@ app.get('/api/oauth/callback', async (req, res) => {
  * Check OAuth connection status
  * Attempts to refresh token if expired but refresh token exists
  */
-app.get('/api/oauth/status', async (req, res) => {
+app.get('/api/oauth/status', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
+    
+    // Load user's tokens and credentials
+    await loadTokens(appUserId);
+    await loadCredentials(appUserId);
+    
     // Check if token is still valid
     let isConnected = !!(userOAuthTokens.accessToken && userOAuthTokens.expiresAt && Date.now() < userOAuthTokens.expiresAt);
     
     // If token is expired but we have a refresh token, try to refresh
     if (!isConnected && userOAuthTokens.refreshToken && userCredentials.clientId && userCredentials.clientSecret) {
       try {
-        await getUserAccessToken(); // This will refresh the token if needed
+        await getUserAccessToken(appUserId); // This will refresh the token if needed
         isConnected = !!(userOAuthTokens.accessToken && userOAuthTokens.expiresAt && Date.now() < userOAuthTokens.expiresAt);
       } catch (refreshError) {
         // Refresh failed - token is not connected
@@ -2713,31 +3514,77 @@ app.get('/api/oauth/status', async (req, res) => {
 });
 
 /**
+ * Disconnect Allegro credentials (clear credentials from database)
+ */
+app.post('/api/credentials/disconnect', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    
+    // Clear credentials from memory
+    userCredentials.clientId = null;
+    userCredentials.clientSecret = null;
+    accessToken = null;
+    tokenExpiry = null;
+    
+    // Delete credentials from database for this user
+    if (dbPool) {
+      try {
+        await dbPool.query('DELETE FROM allegro_credentials WHERE app_user_id = ?', [appUserId]);
+        console.log(`✓ Deleted Allegro credentials for user ${appUserId}`);
+      } catch (error) {
+        console.error('Error deleting Allegro credentials from database:', error.message);
+        throw error;
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Allegro credentials disconnected successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * Disconnect OAuth (clear user tokens)
  */
-app.post('/api/oauth/disconnect', async (req, res) => {
-  userOAuthTokens = {
-    accessToken: null,
-    refreshToken: null,
-    expiresAt: null,
-    userId: null
-  };
-  
-  // Save cleared tokens to database
-  await saveTokens();
-  
-  res.json({
-    success: true,
-    message: 'Disconnected successfully'
-  });
+app.post('/api/oauth/disconnect', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    
+    userOAuthTokens = {
+      accessToken: null,
+      refreshToken: null,
+      expiresAt: null,
+      userId: null
+    };
+    
+    // Save cleared tokens to database with user_id
+    await saveTokens(appUserId);
+    
+    res.json({
+      success: true,
+      message: 'Disconnected successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 /**
  * Get user's own offers from Allegro
  * Uses user OAuth token to fetch user's own offers
  */
-app.get('/api/offers', async (req, res) => {
+app.get('/api/offers', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
     let { limit = 20, offset = 0, sellerId, status } = req.query;
     
     // Validate and cap limit
@@ -2787,7 +3634,7 @@ app.get('/api/offers', async (req, res) => {
         }
       }
       
-      const data = await allegroApiRequest('/sale/offers', params, true); // Use user token
+      const data = await allegroApiRequest('/sale/offers', params, true, {}, appUserId); // Use user token
 
       // Log sample offer structure to debug (without extra detail calls)
       if (data.offers && data.offers.length > 0) {
@@ -2928,13 +3775,14 @@ app.get('/api/offers', async (req, res) => {
  * Uses user OAuth token to access own offers
  * Updated to use /sale/product-offers/{offerId} (old /sale/offers/{offerId} was deprecated in 2024)
  */
-app.get('/api/offers/:offerId', async (req, res) => {
+app.get('/api/offers/:offerId', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
     const { offerId } = req.params;
     
     // Use the new /sale/product-offers/{offerId} endpoint
     // The old /sale/offers/{offerId} endpoint was deprecated and removed in 2024
-    const data = await allegroApiRequest(`/sale/product-offers/${offerId}`, {}, true); // Use user token
+    const data = await allegroApiRequest(`/sale/product-offers/${offerId}`, {}, true, {}, appUserId); // Use user token
     
     res.json({
       success: true,
@@ -2986,8 +3834,9 @@ app.get('/api/offers/:offerId', async (req, res) => {
  * - GET /sale/product-offers/{offerId} - Get product data from offer ID (includes images, description, details)
  * - GET /sale/products/{productId} - Get product details by product ID (UUID)
  */
-app.get('/api/products/:productId', async (req, res) => {
+app.get('/api/products/:productId', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
     const { productId } = req.params;
     const { language, 'category.id': categoryId } = req.query;
     const acceptLanguage = req.headers['accept-language'];
@@ -3035,7 +3884,7 @@ app.get('/api/products/:productId', async (req, res) => {
       // This endpoint provides all needed information: images, description, details
       // Note: This endpoint only works for offers that belong to the authenticated user
       try {
-        const data = await allegroApiRequest(`/sale/product-offers/${productId}`, params, true, customHeaders);
+        const data = await allegroApiRequest(`/sale/product-offers/${productId}`, params, true, customHeaders, appUserId);
         
         return res.json({
           success: true,
@@ -3088,7 +3937,7 @@ app.get('/api/products/:productId', async (req, res) => {
     }
     
     // Make API request with user token (required for product details)
-    const data = await allegroApiRequest(`/sale/products/${productId}`, params, true, customHeaders);
+    const data = await allegroApiRequest(`/sale/products/${productId}`, params, true, customHeaders, appUserId);
     
     res.json({
       success: true,
@@ -3203,9 +4052,14 @@ app.get('/api/categories/:categoryId', async (req, res) => {
 /**
  * Test authentication
  */
-app.get('/api/test-auth', async (req, res) => {
+app.get('/api/test-auth', authMiddleware, async (req, res) => {
   try {
-    const token = await getAccessToken();
+    const appUserId = req.user.userId;
+    
+    // Load user's credentials
+    await loadCredentials(appUserId);
+    
+    const token = await getAccessToken(appUserId);
     res.json({
       success: true
     });
@@ -3230,9 +4084,10 @@ app.get('/api/test-auth', async (req, res) => {
 /**
  * Configure PrestaShop credentials
  */
-app.post('/api/prestashop/configure', async (req, res) => {
+app.post('/api/prestashop/configure', authMiddleware, async (req, res) => {
   try {
     const { baseUrl, apiKey } = req.body;
+    const appUserId = req.user.userId;
     
     // Validate that both values exist and are non-empty strings (after trimming)
     const trimmedBaseUrl = baseUrl ? String(baseUrl).trim() : '';
@@ -3248,7 +4103,7 @@ app.post('/api/prestashop/configure', async (req, res) => {
     prestashopCredentials.baseUrl = trimmedBaseUrl;
     prestashopCredentials.apiKey = trimmedApiKey;
     
-    await savePrestashopCredentials();
+    await savePrestashopCredentials(appUserId);
     
     res.json({
       success: true,
@@ -3265,64 +4120,28 @@ app.post('/api/prestashop/configure', async (req, res) => {
 /**
  * Disconnect PrestaShop (clear all configuration from database)
  */
-app.post('/api/prestashop/disconnect', async (req, res) => {
+app.post('/api/prestashop/disconnect', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
+    
     // Clear PrestaShop credentials
     prestashopCredentials.baseUrl = null;
     prestashopCredentials.apiKey = null;
     
-    // Clear PrestaShop credentials from database
+    // Delete credentials from database for this user
     if (dbPool) {
       try {
-        await dbPool.query('UPDATE prestashop_credentials SET base_url = NULL, api_key = NULL, updated_at = NOW() WHERE id = 1');
+        await dbPool.query('DELETE FROM prestashop_credentials WHERE app_user_id = ?', [appUserId]);
+        console.log(`✓ Deleted PrestaShop credentials for user ${appUserId}`);
       } catch (error) {
-        console.error('Error clearing PrestaShop credentials from database:', error.message);
-      }
-    }
-    
-    // Clear Allegro credentials from database
-    if (dbPool) {
-      try {
-        await dbPool.query('UPDATE allegro_credentials SET client_id = NULL, client_secret = NULL, updated_at = NOW() WHERE id = 1');
-        // Also clear in-memory credentials
-        userCredentials.clientId = null;
-        userCredentials.clientSecret = null;
-      } catch (error) {
-        console.error('Error clearing Allegro credentials from database:', error.message);
-      }
-    }
-    
-    // Clear tokens from database
-    if (dbPool) {
-      try {
-        await dbPool.query(`
-          UPDATE oauth_tokens SET
-            access_token = NULL,
-            refresh_token = NULL,
-            expires_at = NULL,
-            user_id = NULL,
-            client_access_token = NULL,
-            client_token_expiry = NULL,
-            updated_at = NOW()
-          WHERE id = 1
-        `);
-        // Also clear in-memory tokens
-        userOAuthTokens = {
-          accessToken: null,
-          refreshToken: null,
-          expiresAt: null,
-          userId: null
-        };
-        accessToken = null;
-        tokenExpiry = null;
-      } catch (error) {
-        console.error('Error clearing tokens from database:', error.message);
+        console.error('Error deleting PrestaShop credentials from database:', error.message);
+        throw error;
       }
     }
     
     res.json({
       success: true,
-      message: 'All configuration cleared successfully from database'
+      message: 'PrestaShop disconnected successfully'
     });
   } catch (error) {
     res.status(500).json({
@@ -3335,23 +4154,39 @@ app.post('/api/prestashop/disconnect', async (req, res) => {
 /**
  * Get PrestaShop configuration status
  */
-app.get('/api/prestashop/status', (req, res) => {
-  // Check if both values exist and are non-empty strings (after trimming)
-  const baseUrl = prestashopCredentials.baseUrl ? String(prestashopCredentials.baseUrl).trim() : '';
-  const apiKey = prestashopCredentials.apiKey ? String(prestashopCredentials.apiKey).trim() : '';
-  const configured = !!(baseUrl && apiKey);
-  
-  res.json({
-    configured: configured,
-    baseUrl: configured ? baseUrl : null
-  });
+app.get('/api/prestashop/status', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    // Load user's PrestaShop credentials
+    await loadPrestashopCredentials(appUserId);
+    
+    // Check if both values exist and are non-empty strings (after trimming)
+    const baseUrl = prestashopCredentials.baseUrl ? String(prestashopCredentials.baseUrl).trim() : '';
+    const apiKey = prestashopCredentials.apiKey ? String(prestashopCredentials.apiKey).trim() : '';
+    const configured = !!(baseUrl && apiKey);
+    
+    res.json({
+      configured: configured,
+      baseUrl: configured ? baseUrl : null
+    });
+  } catch (error) {
+    res.status(500).json({
+      configured: false,
+      error: error.message
+    });
+  }
 });
 
 /**
  * Test PrestaShop connection
  */
-app.get('/api/prestashop/test', async (req, res) => {
+app.get('/api/prestashop/test', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
+    
+    // Load user's PrestaShop credentials
+    await loadPrestashopCredentials(appUserId);
+    
     if (!prestashopCredentials.baseUrl || !prestashopCredentials.apiKey) {
       return res.status(400).json({
         success: false,
@@ -3484,7 +4319,7 @@ app.get('/api/prestashop/test', async (req, res) => {
  * Returns category ID if found, null otherwise
  * Always checks PrestaShop directly to avoid stale cache issues
  */
-async function findCategoryByNameAndParent(categoryName, idParent = null) {
+async function findCategoryByNameAndParent(categoryName, idParent = null, appUserId = null) {
   try {
     // Normalize category name (remove accents, collapse spaces, lowercase)
     const normalizedName = categoryName
@@ -3509,7 +4344,9 @@ async function findCategoryByNameAndParent(categoryName, idParent = null) {
         // Request id, name, and id_parent to check both name and parent
         const data = await prestashopApiRequest(
           `categories?display=[id,name,id_parent]&limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`,
-          'GET'
+          'GET',
+          null,
+          appUserId
         );
         
         // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
@@ -3624,9 +4461,10 @@ async function findCategoryByNameAndParent(categoryName, idParent = null) {
  * Find matching category in PrestaShop by traversing category path from root to leaf
  * Returns the deepest (lowest-layer) matching category ID found, or null if no match
  * @param {Array} categoryPath - Array of category objects with {id, name} from root to leaf
+ * @param {number} appUserId - Optional application user ID to use per-user credentials
  * @returns {Promise<number|null>} - Category ID if found, null otherwise
  */
-async function findMatchingCategoryByPath(categoryPath) {
+async function findMatchingCategoryByPath(categoryPath, appUserId = null) {
   if (!categoryPath || !Array.isArray(categoryPath) || categoryPath.length === 0) {
     return null;
   }
@@ -3646,7 +4484,7 @@ async function findMatchingCategoryByPath(categoryPath) {
       }
 
       // Try to find this category level in PrestaShop under the current parent
-      const foundCategoryId = await findCategoryByNameAndParent(categoryName, currentParentId);
+      const foundCategoryId = await findCategoryByNameAndParent(categoryName, currentParentId, appUserId);
 
       if (foundCategoryId && !isNaN(foundCategoryId)) {
         // Found a match at this level, continue to next level
@@ -3804,22 +4642,26 @@ async function findCategoryByName(categoryName) {
  * Find existing product by reference (Allegro offer ID) in PrestaShop
  * Returns product ID if found, null otherwise
  */
-async function findProductByReference(reference) {
+async function findProductByReference(reference, appUserId) {
+  if (!appUserId) {
+    throw new Error('User ID is required to find product by reference');
+  }
+
   try {
     // First check if we have a mapping for this reference
-    const mapping = await ProductMappingsDB.get(reference);
+    const mapping = await ProductMappingsDB.get(reference, appUserId);
     if (mapping) {
       const existingProductId = mapping.prestashopProductId;
       
       // Verify the product still exists in PrestaShop
       try {
-        await prestashopApiRequest(`products/${existingProductId}`, 'GET');
+        await prestashopApiRequest(`products/${existingProductId}`, 'GET', null, appUserId);
         console.log(`Found product in mapping cache: reference "${reference}" -> PrestaShop ID ${existingProductId}`);
         return existingProductId; // Product exists, return its ID
       } catch (verifyError) {
         // Product doesn't exist anymore, remove from mapping
         console.log(`Product ${existingProductId} no longer exists in PrestaShop, removing from mapping`);
-        await ProductMappingsDB.delete(reference);
+        await ProductMappingsDB.delete(reference, appUserId);
       }
     }
     
@@ -3839,7 +4681,7 @@ async function findProductByReference(reference) {
     
     for (const filterUrl of filterAttempts) {
       try {
-        data = await prestashopApiRequest(filterUrl, 'GET');
+        data = await prestashopApiRequest(filterUrl, 'GET', null, appUserId);
         if (data) {
           break; // Success, exit loop
         }
@@ -3854,7 +4696,7 @@ async function findProductByReference(reference) {
       // This is a fallback - only use if reference search fails
       console.log(`PrestaShop filter API failed, trying fallback search for reference "${reference}"`);
       try {
-        data = await prestashopApiRequest('products?limit=1000', 'GET');
+        data = await prestashopApiRequest('products?limit=1000', 'GET', null, appUserId);
       } catch (fallbackError) {
         console.error('Fallback product search also failed:', fallbackError.message);
         return null;
@@ -3886,7 +4728,7 @@ async function findProductByReference(reference) {
             prestashopProductId: productId,
             allegroOfferId: reference,
             syncedAt: new Date().toISOString()
-          });
+          }, appUserId);
           return productId;
         }
       }
@@ -3938,9 +4780,10 @@ app.get('/api/prestashop/categories', async (req, res) => {
 /**
  * Create category in PrestaShop
  */
-app.post('/api/prestashop/categories', async (req, res) => {
+app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
   try {
     const { name, idParent = 2, active = 1 } = req.body;
+    const appUserId = req.user.userId;
     
     if (!name) {
       return res.status(400).json({
@@ -3949,9 +4792,30 @@ app.post('/api/prestashop/categories', async (req, res) => {
       });
     }
 
-    // Always check existing categories directly in PrestaShop by name AND parent
+    // Load user's PrestaShop credentials before making any API calls
+    await loadPrestashopCredentials(appUserId);
+
+    // Normalize category name for cache lookup
+    const normalizedName = name
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Check cache first (per-user)
+    let existingCategoryId = await CategoryCacheDB.get(normalizedName, appUserId);
+    
+    // If not in cache, check PrestaShop directly by name AND parent
     // This prevents duplicates when the same category name exists under different parents
-    let existingCategoryId = await findCategoryByNameAndParent(name, idParent);
+    if (!existingCategoryId || isNaN(existingCategoryId)) {
+      existingCategoryId = await findCategoryByNameAndParent(name, idParent, appUserId);
+      
+      // If found in PrestaShop, update cache
+      if (existingCategoryId && !isNaN(existingCategoryId)) {
+        await updateCategoryCache(normalizedName, existingCategoryId, appUserId);
+      }
+    }
 
     // If we found a matching category with the same name AND parent, just return it
     if (existingCategoryId && !isNaN(existingCategoryId)) {
@@ -3978,7 +4842,15 @@ app.post('/api/prestashop/categories', async (req, res) => {
     };
 
     const xmlBody = buildCategoryXml(categoryData);
-    const data = await prestashopApiRequest('categories', 'POST', xmlBody);
+    const data = await prestashopApiRequest('categories', 'POST', xmlBody, appUserId);
+
+    // Extract the created category ID
+    const createdCategoryId = data.category?.id || data.id;
+    
+    // Save to cache (per-user)
+    if (createdCategoryId && !isNaN(createdCategoryId)) {
+      await updateCategoryCache(normalizedName, createdCategoryId, appUserId);
+    }
 
     res.json({
       success: true,
@@ -3996,9 +4868,10 @@ app.post('/api/prestashop/categories', async (req, res) => {
 /**
  * Create product in PrestaShop
  */
-app.post('/api/prestashop/products', async (req, res) => {
+app.post('/api/prestashop/products', authMiddleware, async (req, res) => {
   try {
     let { offer, categoryId, categories } = req.body;
+    const appUserId = req.user.userId;
     
     if (!offer || !offer.id || !offer.name) {
       return res.status(400).json({
@@ -4006,6 +4879,9 @@ app.post('/api/prestashop/products', async (req, res) => {
         error: 'Invalid offer data'
       });
     }
+
+    // Load user's PrestaShop credentials before making any API calls
+    await loadPrestashopCredentials(appUserId);
 
     // Allegro has blocked direct access to /sale/offers/{id} resources,
     // so we now rely solely on the offer object passed from the client.
@@ -4060,7 +4936,7 @@ app.post('/api/prestashop/products', async (req, res) => {
           // 2. If path not found, try to fetch from Allegro API
           if (!categoryPath) {
             // Fetch category data to get parent path
-            const allegroCategory = await allegroApiRequest(`/sale/categories/${offer.category.id}`);
+            const allegroCategory = await allegroApiRequest(`/sale/categories/${offer.category.id}`, {}, false, {}, appUserId);
             if (allegroCategory && allegroCategory.parent) {
               // Build path by traversing parent chain
               categoryPath = [];
@@ -4068,7 +4944,7 @@ app.post('/api/prestashop/products', async (req, res) => {
               while (currentCat) {
                 categoryPath.unshift({ id: currentCat.id, name: currentCat.name });
                 if (currentCat.parent && currentCat.parent.id) {
-                  currentCat = await allegroApiRequest(`/sale/categories/${currentCat.parent.id}`);
+                  currentCat = await allegroApiRequest(`/sale/categories/${currentCat.parent.id}`, {}, false, {}, appUserId);
                 } else {
                   break;
                 }
@@ -4082,7 +4958,7 @@ app.post('/api/prestashop/products', async (req, res) => {
         
         // If we have a category path, try to find matching category in PrestaShop
         if (categoryPath && categoryPath.length > 0) {
-          const matchedCategoryId = await findMatchingCategoryByPath(categoryPath);
+          const matchedCategoryId = await findMatchingCategoryByPath(categoryPath, appUserId);
           if (matchedCategoryId && !isNaN(matchedCategoryId)) {
             finalCategoryId = matchedCategoryId;
             const pathNames = categoryPath.map(p => p.name).join(' > ');
@@ -4104,7 +4980,7 @@ app.post('/api/prestashop/products', async (req, res) => {
     }
     
     // Check if product already exists in PrestaShop before creating
-    let existingProductId = await findProductByReference(offer.id.toString());
+    let existingProductId = await findProductByReference(offer.id.toString(), appUserId);
     let prestashopProductId = null;
     let isNewProduct = false;
     
@@ -4112,7 +4988,7 @@ app.post('/api/prestashop/products', async (req, res) => {
     if (existingProductId) {
       try {
         // Verify the product actually exists and has the correct reference
-        const verifyProduct = await prestashopApiRequest(`products/${existingProductId}`, 'GET');
+        const verifyProduct = await prestashopApiRequest(`products/${existingProductId}`, 'GET', null, appUserId);
         const productRef = verifyProduct.product?.reference || verifyProduct.reference;
         if (productRef && productRef.toString() === offer.id.toString()) {
           prestashopProductId = existingProductId;
@@ -4195,7 +5071,7 @@ app.post('/api/prestashop/products', async (req, res) => {
 
       // Create product (send XML body)
       const productXml = buildProductXml(productData);
-      const productResponse = await prestashopApiRequest('products', 'POST', productXml);
+      const productResponse = await prestashopApiRequest('products', 'POST', productXml, appUserId);
       // PrestaShop returns: { product: { id: ... } } or { id: ... }
       if (productResponse.product) {
         prestashopProductId = productResponse.product.id;
@@ -4216,13 +5092,13 @@ app.post('/api/prestashop/products', async (req, res) => {
         prestashopProductId: prestashopProductId,
         allegroOfferId: offer.id.toString(),
         syncedAt: new Date().toISOString()
-      });
+      }, appUserId);
     }
 
     // Update stock
     try {
       // Get stock available ID for the product (filter by id_product_attribute=0 to get base product stock)
-      const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET');
+      const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET', null, appUserId);
       let stockAvailableId = null;
       
       if (stockData.stock_availables) {
@@ -4247,7 +5123,7 @@ app.post('/api/prestashop/products', async (req, res) => {
           id_product: prestashopProductId,
           out_of_stock: finalStock === 0 ? 1 : 2 // Allow orders when stock is 0, deny when stock > 0
         });
-        await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', stockXml);
+        await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', stockXml, appUserId);
       } else {
         // Stock entry doesn't exist - PrestaShop API doesn't allow POST for stock_availables
         // Stock entries should be created automatically when products are created
@@ -4382,12 +5258,12 @@ app.post('/api/prestashop/products', async (req, res) => {
       prestashopProductId: prestashopProductId,
       allegroOfferId: offerIdStr,
       syncedAt: new Date().toISOString()
-    });
+    }, appUserId);
 
     // Fetch full product details from PrestaShop to return to frontend
     let fullProductDetails = null;
     try {
-      const productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET');
+      const productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
       // PrestaShop returns: { product: {...} } or { products: [{ product: {...} }] }
       if (productData.product) {
         fullProductDetails = productData.product;
@@ -4580,13 +5456,14 @@ app.put('/api/prestashop/products/:productId/stock', async (req, res) => {
 /**
  * Get product mappings
  */
-app.get('/api/prestashop/mappings', async (req, res) => {
+app.get('/api/prestashop/mappings', authMiddleware, async (req, res) => {
   try {
-    const mappings = await ProductMappingsDB.getAll();
-  res.json({
-    success: true,
+    const appUserId = req.user.userId;
+    const mappings = await ProductMappingsDB.getAll(appUserId);
+    res.json({
+      success: true,
       mappings: mappings
-  });
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -4598,8 +5475,9 @@ app.get('/api/prestashop/mappings', async (req, res) => {
 /**
  * Sync stock from Allegro to PrestaShop
  */
-app.post('/api/prestashop/sync/stock', async (req, res) => {
+app.post('/api/prestashop/sync/stock', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
     const { offerId, quantity } = req.body;
     
     if (!offerId || quantity === undefined) {
@@ -4610,7 +5488,7 @@ app.post('/api/prestashop/sync/stock', async (req, res) => {
     }
 
     // Find PrestaShop product ID from mapping
-    const mapping = await ProductMappingsDB.get(offerId);
+    const mapping = await ProductMappingsDB.get(offerId, appUserId);
     if (!mapping || !mapping.prestashopProductId) {
       return res.status(404).json({
         success: false,
@@ -4618,8 +5496,13 @@ app.post('/api/prestashop/sync/stock', async (req, res) => {
       });
     }
 
+    // Load user's Allegro and PrestaShop credentials before making API calls
+    await loadCredentials(appUserId);
+    await loadTokens(appUserId);
+    await loadPrestashopCredentials(appUserId);
+
     // Update stock in PrestaShop (filter by id_product_attribute=0 to get base product stock)
-    const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${mapping.prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET');
+    const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${mapping.prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET', null, appUserId);
     let stockAvailableId = null;
     
     if (stockData.stock_availables) {
@@ -4644,15 +5527,188 @@ app.post('/api/prestashop/sync/stock', async (req, res) => {
       quantity: parseInt(quantity),
       id_product: mapping.prestashopProductId
     });
-    await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', stockXml);
+    await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', stockXml, appUserId);
 
     // Update mapping sync time
     mapping.lastStockSync = new Date().toISOString();
-    await ProductMappingsDB.set(offerId, mapping);
+    await ProductMappingsDB.set(offerId, mapping, appUserId);
 
     res.json({
       success: true,
       message: 'Stock synced successfully'
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Sync price from Allegro to PrestaShop
+ */
+app.post('/api/prestashop/sync/price', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    const { offerId } = req.body;
+    
+    if (!offerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Offer ID is required'
+      });
+    }
+
+    // Load user's Allegro and PrestaShop credentials before making API calls
+    await loadCredentials(appUserId);
+    await loadTokens(appUserId);
+    await loadPrestashopCredentials(appUserId);
+
+    // Find PrestaShop product ID from mapping
+    const mapping = await ProductMappingsDB.get(offerId, appUserId);
+    if (!mapping || !mapping.prestashopProductId) {
+      return res.status(404).json({
+        success: false,
+        error: 'Product mapping not found for this offer'
+      });
+    }
+
+    const prestashopProductId = mapping.prestashopProductId;
+
+    // Fetch current price from Allegro
+    let allegroPrice = null;
+    try {
+      // Try to get price from the parts endpoint first (more efficient)
+      let priceData = null;
+      try {
+        const partsData = await allegroApiRequest(`/sale/product-offers/${offerId}/parts`, { include: ['price'] }, true, {}, appUserId);
+        if (partsData.price || partsData.sellingMode?.price) {
+          priceData = partsData.price || partsData.sellingMode?.price;
+        }
+      } catch (partsError) {
+        // If parts endpoint fails, fall back to full offer data
+      }
+      
+      // If we didn't get price from parts, fetch full offer data
+      if (!priceData) {
+        const offerData = await allegroApiRequest(`/sale/product-offers/${offerId}`, {}, true, {}, appUserId);
+        if (offerData.sellingMode?.price || offerData.price) {
+          priceData = offerData.sellingMode?.price || offerData.price;
+        }
+      }
+      
+      // Extract price value from price object
+      if (priceData) {
+        if (typeof priceData === 'object') {
+          allegroPrice = priceData.amount || priceData.value || null;
+        } else if (typeof priceData === 'number' || typeof priceData === 'string') {
+          allegroPrice = priceData;
+        }
+        // Convert to number if it's a string
+        if (allegroPrice !== null && typeof allegroPrice === 'string') {
+          allegroPrice = parseFloat(allegroPrice) || null;
+        }
+      }
+    } catch (error) {
+      return res.status(error.response?.status || 500).json({
+        success: false,
+        error: `Failed to fetch price from Allegro: ${error.message}`
+      });
+    }
+
+    if (allegroPrice === null) {
+      return res.status(404).json({
+        success: false,
+        error: 'Price not found in Allegro offer'
+      });
+    }
+
+    // Fetch full product data from PrestaShop to preserve all fields
+    const productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
+    let fullProduct = null;
+    if (productData.product) {
+      fullProduct = productData.product;
+    } else if (productData.products && Array.isArray(productData.products) && productData.products.length > 0) {
+      fullProduct = productData.products[0].product || productData.products[0];
+    } else if (productData.id) {
+      fullProduct = productData;
+    }
+
+    if (!fullProduct || !fullProduct.name) {
+      return res.status(404).json({
+        success: false,
+        error: 'Product not found in PrestaShop'
+      });
+    }
+
+    // Get current PrestaShop price
+    const prestashopPrice = fullProduct.price !== undefined && fullProduct.price !== null
+      ? parseFloat(fullProduct.price) || null
+      : null;
+
+    // Normalize localized fields
+    const normalizedName = normalizeLocalizedField(fullProduct.name, 'Product');
+    const normalizedDescription = normalizeLocalizedField(fullProduct.description, '');
+    const normalizedDescriptionShort = normalizeLocalizedField(fullProduct.description_short, '');
+    const normalizedLinkRewrite = normalizeLocalizedField(fullProduct.link_rewrite, '');
+
+    // Handle categories associations
+    let categories = [];
+    if (fullProduct.associations && fullProduct.associations.categories) {
+      const cats = fullProduct.associations.categories.category;
+      if (Array.isArray(cats)) {
+        categories = cats.map(cat => ({ id: String(cat.id || cat) }));
+      } else if (cats && cats.id) {
+        categories = [{ id: String(cats.id) }];
+      }
+    }
+    // If no categories in associations, use id_category_default
+    if (categories.length === 0 && fullProduct.id_category_default) {
+      categories = [{ id: String(fullProduct.id_category_default) }];
+    }
+
+    // Prepare product data with updated price, preserving all other fields
+    const updatedProductData = {
+      id: String(prestashopProductId),
+      id_shop_default: String(fullProduct.id_shop_default || '1'),
+      id_tax_rules_group: String(fullProduct.id_tax_rules_group !== undefined ? fullProduct.id_tax_rules_group : '0'),
+      id_category_default: String(fullProduct.id_category_default || '2'),
+      reference: fullProduct.reference || '',
+      name: normalizedName,
+      description: normalizedDescription,
+      description_short: normalizedDescriptionShort,
+      link_rewrite: normalizedLinkRewrite,
+      price: allegroPrice.toFixed(2), // Update only the price
+      active: String(fullProduct.active !== undefined ? fullProduct.active : '1'),
+      state: String(fullProduct.state !== undefined ? fullProduct.state : '1'),
+      visibility: fullProduct.visibility || 'both',
+      available_for_order: String(fullProduct.available_for_order !== undefined ? fullProduct.available_for_order : '1'),
+      show_price: String(fullProduct.show_price !== undefined ? fullProduct.show_price : '1'),
+      indexed: String(fullProduct.indexed !== undefined ? fullProduct.indexed : '1'),
+      on_sale: String(fullProduct.on_sale !== undefined ? fullProduct.on_sale : '0'),
+      online_only: String(fullProduct.online_only !== undefined ? fullProduct.online_only : '0'),
+      is_virtual: String(fullProduct.is_virtual !== undefined ? fullProduct.is_virtual : '0'),
+      advanced_stock_management: String(fullProduct.advanced_stock_management !== undefined ? fullProduct.advanced_stock_management : '0'),
+      condition: fullProduct.condition || 'new',
+      associations: categories.length > 0 ? {
+        categories: {
+          category: categories
+        }
+      } : undefined
+    };
+
+    // Build complete XML with all fields preserved, only price updated
+    const productXml = buildProductXml(updatedProductData);
+    await prestashopApiRequest(`products/${prestashopProductId}`, 'PUT', productXml, appUserId);
+
+    res.json({
+      success: true,
+      message: 'Price synced successfully',
+      priceChange: {
+        from: prestashopPrice,
+        to: allegroPrice
+      }
     });
   } catch (error) {
     res.status(error.response?.status || 500).json({
@@ -5327,11 +6383,40 @@ app.get('/api/export/products.csv', async (req, res) => {
  * Optimized: Only syncs products that exist in PrestaShop (by reference field)
  * This is much more efficient than checking all Allegro offers
  */
-async function syncStockFromAllegroToPrestashop() {
-  if (syncJobRunning) {
-    console.log('Stock sync already running, skipping...');
+async function syncStockFromAllegroToPrestashop(appUserId = null) {
+  if (!appUserId) {
+    console.error('User ID is required for sync');
     return;
   }
+
+  // Check if this user's sync is already running (check both in-memory and database)
+  const userState = userSyncStates.get(appUserId) || { running: false };
+  if (userState.running) {
+    console.log(`Stock sync already running for user ${appUserId}, skipping...`);
+    return;
+  }
+
+  // Initialize user state if not exists (load from database if available)
+  if (!userSyncStates.has(appUserId)) {
+    try {
+      const settings = await loadSyncSettings(appUserId);
+      userSyncStates.set(appUserId, { 
+        running: false, 
+        lastSyncTime: settings.lastSyncTime, 
+        nextSyncTime: settings.nextSyncTime 
+      });
+    } catch (error) {
+      userSyncStates.set(appUserId, { running: false, lastSyncTime: null, nextSyncTime: null });
+    }
+  }
+
+  // Mark this user's sync as running (in-memory for quick checks)
+  userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: true });
+
+  // Load that user's credentials and tokens
+  await loadCredentials(appUserId);
+  await loadTokens(appUserId);
+  await loadPrestashopCredentials(appUserId);
 
   // Check if basic configuration is ready.
   // If Allegro or PrestaShop are not configured yet, silently skip sync
@@ -5347,37 +6432,34 @@ async function syncStockFromAllegroToPrestashop() {
 
   if (!hasPrestashopConfig || !hasAllegroConfig) {
     console.log(
-      'Stock sync prerequisites not met (Allegro/PrestaShop not fully configured). Sync skipped.'
+      `Stock sync prerequisites not met for user ${appUserId} (Allegro/PrestaShop not fully configured). Sync skipped.`
     );
-    return;
-  }
+      userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: false });
+      await updateSyncState(appUserId, { lastSyncTime: null, nextSyncTime: null });
+      return;
+    }
 
   // Try to validate token by attempting to refresh it if needed
   // This also reloads the latest token from file to ensure we're using the most recent token
   try {
-    const token = await getUserAccessToken();
+    const token = await getUserAccessToken(appUserId);
     if (!token) {
       throw new Error('No token available');
     }
-    console.log('Token validated successfully, proceeding with sync...');
+    console.log(`Token validated successfully for user ${appUserId}, proceeding with sync...`);
   } catch (tokenError) {
-    console.error('Token validation error:', tokenError.message);
-    addSyncLog({
+    console.error(`Token validation error for user ${appUserId}:`, tokenError.message);
+    await addSyncLog({
       status: 'error',
       message: `OAuth token validation failed: ${tokenError.message}. Please reconnect your Allegro account in the Settings tab.`,
       productName: null,
       offerId: null,
       prestashopProductId: null,
       stockChange: null
-    });
-    syncJobRunning = false;
+    }, appUserId);
+    userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: false });
     return;
   }
-
-  syncJobRunning = true;
-  
-  // Clear old logs when sync starts - only show current session logs
-  syncLogs = [];
   
   const syncStartTime = new Date().toISOString();
   let syncedCount = 0;
@@ -5402,7 +6484,7 @@ async function syncStockFromAllegroToPrestashop() {
     
     while (hasMore) {
       try {
-        const data = await prestashopApiRequest(`products?limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`, 'GET');
+        const data = await prestashopApiRequest(`products?limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`, 'GET', null, appUserId);
         
         let products = [];
         if (data.products) {
@@ -5441,7 +6523,7 @@ async function syncStockFromAllegroToPrestashop() {
     console.log(`Found ${allPrestashopProducts.length} PrestaShop products to check for stock sync`);
     
     // Log start of sync with product count
-    addSyncLog({
+    await addSyncLog({
       status: 'info',
       message: `Starting stock sync: Found ${allPrestashopProducts.length} products in PrestaShop. Checking stock for each product...`,
       productName: null,
@@ -5449,34 +6531,38 @@ async function syncStockFromAllegroToPrestashop() {
       prestashopProductId: null,
       stockChange: null,
       totalProductsChecked: allPrestashopProducts.length
-    });
+    }, appUserId);
     
     if (allPrestashopProducts.length === 0) {
-      addSyncLog({
+      await addSyncLog({
         status: 'info',
         message: 'No products found in PrestaShop. Nothing to sync.',
         productName: null,
         offerId: null,
         prestashopProductId: null,
         stockChange: null
-      });
-      syncJobRunning = false;
+      }, appUserId);
+      userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: false, lastSyncTime: syncStartTime });
+      await updateSyncState(appUserId, { lastSyncTime: syncStartTime });
       return;
     }
 
     // Process in batches to avoid overwhelming the API
-    const batchSize = 10;
+    // Optimized batch size for better performance (can be adjusted via env var)
+    const batchSize = parseInt(process.env.SYNC_BATCH_SIZE) || 20; // Increased from 10 to 20
+    const batchDelay = parseInt(process.env.SYNC_BATCH_DELAY_MS) || 100; // Delay between batches (ms)
+    
     for (let i = 0; i < allPrestashopProducts.length; i += batchSize) {
       // Stop if we've hit too many consecutive 403 errors
       if (consecutive403Errors >= MAX_CONSECUTIVE_403) {
-        addSyncLog({
+        await addSyncLog({
           status: 'error',
           message: `Stopped sync due to multiple authentication errors. Please reconnect your Allegro account in the Settings tab.`,
           productName: null,
           offerId: null,
           prestashopProductId: null,
           stockChange: null
-        });
+        }, appUserId);
         break;
       }
       
@@ -5505,10 +6591,10 @@ async function syncStockFromAllegroToPrestashop() {
             // Note: associations field is not available via display parameter, so we use id_category_default instead
             let productData;
             try {
-              productData = await prestashopApiRequest(`products/${prestashopProductId}?display=[id,name,reference,id_category_default,price]`, 'GET');
+              productData = await prestashopApiRequest(`products/${prestashopProductId}?display=[id,name,reference,id_category_default,price]`, 'GET', null, appUserId);
             } catch (displayError) {
               // If display parameter fails, try without it (some PrestaShop versions might not support it)
-              productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET');
+              productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
             }
             
             // PrestaShop returns: { product: {...} } or { products: [{ product: {...} }] }
@@ -5555,7 +6641,7 @@ async function syncStockFromAllegroToPrestashop() {
           if (!reference || (typeof reference === 'string' && reference.trim() === '')) {
             // Product has no reference (Allegro offer ID) - skip it
             skippedCount++;
-            addSyncLog({
+            await addSyncLog({
               status: 'skipped',
               message: `Skipped: No Allegro offer ID (reference) found in PrestaShop product`,
               productName: productName || `Product ID ${prestashopProductId}`,
@@ -5565,7 +6651,7 @@ async function syncStockFromAllegroToPrestashop() {
               stockChange: null,
               allegroPrice: null,
               prestashopPrice: prestashopPrice
-            });
+            }, appUserId);
             return;
           }
           
@@ -5575,7 +6661,7 @@ async function syncStockFromAllegroToPrestashop() {
           // Validate offer ID format (Allegro offer IDs are numeric)
           if (!/^\d+$/.test(offerId)) {
             skippedCount++;
-            addSyncLog({
+            await addSyncLog({
               status: 'skipped',
               message: `Skipped: Invalid Allegro offer ID format in reference field: "${offerId}"`,
               productName: productName || `Product ID ${prestashopProductId}`,
@@ -5584,7 +6670,7 @@ async function syncStockFromAllegroToPrestashop() {
               stockChange: null,
               allegroPrice: null,
               prestashopPrice: prestashopPrice
-            });
+            }, appUserId);
             return;
           }
           
@@ -5592,7 +6678,7 @@ async function syncStockFromAllegroToPrestashop() {
           // This way we can distinguish between actual product names and fallbacks
 
           // Log that we're checking this product with the Allegro offer ID
-          addSyncLog({
+          await addSyncLog({
             status: 'checking',
             message: `Checking stock for Allegro offer ID: ${offerId}`,
             productName: productName,
@@ -5602,7 +6688,7 @@ async function syncStockFromAllegroToPrestashop() {
             stockChange: null,
             allegroPrice: null,
             prestashopPrice: prestashopPrice
-          });
+          }, appUserId);
 
           // Get current stock and price from Allegro for this offer ID
           // Use the new /sale/product-offers/{offerId} endpoint (old /sale/offers/{offerId} was deprecated in 2024)
@@ -5616,7 +6702,7 @@ async function syncStockFromAllegroToPrestashop() {
             let priceData = null;
             try {
               // Pass include as array - axios will convert to multiple query params: ?include=stock&include=price
-              const partsData = await allegroApiRequest(`/sale/product-offers/${offerId}/parts`, { include: ['stock', 'price'] }, true);
+              const partsData = await allegroApiRequest(`/sale/product-offers/${offerId}/parts`, { include: ['stock', 'price'] }, true, {}, appUserId);
               // Check if stock information is in the parts response
               if (partsData.stock) {
                 stockData = partsData.stock;
@@ -5632,7 +6718,7 @@ async function syncStockFromAllegroToPrestashop() {
             
             // If we didn't get stock or price from parts, fetch full offer data
             if (!stockData || !priceData) {
-              const offerData = await allegroApiRequest(`/sale/product-offers/${offerId}`, {}, true);
+              const offerData = await allegroApiRequest(`/sale/product-offers/${offerId}`, {}, true, {}, appUserId);
               // Stock is in stock.available according to Allegro API documentation
               if (!stockData && offerData.stock) {
                 stockData = offerData.stock;
@@ -5690,7 +6776,7 @@ async function syncStockFromAllegroToPrestashop() {
               errorMessage = 'OAuth authentication required. Please connect your Allegro account in the Settings tab.';
             }
             
-            addSyncLog({
+            await addSyncLog({
               status: 'error',
               message: `Failed to fetch stock from Allegro (offer ID: ${offerId}): ${errorMessage}`,
               productName: productName,
@@ -5700,7 +6786,7 @@ async function syncStockFromAllegroToPrestashop() {
               stockChange: null,
               allegroPrice: null,
               prestashopPrice: prestashopPrice
-            });
+            }, appUserId);
             errorCount++;
             return;
           }
@@ -5709,7 +6795,7 @@ async function syncStockFromAllegroToPrestashop() {
           // Filter endpoint only returns ID, so we need to fetch full record by ID
           let prestashopStock = 0;
           try {
-            const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET');
+            const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET', null, appUserId);
             
             // Extract stock_available ID from the filter response
             let stockAvailableId = null;
@@ -5728,7 +6814,7 @@ async function syncStockFromAllegroToPrestashop() {
             // Fetch full stock_available record to get quantity
             if (stockAvailableId) {
               try {
-                const fullStockData = await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'GET');
+                const fullStockData = await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'GET', null, appUserId);
                 
                 if (fullStockData.stock_available) {
                   const quantity = fullStockData.stock_available.quantity;
@@ -5774,7 +6860,7 @@ async function syncStockFromAllegroToPrestashop() {
             if (error.response?.data) {
               console.error(`PrestaShop API error details:`, JSON.stringify(error.response.data).substring(0, 300));
             }
-            addSyncLog({
+            await addSyncLog({
               status: 'error',
               message: `Failed to fetch stock from PrestaShop: ${error.message}`,
               productName: productName,
@@ -5784,7 +6870,7 @@ async function syncStockFromAllegroToPrestashop() {
               stockChange: null,
               allegroPrice: allegroPrice,
               prestashopPrice: prestashopPrice
-            });
+            }, appUserId);
             errorCount++;
             return;
           }
@@ -5802,7 +6888,7 @@ async function syncStockFromAllegroToPrestashop() {
             console.log(`Stock differs: Allegro=${allegroStockNum}, PrestaShop=${prestashopStockNum}. Syncing from Allegro to PrestaShop...`);
             try {
               // Get stock available ID (filter by id_product_attribute=0 to get base product stock)
-              const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET');
+              const stockData = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET', null, appUserId);
               let stockAvailableId = null;
               
               if (stockData.stock_availables) {
@@ -5822,14 +6908,14 @@ async function syncStockFromAllegroToPrestashop() {
                   quantity: allegroStockNum,
                   id_product: prestashopProductId
                 });
-                await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', stockXml);
+                await prestashopApiRequest(`stock_availables/${stockAvailableId}`, 'PUT', stockXml, appUserId);
               } else {
                 // Stock entry doesn't exist - PrestaShop API doesn't allow POST for stock_availables
                 // Try to trigger stock entry creation by updating the product
                 // This sometimes causes PrestaShop to automatically create the stock entry
                 try {
                   console.log(`Attempting to trigger stock entry creation for product ${prestashopProductId} by updating product...`);
-                  const productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET');
+                  const productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
                   
                   if (productData.product) {
                     const product = productData.product;
@@ -5842,13 +6928,13 @@ async function syncStockFromAllegroToPrestashop() {
     <advanced_stock_management><![CDATA[0]]></advanced_stock_management>
   </product>
 </prestashop>`;
-                    await prestashopApiRequest(`products/${prestashopProductId}`, 'PUT', updateXml);
+                    await prestashopApiRequest(`products/${prestashopProductId}`, 'PUT', updateXml, appUserId);
                     
                     // Wait a moment for PrestaShop to process
                     await new Promise(resolve => setTimeout(resolve, 500));
                     
                     // Check again if stock entry was created (filter by id_product_attribute=0 to get base product stock)
-                    const stockDataRetry = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET');
+                    const stockDataRetry = await prestashopApiRequest(`stock_availables?filter[id_product]=[${prestashopProductId}]&filter[id_product_attribute]=[0]`, 'GET', null, appUserId);
                     let stockAvailableIdRetry = null;
                     
                     if (stockDataRetry.stock_availables) {
@@ -5868,10 +6954,10 @@ async function syncStockFromAllegroToPrestashop() {
                         quantity: allegroStockNum,
                         id_product: prestashopProductId
                       });
-                      await prestashopApiRequest(`stock_availables/${stockAvailableIdRetry}`, 'PUT', stockXml);
+                      await prestashopApiRequest(`stock_availables/${stockAvailableIdRetry}`, 'PUT', stockXml, appUserId);
                       
                       syncedCount++;
-                      addSyncLog({
+                      await addSyncLog({
                         status: 'success',
                         message: `Stock synced from Allegro to PrestaShop: ${prestashopStockNum} → ${allegroStockNum} (stock entry created automatically)`,
                         productName: productName,
@@ -5884,7 +6970,7 @@ async function syncStockFromAllegroToPrestashop() {
                         },
                         allegroPrice: allegroPrice,
                         prestashopPrice: prestashopPrice
-                      });
+                      }, appUserId);
                       return;
                     }
                   }
@@ -5894,7 +6980,7 @@ async function syncStockFromAllegroToPrestashop() {
                 
                 // If we get here, stock entry still doesn't exist
                 console.warn(`Stock entry not found for product ${prestashopProductId}. Stock entries should be created automatically when products are created.`);
-                addSyncLog({
+                await addSyncLog({
                   status: 'warning',
                   message: `Stock entry not found for product. Please enable stock management for this product in PrestaShop back office, or recreate the product.`,
                   productName: productName,
@@ -5904,13 +6990,13 @@ async function syncStockFromAllegroToPrestashop() {
                   stockChange: null,
                   allegroPrice: allegroPrice,
                   prestashopPrice: prestashopPrice
-                });
+                }, appUserId);
                 skippedCount++;
                 return;
               }
 
               syncedCount++;
-              addSyncLog({
+              await addSyncLog({
                 status: 'success',
                 message: `Stock synced from Allegro to PrestaShop: ${prestashopStockNum} → ${allegroStockNum}`,
                 productName: productName,
@@ -5923,10 +7009,10 @@ async function syncStockFromAllegroToPrestashop() {
                 },
                 allegroPrice: allegroPrice,
                 prestashopPrice: prestashopPrice
-              });
+              }, appUserId);
             } catch (error) {
               console.error(`Error updating PrestaShop stock for product ${prestashopProductId}:`, error.message);
-              addSyncLog({
+              await addSyncLog({
                 status: 'error',
                 message: `Failed to update stock in PrestaShop: ${error.message}`,
                 productName: productName,
@@ -5939,13 +7025,13 @@ async function syncStockFromAllegroToPrestashop() {
                 },
                 allegroPrice: allegroPrice,
                 prestashopPrice: prestashopPrice
-              });
+              }, appUserId);
               errorCount++;
             }
           } else {
             // Stock is the same - no update needed
             unchangedCount++;
-            addSyncLog({
+            await addSyncLog({
               status: 'unchanged',
               message: `Stock unchanged: Allegro=${allegroStockNum}, PrestaShop=${prestashopStockNum} (already in sync)`,
               productName: productName,
@@ -5958,7 +7044,7 @@ async function syncStockFromAllegroToPrestashop() {
               },
               allegroPrice: allegroPrice,
               prestashopPrice: prestashopPrice
-            });
+            }, appUserId);
           }
 
           // Price comparison and sync (after stock sync)
@@ -5977,7 +7063,7 @@ async function syncStockFromAllegroToPrestashop() {
                 let fullProductForUpdate = fullProduct;
                 if (!fullProductForUpdate || !fullProductForUpdate.name) {
                   // If we don't have full product data, fetch it now
-                  const productDataForUpdate = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET');
+                  const productDataForUpdate = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
                   if (productDataForUpdate.product) {
                     fullProductForUpdate = productDataForUpdate.product;
                   } else if (productDataForUpdate.products && Array.isArray(productDataForUpdate.products) && productDataForUpdate.products.length > 0) {
@@ -6044,10 +7130,10 @@ async function syncStockFromAllegroToPrestashop() {
                 
                 // Build complete XML with all fields preserved, only price updated
                 const productXml = buildProductXml(updatedProductData);
-                await prestashopApiRequest(`products/${prestashopProductId}`, 'PUT', productXml);
+                await prestashopApiRequest(`products/${prestashopProductId}`, 'PUT', productXml, appUserId);
                 
                 priceSyncedCount++;
-                addSyncLog({
+                await addSyncLog({
                   status: 'success',
                   message: `Price synced from Allegro to PrestaShop: ${prestashopPrice.toFixed(2)} PLN → ${allegroPrice.toFixed(2)} PLN`,
                   productName: productName,
@@ -6064,11 +7150,11 @@ async function syncStockFromAllegroToPrestashop() {
                   },
                   allegroPrice: allegroPrice,
                   prestashopPrice: prestashopPrice // Keep original PrestaShop price to show before/after in UI
-                });
+                }, appUserId);
               } catch (priceError) {
                 console.error(`Error updating PrestaShop price for product ${prestashopProductId}:`, priceError.message);
                 priceErrorCount++;
-                addSyncLog({
+                await addSyncLog({
                   status: 'error',
                   message: `Failed to sync price: ${priceError.message}`,
                   productName: productName,
@@ -6085,7 +7171,7 @@ async function syncStockFromAllegroToPrestashop() {
                   },
                   allegroPrice: allegroPrice,
                   prestashopPrice: prestashopPrice
-                });
+                }, appUserId);
               }
             } else {
               // Prices are the same (within tolerance) - no update needed
@@ -6100,7 +7186,7 @@ async function syncStockFromAllegroToPrestashop() {
         } catch (error) {
           const prestashopProductId = prestashopProduct.id?.toString();
           console.error(`Error processing PrestaShop product ${prestashopProductId} (offer ${offerId || 'unknown'}):`, error.message);
-          addSyncLog({
+          await addSyncLog({
             status: 'error',
             message: `Error processing product: ${error.message}`,
             productName: productName,
@@ -6110,10 +7196,15 @@ async function syncStockFromAllegroToPrestashop() {
             stockChange: null,
             allegroPrice: null,
             prestashopPrice: null
-          });
+          }, appUserId);
           errorCount++;
         }
       }));
+      
+      // Add delay between batches to avoid overwhelming APIs and rate limiting
+      if (i + batchSize < allPrestashopProducts.length && batchDelay > 0) {
+        await new Promise(resolve => setTimeout(resolve, batchDelay));
+      }
     }
 
     // Calculate total products checked (synced + unchanged + skipped + errors)
@@ -6150,48 +7241,110 @@ async function syncStockFromAllegroToPrestashop() {
       totalProductsChecked: totalProductsChecked
     });
 
-    lastSyncTime = syncStartTime;
+    // Update user's last sync time (both in-memory and database)
+    const settings = await loadSyncSettings(appUserId);
+    const nextSyncTime = settings.syncIntervalMs 
+      ? new Date(Date.now() + settings.syncIntervalMs).toISOString()
+      : new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
+    
+    userSyncStates.set(appUserId, { 
+      ...userSyncStates.get(appUserId), 
+      running: false, 
+      lastSyncTime: syncStartTime,
+      nextSyncTime: nextSyncTime
+    });
+    
+    // Persist to database
+    await updateSyncState(appUserId, {
+      lastSyncTime: syncStartTime,
+      nextSyncTime: nextSyncTime
+    });
+    
+    // Remove from queue running set (if it was in queue)
+    syncQueue.running.delete(appUserId);
+    
     // Logs are in-memory only - no file saving needed
-    console.log(`Stock & Price sync completed: Checked ${totalProductsChecked} PrestaShop products. Stock: ${syncedCount} synced, ${unchangedCount} unchanged, ${skippedCount} skipped, ${errorCount} errors. Price: ${priceSyncedCount} synced, ${priceUnchangedCount} unchanged, ${priceErrorCount} errors`);
+    console.log(`Stock & Price sync completed for user ${appUserId}: Checked ${totalProductsChecked} PrestaShop products. Stock: ${syncedCount} synced, ${unchangedCount} unchanged, ${skippedCount} skipped, ${errorCount} errors. Price: ${priceSyncedCount} synced, ${priceUnchangedCount} unchanged, ${priceErrorCount} errors`);
   } catch (error) {
-    console.error('Stock sync error:', error.message);
-    addSyncLog({
+    console.error(`Stock sync error for user ${appUserId}:`, error.message);
+    await addSyncLog({
       status: 'error',
       message: `Stock sync failed: ${error.message}`,
       productName: null,
       offerId: null,
       prestashopProductId: null,
       stockChange: null
+    }, appUserId);
+    // Update user's sync state to mark as not running
+    userSyncStates.set(appUserId, { 
+      ...userSyncStates.get(appUserId), 
+      running: false 
     });
-  } finally {
-    syncJobRunning = false;
+    
+    // Remove from queue running set (if it was in queue)
+    syncQueue.running.delete(appUserId);
   }
 }
 
 /**
- * Start the stock sync cron job
+ * Start the stock sync cron job for all users
  * Uses setInterval on Windows (development) or can be disabled for Ubuntu cron
+ * Each user gets their own sync timer
  */
-function startStockSyncCron() {
+async function startStockSyncCron() {
   if (USE_INTERVAL_TIMER) {
-    // Use setInterval timer (good for Windows development)
-    const now = Date.now();
-    nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
-    
-    // Run sync immediately on startup (after a short delay to let server initialize)
-    setTimeout(() => {
-      syncStockFromAllegroToPrestashop();
-    }, 10000); // Wait 10 seconds after server starts
+    // Get all users from database
+    if (!dbPool) {
+      console.log('Database not initialized, skipping sync cron startup');
+      return;
+    }
 
-    // Then run every 5 minutes
-    syncTimerInterval = setInterval(() => {
-      nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
-      syncStockFromAllegroToPrestashop();
-    }, SYNC_INTERVAL_MS);
-    
-    syncTimerActive = true;
+    try {
+      const [users] = await dbPool.query('SELECT id FROM users WHERE is_active = 1');
+      
+      // Start per-user sync timers
+      for (const user of users) {
+        const appUserId = user.id;
+        
+        // Initialize user state if not exists
+        if (!userSyncStates.has(appUserId)) {
+          userSyncStates.set(appUserId, { running: false, lastSyncTime: null, nextSyncTime: null });
+        }
+        
+        // Set next sync time
+        const now = Date.now();
+        const nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
+        userSyncStates.set(appUserId, { 
+          ...userSyncStates.get(appUserId), 
+          nextSyncTime 
+        });
+        
+        // Run sync immediately on startup (after a short delay to let server initialize)
+        // Use queue system to manage concurrent syncs
+        setTimeout(() => {
+          enqueueSync(appUserId, Date.now() + (appUserId * 1000)); // Stagger by user ID
+        }, 10000 + (appUserId * 1000)); // Stagger initial syncs by user ID
 
-    console.log('Stock sync timer started (runs every 5 minutes using setInterval)');
+        // Then run every 5 minutes for this user
+        // Use queue system to manage concurrent syncs
+        const intervalId = setInterval(() => {
+          const nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
+          userSyncStates.set(appUserId, { 
+            ...userSyncStates.get(appUserId), 
+            nextSyncTime 
+          });
+          // Add to queue instead of running directly
+          enqueueSync(appUserId);
+        }, SYNC_INTERVAL_MS);
+        
+        // Store timer for this user
+        userSyncTimers.set(appUserId, { intervalId, active: true });
+      }
+
+      console.log(`Stock sync timer started for ${users.length} user(s) (runs every 5 minutes using setInterval)`);
+    } catch (error) {
+      console.error('Error starting sync cron:', error);
+    }
   } else {
     // Timer disabled - use external cron on Ubuntu
     console.log('Stock sync timer disabled. Use system cron to call /api/sync/trigger endpoint.');
@@ -6200,76 +7353,138 @@ function startStockSyncCron() {
 }
 
 /**
- * Stop the sync timer
+ * Stop the sync timer for all users
  */
 function stopStockSyncCron() {
-  if (syncTimerInterval) {
-    clearInterval(syncTimerInterval);
-    syncTimerInterval = null;
-    syncTimerActive = false;
-    nextSyncTime = null;
-    console.log('Stock sync timer stopped');
+  let stoppedCount = 0;
+  for (const [appUserId, timer] of userSyncTimers.entries()) {
+    if (timer.intervalId) {
+      clearInterval(timer.intervalId);
+      userSyncTimers.set(appUserId, { intervalId: null, active: false });
+      stoppedCount++;
+    }
+  }
+  if (stoppedCount > 0) {
+    console.log(`Stock sync timer stopped for ${stoppedCount} user(s)`);
   }
 }
 
 /**
- * Start the sync timer manually
+ * Start the sync timer manually for a specific user
  */
-function startStockSyncCronManual() {
-  if (syncTimerActive) {
-    return { success: false, error: 'Sync timer is already running' };
+function startStockSyncCronManual(appUserId) {
+  if (!appUserId) {
+    return { success: false, error: 'User ID is required' };
+  }
+  
+  // Check if timer is already running for this user
+  const userTimer = userSyncTimers.get(appUserId);
+  if (userTimer && userTimer.active) {
+    return { success: false, error: 'Sync timer is already running for this user' };
   }
   
   if (!USE_INTERVAL_TIMER) {
     return { success: false, error: 'Internal timer is disabled. Use external cron instead.' };
   }
   
-  // Clear any existing interval
-  if (syncTimerInterval) {
-    clearInterval(syncTimerInterval);
+  // Clear any existing interval for this user
+  if (userTimer && userTimer.intervalId) {
+    clearInterval(userTimer.intervalId);
   }
   
-  // Start new interval
-  const now = Date.now();
-  nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
+  // Initialize user state if not exists
+  if (!userSyncStates.has(appUserId)) {
+    userSyncStates.set(appUserId, { running: false, lastSyncTime: null, nextSyncTime: null });
+  }
   
-  syncTimerInterval = setInterval(() => {
-    nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
-    syncStockFromAllegroToPrestashop();
+  // Start new interval for this user
+  const now = Date.now();
+  const nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
+  userSyncStates.set(appUserId, { 
+    ...userSyncStates.get(appUserId), 
+    nextSyncTime 
+  });
+  
+  const intervalId = setInterval(() => {
+    const nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
+    userSyncStates.set(appUserId, { 
+      ...userSyncStates.get(appUserId), 
+      nextSyncTime 
+    });
+    // Add to queue instead of running directly
+    enqueueSync(appUserId);
   }, SYNC_INTERVAL_MS);
   
-  syncTimerActive = true;
-  console.log('Stock sync timer started manually (runs every 5 minutes)');
+  userSyncTimers.set(appUserId, { intervalId, active: true });
+  console.log(`Stock sync timer started manually for user ${appUserId} (runs every 5 minutes)`);
   
   return { success: true, message: 'Sync timer started' };
 }
 
 /**
- * API: Get sync logs
+ * API: Get sync logs (per-user)
  */
-app.get('/api/sync/logs', (req, res) => {
+app.get('/api/sync/logs', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
     const limit = parseInt(req.query.limit) || 100;
     const status = req.query.status; // Optional filter by status
     
-    let filteredLogs = [...syncLogs];
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not initialized'
+      });
+    }
+
+    // Build query with user filter
+    let query = 'SELECT * FROM sync_logs WHERE app_user_id = ?';
+    const params = [appUserId];
     
     // Filter by status if provided
     if (status) {
-      filteredLogs = filteredLogs.filter(log => log.status === status);
+      query += ' AND status = ?';
+      params.push(status);
     }
     
-    // Sort by timestamp (newest first) and limit
-    filteredLogs = filteredLogs
-      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-      .slice(0, limit);
+    // Order by timestamp (newest first) and limit
+    query += ' ORDER BY timestamp DESC LIMIT ?';
+    params.push(limit);
+    
+    const [rows] = await dbPool.query(query, params);
+    
+    // Get user sync state
+    const userState = userSyncStates.get(appUserId) || { running: false, lastSyncTime: null, nextSyncTime: null };
+    
+    // Format logs
+    const logs = rows.map(row => ({
+      status: row.status,
+      message: row.message,
+      productName: row.product_name,
+      offerId: row.offer_id,
+      prestashopProductId: row.prestashop_product_id,
+      stockChange: row.stock_change_from !== null && row.stock_change_to !== null 
+        ? { from: row.stock_change_from, to: row.stock_change_to }
+        : null,
+      allegroPrice: row.allegro_price ? parseFloat(row.allegro_price) : null,
+      prestashopPrice: row.prestashop_price ? parseFloat(row.prestashop_price) : null,
+      categoryName: row.category_name,
+      timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : null
+    }));
+    
+    // Get total count for this user
+    const [countRows] = await dbPool.query(
+      'SELECT COUNT(*) as total FROM sync_logs WHERE app_user_id = ?',
+      [appUserId]
+    );
+    const total = countRows[0]?.total || 0;
     
     res.json({
       success: true,
-      logs: filteredLogs,
-      total: syncLogs.length,
-      lastSyncTime: lastSyncTime,
-      nextSyncTime: nextSyncTime
+      logs: logs,
+      total: total,
+      lastSyncTime: userState.lastSyncTime,
+      nextSyncTime: userState.nextSyncTime
     });
   } catch (error) {
     res.status(500).json({
@@ -6280,15 +7495,24 @@ app.get('/api/sync/logs', (req, res) => {
 });
 
 /**
- * API: Clear sync logs
+ * API: Clear sync logs (per-user)
  */
-app.post('/api/sync/logs/clear', (req, res) => {
+app.post('/api/sync/logs/clear', authMiddleware, async (req, res) => {
   try {
-    syncLogs = [];
-    // Logs are in-memory only - no file saving needed
+    const appUserId = req.user.userId;
+    
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not initialized'
+      });
+    }
+
+    await dbPool.query('DELETE FROM sync_logs WHERE app_user_id = ?', [appUserId]);
+    
     res.json({
       success: true,
-      message: 'Sync logs cleared'
+      message: 'Sync logs cleared for your account'
     });
   } catch (error) {
     res.status(500).json({
@@ -6301,33 +7525,44 @@ app.post('/api/sync/logs/clear', (req, res) => {
 /**
  * API: Trigger manual stock sync
  * Can be called manually or by external cron (Ubuntu)
- * Note: Does not require user session auth - sync runs independently using server-stored credentials
+ * Note: Sync runs per-user using their own Allegro and PrestaShop credentials
  * The sync function itself validates that Allegro OAuth tokens and PrestaShop credentials exist in DB
+ * Uses queue system to manage concurrent syncs
  */
-app.post('/api/sync/trigger', async (req, res) => {
+app.post('/api/sync/trigger', authMiddleware, async (req, res) => {
   try {
-    if (syncJobRunning) {
+    const appUserId = req.user.userId;
+    
+    // Check if this user's sync is already running or in queue
+    const userState = userSyncStates.get(appUserId) || { running: false };
+    if (userState.running || syncQueue.running.has(appUserId)) {
       return res.status(400).json({
         success: false,
-        error: 'Stock sync is already running'
+        error: 'Stock sync is already running for this user'
+      });
+    }
+    
+    if (syncQueue.queue.some(item => item.appUserId === appUserId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stock sync is already queued for this user'
       });
     }
 
-    // Run sync in background (don't wait for completion)
-    // syncStockFromAllegroToPrestashop() uses server-stored credentials from DB:
-    // - userOAuthTokens (Allegro OAuth tokens)
-    // - userCredentials (Allegro Client ID/Secret)
-    // - prestashopCredentials (PrestaShop API keys)
-    // These are independent of user login sessions
-    syncStockFromAllegroToPrestashop().catch(error => {
-      console.error('Sync error:', error);
-    });
+    // Add to queue instead of running immediately (prevents resource exhaustion)
+    enqueueSync(appUserId);
+    
+    const queuePosition = syncQueue.queue.findIndex(item => item.appUserId === appUserId) + 1;
+    const message = queuePosition > 0 
+      ? `Stock sync queued (position: ${queuePosition})`
+      : 'Stock sync started';
 
-    // Return immediately - sync runs in background
+    // Return immediately - sync runs in background via queue
     res.json({
       success: true,
-      message: 'Stock sync triggered',
-      status: 'running'
+      message: message,
+      status: queuePosition > 0 ? 'queued' : 'running',
+      queuePosition: queuePosition > 0 ? queuePosition : null
     });
   } catch (error) {
     res.status(500).json({
@@ -6340,8 +7575,15 @@ app.post('/api/sync/trigger', async (req, res) => {
 /**
  * API: Check if prerequisites are met for sync
  */
-app.get('/api/sync/prerequisites', (req, res) => {
+app.get('/api/sync/prerequisites', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
+    
+    // Load user's credentials and tokens
+    await loadCredentials(appUserId);
+    await loadTokens(appUserId);
+    await loadPrestashopCredentials(appUserId);
+    
     const hasPrestashopConfig =
       !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey);
     const hasAllegroConfig =
@@ -6375,10 +7617,17 @@ app.get('/api/sync/prerequisites', (req, res) => {
 });
 
 /**
- * API: Start sync timer
+ * API: Start sync timer (per-user)
  */
-app.post('/api/sync/start', (req, res) => {
+app.post('/api/sync/start', authMiddleware, async (req, res) => {
   try {
+    const appUserId = req.user.userId;
+    
+    // Load user's credentials and tokens
+    await loadCredentials(appUserId);
+    await loadTokens(appUserId);
+    await loadPrestashopCredentials(appUserId);
+    
     // Check prerequisites first
     const hasPrestashopConfig =
       !!(prestashopCredentials.baseUrl && prestashopCredentials.apiKey);
@@ -6397,12 +7646,13 @@ app.post('/api/sync/start', (req, res) => {
       });
     }
 
-    const result = startStockSyncCronManual();
+    const result = startStockSyncCronManual(appUserId);
+    const userTimer = userSyncTimers.get(appUserId);
     if (result.success) {
       res.json({
         success: true,
         message: result.message,
-        timerActive: syncTimerActive
+        timerActive: userTimer ? userTimer.active : false
       });
     } else {
       res.status(400).json({
@@ -6419,16 +7669,29 @@ app.post('/api/sync/start', (req, res) => {
 });
 
 /**
- * API: Stop sync timer
+ * API: Stop sync timer (per-user)
  */
-app.post('/api/sync/stop', (req, res) => {
+app.post('/api/sync/stop', authMiddleware, async (req, res) => {
   try {
-    stopStockSyncCron();
-    res.json({
-      success: true,
-      message: 'Sync timer stopped',
-      timerActive: syncTimerActive
-    });
+    const appUserId = req.user.userId;
+    
+    // Stop timer for this user
+    const userTimer = userSyncTimers.get(appUserId);
+    if (userTimer && userTimer.intervalId) {
+      clearInterval(userTimer.intervalId);
+      userSyncTimers.set(appUserId, { intervalId: null, active: false });
+      res.json({
+        success: true,
+        message: 'Sync timer stopped',
+        timerActive: false
+      });
+    } else {
+      res.json({
+        success: true,
+        message: 'Sync timer was not running',
+        timerActive: false
+      });
+    }
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -6438,17 +7701,28 @@ app.post('/api/sync/stop', (req, res) => {
 });
 
 /**
- * API: Get sync status (for cron monitoring)
+ * API: Get sync status (per-user, for cron monitoring)
  */
-app.get('/api/sync/status', (req, res) => {
-  res.json({
-    success: true,
-    running: syncJobRunning,
-    lastSyncTime: lastSyncTime,
-    nextSyncTime: nextSyncTime,
-    timerActive: syncTimerActive,
-    useIntervalTimer: USE_INTERVAL_TIMER
-  });
+app.get('/api/sync/status', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    const userState = userSyncStates.get(appUserId) || { running: false, lastSyncTime: null, nextSyncTime: null };
+    const userTimer = userSyncTimers.get(appUserId);
+    
+    res.json({
+      success: true,
+      running: userState.running,
+      lastSyncTime: userState.lastSyncTime,
+      nextSyncTime: userState.nextSyncTime,
+      timerActive: userTimer ? userTimer.active : false,
+      useIntervalTimer: USE_INTERVAL_TIMER
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // SSL Certificate configuration

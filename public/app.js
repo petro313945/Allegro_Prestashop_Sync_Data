@@ -58,7 +58,6 @@ function clearAuth() {
     authToken = null;
     currentUser = null;
     localStorage.removeItem('auth_token');
-    localStorage.removeItem('current_user');
     // Reset session expired message flag when clearing auth
     sessionExpiredMessageShown = false;
 }
@@ -78,7 +77,8 @@ async function apiFetch(url, options = {}) {
     return response;
 }
 
-// Authenticated fetch wrapper (only for user management operations)
+// Authenticated fetch wrapper with automatic session refresh
+// Session is automatically refreshed on every API call to prevent expiration during active use
 async function authFetch(url, options = {}) {
     const token = getAuthToken();
     if (!token) {
@@ -91,6 +91,8 @@ async function authFetch(url, options = {}) {
         ...options.headers
     };
 
+    // Make the request - the authMiddleware will automatically refresh the session
+    // by updating lastActivity in validateSession()
     const response = await fetch(url, {
         ...options,
         headers
@@ -147,13 +149,16 @@ async function login(email, password) {
 
         setAuthToken(data.token);
         currentUser = data.user;
-        localStorage.setItem('current_user', JSON.stringify(data.user));
         
         // Reset session expired message flag on successful login
         sessionExpiredMessageShown = false;
         
         // Update user email display
         updateUserDisplay(data.user);
+        
+        // Load credentials from database after login
+        await loadCredentialsFromAPI();
+        await loadPrestashopConfigFromAPI();
         
         return data;
     } catch (error) {
@@ -165,8 +170,7 @@ async function login(email, password) {
 async function logout() {
     try {
         // Capture user info before clearing auth
-        const savedUser = localStorage.getItem('current_user');
-        const user = savedUser ? JSON.parse(savedUser) : currentUser;
+        const user = currentUser;
         const token = getAuthToken();
         if (token) {
             await authFetch(`${API_BASE}/api/logout`, {
@@ -210,11 +214,14 @@ async function checkAuth() {
         if (data.success && data.user) {
             // Update current user from server response
             currentUser = data.user;
-            localStorage.setItem('current_user', JSON.stringify(data.user));
             
             // Update user display
             updateUserDisplay(currentUser);
             showMainInterface();
+            
+            // Load credentials from database
+            await loadCredentialsFromAPI();
+            await loadPrestashopConfigFromAPI();
             
             // Show message that user is already logged in
             if (currentUser && currentUser.email) {
@@ -353,85 +360,67 @@ async function autoLoadOffersIfReady() {
     fetchAllOffers();
 }
 
-// Load saved credentials and restore authentication state
-async function loadSavedCredentials() {
-    const savedClientId = localStorage.getItem('allegro_clientId');
-    const savedClientSecret = localStorage.getItem('allegro_clientSecret');
-    
-    if (savedClientId && savedClientSecret) {
-        // Restore credentials to input fields
-        const clientIdInput = document.getElementById('clientId');
-        const clientSecretInput = document.getElementById('clientSecret');
+// Load credentials from API (database)
+async function loadCredentialsFromAPI() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/credentials`);
         
-        if (clientIdInput) {
-            clientIdInput.value = savedClientId;
-        }
-        if (clientSecretInput) {
-            clientSecretInput.value = savedClientSecret;
+        if (!response.ok) {
+            if (response.status === 401) {
+                return; // Not authenticated, will be handled by authFetch
+            }
+            return;
         }
         
-        // Send credentials to backend to ensure they're loaded
-        try {
-            const credentialsResponse = await apiFetch(`${API_BASE}/api/credentials`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    clientId: savedClientId,
-                    clientSecret: savedClientSecret
-                })
-            });
-            
-            const credentialsData = await credentialsResponse.json();
-            
-            if (!credentialsData.success) {
-                // Credentials failed to save - clear them
-                localStorage.removeItem('allegro_clientId');
-                localStorage.removeItem('allegro_clientSecret');
-                if (clientIdInput) clientIdInput.value = '';
-                if (clientSecretInput) clientSecretInput.value = '';
-                return;
+        const data = await response.json();
+        
+        if (data.success && data.credentials && data.credentials.clientId) {
+            // Restore credentials to input fields (only clientId, secret is masked)
+            const clientIdInput = document.getElementById('clientId');
+            if (clientIdInput) {
+                clientIdInput.value = data.credentials.clientId;
             }
             
             // Check if credentials are still valid by testing authentication
-            const authResponse = await apiFetch(`${API_BASE}/api/test-auth`);
-            const authData = await authResponse.json();
-            
-            if (authData.success) {
-                // Credentials are valid - restore authentication state
-                const authStatusEl = document.getElementById('authStatus');
-                if (authStatusEl) {
-                    authStatusEl.textContent = 'Allegro Auth: Authenticated';
-                    authStatusEl.className = 'quick-status-badge success';
+            const authResponse = await authFetch(`${API_BASE}/api/test-auth`).catch(() => null);
+            if (authResponse && authResponse.ok) {
+                const authData = await authResponse.json();
+                
+                if (authData.success) {
+                    // Credentials are valid - restore authentication state
+                    const authStatusEl = document.getElementById('authStatus');
+                    if (authStatusEl) {
+                        authStatusEl.textContent = 'API Credentials: Configured';
+                        authStatusEl.className = 'quick-status-badge success';
+                        authStatusEl.title = 'Allegro API credentials (Client ID/Secret) are saved and working';
+                    }
+                    
+                    // Show disconnect button
+                    const clearBtn = document.getElementById('clearCredentialsBtn');
+                    if (clearBtn) {
+                        clearBtn.style.display = 'block';
+                    }
+                    
+                    // Update config status indicators and button states
+                    updateConfigStatuses();
+                    
+                    // Check OAuth status (this will also try to refresh expired tokens)
+                    await checkOAuthStatus();
+                    
+                    // Update UI state
+                    updateUIState(true);
                 }
-                
-                // Show disconnect button
-                const clearBtn = document.getElementById('clearCredentialsBtn');
-                if (clearBtn) {
-                    clearBtn.style.display = 'block';
-                }
-                
-                // Update config status indicators and button states
-                updateConfigStatuses();
-                
-                // Check OAuth status (this will also try to refresh expired tokens)
-                await checkOAuthStatus();
-                
-                // Update UI state
-                updateUIState(true);
-            } else {
-                // Credentials are invalid - clear them
-                localStorage.removeItem('allegro_clientId');
-                localStorage.removeItem('allegro_clientSecret');
-                if (clientIdInput) clientIdInput.value = '';
-                if (clientSecretInput) clientSecretInput.value = '';
             }
-        } catch (error) {
-            console.error('Error checking saved credentials:', error);
-            // On error, don't restore state - user will need to reconnect
         }
+    } catch (error) {
+        // Silently fail - credentials may not be configured yet
+        console.log('No credentials found in database or error loading:', error.message);
     }
+}
+
+// Legacy function name for backward compatibility
+async function loadSavedCredentials() {
+    return loadCredentialsFromAPI();
 }
 
 // Update config status indicators
@@ -947,44 +936,36 @@ async function saveCredentials() {
         return;
     }
     
-    // Check if session is still valid before proceeding
+    // Check if user is logged in
     const token = getAuthToken();
     if (!token) {
-        showToast('Your session has expired. Please log in again to configure Allegro.', 'error', 8000);
+        showToast('Please log in to configure Allegro.', 'error', 8000);
         showLoginScreen();
         return;
     }
     
-    // Validate and refresh session by checking health endpoint
-    // Temporarily suppress duplicate session expired messages
-    // Check if service is available (no session required for API operations)
-    try {
-        const healthCheck = await apiFetch(`${API_BASE}/api/health`);
-        if (!healthCheck.ok) {
-            showToast('Service unavailable. Please try again later.', 'error');
-            return;
-        }
-    } catch (error) {
-        showToast('Failed to connect to service. Please try again later.', 'error');
-        return;
-    }
+    // Note: Session is automatically refreshed on every API call via authMiddleware
+    // The validateSession() function updates lastActivity, preventing expiration during active use
     
     // Disable button during authentication
     connectBtn.disabled = true;
     connectBtn.textContent = 'Connecting...';
     
     try {
-        // Step 1: Send credentials to backend
-        const credentialsResponse = await apiFetch(`${API_BASE}/api/credentials`, {
+        // Step 1: Send credentials to backend (now requires authentication)
+        const credentialsResponse = await authFetch(`${API_BASE}/api/credentials`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
             body: JSON.stringify({
                 clientId: clientId,
                 clientSecret: clientSecret
             })
         });
+        
+        // Check for 401 status before parsing JSON
+        if (!credentialsResponse.ok && credentialsResponse.status === 401) {
+            const errorData = await credentialsResponse.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again to configure Allegro.');
+        }
         
         const credentialsData = await credentialsResponse.json();
         
@@ -992,30 +973,31 @@ async function saveCredentials() {
             throw new Error(credentialsData.error || 'Failed to save credentials');
         }
         
-        // Step 2: Test authentication immediately
-        const authResponse = await apiFetch(`${API_BASE}/api/test-auth`);
+        // Step 2: Test authentication immediately (requires auth token)
+        const authResponse = await authFetch(`${API_BASE}/api/test-auth`);
         
         // Check for 401 status before parsing JSON
         if (!authResponse.ok && authResponse.status === 401) {
-            throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+            const errorData = await authResponse.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again to test Allegro credentials.');
         }
         
         const authData = await authResponse.json();
         
         if (authData.success) {
             // Authentication successful - show detail interface
-            localStorage.setItem('allegro_clientId', clientId);
-            localStorage.setItem('allegro_clientSecret', clientSecret);
+            // Credentials are now stored in database, no need for localStorage
             
-            showToast('Authentication successful!', 'success');
+            showToast('Allegro API credentials saved and verified successfully. You can now authorize your account.', 'success');
             
             // Show main content
             showMainInterface();
             
             const authStatusEl = document.getElementById('authStatus');
             if (authStatusEl) {
-                authStatusEl.textContent = 'Allegro Auth: Authenticated';
+                authStatusEl.textContent = 'API Credentials: Configured';
                 authStatusEl.className = 'quick-status-badge success';
+                authStatusEl.title = 'Allegro API credentials (Client ID/Secret) are saved and working';
             }
             
             // Show disconnect button in Allegro API Configuration section
@@ -1043,11 +1025,19 @@ async function saveCredentials() {
         }
     } catch (error) {
         // Show user-friendly error message
-        let errorMessage = 'Authentication failed. Please check your credentials.';
-        if (error.message && !error.message.includes('status code')) {
+        let errorMessage = 'Failed to save credentials. ';
+        
+        // Check if it's an authentication error
+        if (error.message && (error.message.includes('Session expired') || error.message.includes('Not authenticated') || error.message.includes('Authentication required'))) {
+            errorMessage = 'Your session has expired. Please log in again to configure Allegro.';
+            showLoginScreen();
+        } else if (error.message && !error.message.includes('status code')) {
             errorMessage = error.message;
+        } else {
+            errorMessage += 'Please check your Client ID and Client Secret, and make sure you are logged in.';
         }
-        showToast(errorMessage, 'error');
+        
+        showToast(errorMessage, 'error', 8000);
         hideMainInterface();
         updateUIState(false);
     } finally {
@@ -1058,16 +1048,19 @@ async function saveCredentials() {
 
 async function sendCredentialsToBackend(clientId, clientSecret) {
     try {
-        const response = await apiFetch(`${API_BASE}/api/credentials`, {
+        const response = await authFetch(`${API_BASE}/api/credentials`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
             body: JSON.stringify({
                 clientId: clientId,
                 clientSecret: clientSecret
             })
         });
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again.');
+        }
         
         const data = await response.json();
         
@@ -1103,21 +1096,57 @@ function hideMainInterface() {
 async function clearCredentials() {
     document.getElementById('clientId').value = '';
     document.getElementById('clientSecret').value = '';
-    localStorage.removeItem('allegro_clientId');
-    localStorage.removeItem('allegro_clientSecret');
+    // Credentials are stored in database, no need to clear localStorage
     
     const messageEl = document.getElementById('credentialsMessage');
     if (messageEl) {
         messageEl.style.display = 'none';
     }
     
-    // Disconnect OAuth
+    // Disconnect Allegro credentials (delete from database)
     try {
-        await apiFetch(`${API_BASE}/api/oauth/disconnect`, {
+        const credentialsResponse = await authFetch(`${API_BASE}/api/credentials/disconnect`, {
             method: 'POST'
         });
+        
+        // Check for 401 status before parsing JSON
+        if (!credentialsResponse.ok && credentialsResponse.status === 401) {
+            // Session expired, will be handled by authFetch
+            return;
+        }
+        
+        const credentialsData = await credentialsResponse.json();
+        if (credentialsData.success) {
+            showToast('Allegro credentials disconnected successfully', 'success');
+        } else {
+            showToast('Error disconnecting Allegro credentials: ' + (credentialsData.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        console.error('Error disconnecting Allegro credentials:', error);
+        showToast('Error disconnecting Allegro credentials: ' + error.message, 'error');
+    }
+    
+    // Disconnect OAuth (clear tokens)
+    try {
+        const oauthResponse = await authFetch(`${API_BASE}/api/oauth/disconnect`, {
+            method: 'POST'
+        });
+        
+        // Check for 401 status before parsing JSON
+        if (!oauthResponse.ok && oauthResponse.status === 401) {
+            // Session expired, will be handled by authFetch
+            return;
+        }
+        
+        const oauthData = await oauthResponse.json();
+        if (oauthData.success) {
+            showToast('Allegro OAuth disconnected successfully', 'success');
+        } else {
+            showToast('Error disconnecting OAuth: ' + (oauthData.error || 'Unknown error'), 'error');
+        }
     } catch (error) {
         console.error('Error disconnecting OAuth:', error);
+        showToast('Error disconnecting OAuth: ' + error.message, 'error');
     }
     
     updateUIState(false);
@@ -1129,12 +1158,14 @@ async function clearCredentials() {
     const authStatusEl = document.getElementById('authStatus');
     const oauthStatusEl = document.getElementById('oauthStatus');
     if (authStatusEl) {
-        authStatusEl.textContent = 'Allegro Auth: Pending';
+        authStatusEl.textContent = 'API Credentials: Pending';
         authStatusEl.className = 'quick-status-badge error';
+        authStatusEl.title = 'Enter and save your Allegro Client ID and Client Secret';
     }
     if (oauthStatusEl) {
-        oauthStatusEl.textContent = 'Account: Not Connected';
+        oauthStatusEl.textContent = 'OAuth: Not Connected';
         oauthStatusEl.className = 'quick-status-badge error';
+        oauthStatusEl.title = 'Click "Authorize Account" button to connect your Allegro account via OAuth';
     }
     isOAuthConnected = false;
     updateUIState(false);
@@ -1170,7 +1201,7 @@ async function clearPrestashopConfig() {
     document.getElementById('prestashopApiKey').value = '';
     
     // Remove from localStorage
-    localStorage.removeItem('prestashopConfig');
+    // PrestaShop config is stored in database, no need to remove from localStorage
     
     // Clear message
     const messageEl = document.getElementById('prestashopMessage');
@@ -1187,16 +1218,21 @@ async function clearPrestashopConfig() {
     
     // Clear backend configuration and all JSON files (prestashop.json, credentials.json, tokens.json)
     try {
-        const response = await apiFetch(`${API_BASE}/api/prestashop/disconnect`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
+        const response = await authFetch(`${API_BASE}/api/prestashop/disconnect`, {
+            method: 'POST'
         });
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            // Session expired, will be handled by authFetch
+            return;
+        }
         
         const data = await response.json();
         if (data.success) {
-            showToast('All configuration files cleared successfully', 'success');
+            showToast('PrestaShop disconnected successfully', 'success');
         } else {
-            showToast('Error clearing configuration: ' + (data.error || 'Unknown error'), 'error');
+            showToast('Error disconnecting PrestaShop: ' + (data.error || 'Unknown error'), 'error');
         }
     } catch (error) {
         console.error('Error clearing PrestaShop configuration:', error);
@@ -1222,7 +1258,7 @@ async function clearPrestashopConfig() {
 // Check if user is authenticated
 function checkAuthentication() {
     const authStatusEl = document.getElementById('authStatus');
-    return authStatusEl && authStatusEl.className.includes('success') && authStatusEl.textContent === 'Allegro Auth: Authenticated';
+    return authStatusEl && authStatusEl.className.includes('success') && authStatusEl.textContent.includes('API Credentials: Configured');
 }
 
 // Validate authentication before allowing actions
@@ -1312,7 +1348,14 @@ async function checkApiStatus() {
 // Check OAuth connection status
 async function checkOAuthStatus() {
     try {
-        const response = await apiFetch(`${API_BASE}/api/oauth/status`);
+        const response = await authFetch(`${API_BASE}/api/oauth/status`);
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            // Session expired, will be handled by authFetch
+            return;
+        }
+        
         const data = await response.json();
         
         const oauthStatusEl = document.getElementById('oauthStatus');
@@ -1323,11 +1366,13 @@ async function checkOAuthStatus() {
         
         if (oauthStatusEl) {
             if (isOAuthConnected) {
-                oauthStatusEl.textContent = 'Account: Connected';
+                oauthStatusEl.textContent = 'OAuth: Connected';
                 oauthStatusEl.className = 'quick-status-badge success';
+                oauthStatusEl.title = 'Your Allegro account is connected via OAuth. The app can access your offers and products.';
             } else {
-                oauthStatusEl.textContent = 'Account: Not Connected';
+                oauthStatusEl.textContent = 'OAuth: Not Connected';
                 oauthStatusEl.className = 'quick-status-badge error';
+                oauthStatusEl.title = 'Click "Authorize Account" button below to connect your Allegro account via OAuth. This allows the app to access your offers and products.';
             }
         }
         
@@ -1375,8 +1420,9 @@ async function checkOAuthStatus() {
         console.error('Error checking OAuth status:', error);
         const oauthStatusEl = document.getElementById('oauthStatus');
         if (oauthStatusEl) {
-            oauthStatusEl.textContent = 'Account: Error';
+            oauthStatusEl.textContent = 'OAuth: Error';
             oauthStatusEl.className = 'quick-status-badge error';
+            oauthStatusEl.title = 'Error checking OAuth connection status';
         }
         const oauthInfoEl = document.getElementById('oauthInfo');
         if (oauthInfoEl) {
@@ -1390,13 +1436,20 @@ async function checkOAuthStatus() {
 // Authorize account (OAuth flow)
 async function authorizeAccount() {
     if (!checkAuthentication()) {
-        showToast('Please connect with Client ID and Secret first', 'error');
+        showToast('Please enter and save your Client ID and Client Secret first, then click "Authorize Account"', 'error', 8000);
         return;
     }
     
     try {
-        // Get OAuth authorization URL from backend
-        const response = await apiFetch(`${API_BASE}/api/oauth/authorize`);
+        // Get OAuth authorization URL from backend (now requires authentication)
+        const response = await authFetch(`${API_BASE}/api/oauth/authorize`);
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again to connect your Allegro account.');
+        }
+        
         const data = await response.json();
         
         if (!data.success || !data.authUrl) {
@@ -1429,7 +1482,7 @@ async function authorizeAccount() {
                 await checkOAuthStatus();
                 // If connected, load categories from offers and refresh offers
                 if (isOAuthConnected) {
-                    showToast('Account authorized successfully!', 'success');
+                    showToast('Allegro account connected successfully! You can now sync offers and import products.', 'success');
                     // Load categories from user's offers (only categories with products)
                     await loadCategoriesFromOffers();
                     // Load full Allegro category tree for sidebar navigation
@@ -1453,8 +1506,9 @@ async function authorizeAccount() {
 async function testAuthentication() {
     const authStatusEl = document.getElementById('authStatus');
     if (authStatusEl) {
-        authStatusEl.textContent = 'Allegro Auth: Testing';
+        authStatusEl.textContent = 'API Credentials: Testing';
         authStatusEl.className = 'quick-status-badge pending';
+        authStatusEl.title = 'Testing Allegro API credentials...';
     }
     
     const clientId = document.getElementById('clientId').value.trim();
@@ -1462,8 +1516,9 @@ async function testAuthentication() {
     
     if (!clientId || !clientSecret) {
         if (authStatusEl) {
-            authStatusEl.textContent = 'Allegro Auth: Credentials required';
+            authStatusEl.textContent = 'API Credentials: Required';
             authStatusEl.className = 'quick-status-badge error';
+            authStatusEl.title = 'Please enter your Allegro Client ID and Client Secret';
         }
         showToast('Credentials required', 'error');
         return;
@@ -1482,35 +1537,39 @@ async function testAuthentication() {
     }
     
     try {
-        const response = await apiFetch(`${API_BASE}/api/test-auth`);
+        const response = await authFetch(`${API_BASE}/api/test-auth`);
         
         // Check for 401 status before parsing JSON
         if (!response.ok && response.status === 401) {
-            throw new Error('Invalid credentials. Please check your Client ID and Client Secret.');
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again to test Allegro credentials.');
         }
         
         const data = await response.json();
         
         if (data.success) {
             if (authStatusEl) {
-                authStatusEl.textContent = 'Allegro Auth: Authenticated';
+                authStatusEl.textContent = 'API Credentials: Configured';
                 authStatusEl.className = 'quick-status-badge success';
+                authStatusEl.title = 'Allegro API credentials are saved and working';
             }
             updateUIState(true);
-            showToast('Authentication successful', 'success');
+            showToast('Allegro API credentials verified successfully. Ready to connect your account.', 'success');
             // Categories will be loaded automatically after OAuth authorization
         } else {
             if (authStatusEl) {
-                authStatusEl.textContent = 'Allegro Auth: Failed';
+                authStatusEl.textContent = 'API Credentials: Failed';
                 authStatusEl.className = 'quick-status-badge error';
+                authStatusEl.title = 'API credentials test failed. Please check your Client ID and Client Secret';
             }
             updateUIState(false);
             showToast('Authentication failed. Please check your credentials.', 'error');
         }
     } catch (error) {
         if (authStatusEl) {
-            authStatusEl.textContent = 'Allegro Auth: Error';
+            authStatusEl.textContent = 'API Credentials: Error';
             authStatusEl.className = 'quick-status-badge error';
+            authStatusEl.title = 'Error testing API credentials';
         }
         updateUIState(false);
         // Show user-friendly error message
@@ -3634,20 +3693,25 @@ async function savePrestashopConfig() {
     if (messageEl) messageEl.style.display = 'none';
     
     try {
-        const response = await apiFetch(`${API_BASE}/api/prestashop/configure`, {
+        const response = await authFetch(`${API_BASE}/api/prestashop/configure`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 baseUrl: url,
                 apiKey: apiKey
             })
         });
         
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again to configure PrestaShop.');
+        }
+        
         const data = await response.json();
         
         if (data.success) {
             showToast('PrestaShop configuration saved successfully!', 'success');
-            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey }));
+            // Configuration is now stored in database, no need for localStorage
             prestashopConfigured = true;
             // Note: prestashopAuthorized will be set to true only after successful test connection
             prestashopAuthorized = false;
@@ -3688,28 +3752,39 @@ async function testPrestashopConnection() {
     testBtn.textContent = 'Connecting...';
     
     try {
-        // Save temporarily for test
-        const response = await apiFetch(`${API_BASE}/api/prestashop/configure`, {
+        // Save temporarily for test (now requires authentication)
+        const response = await authFetch(`${API_BASE}/api/prestashop/configure`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 baseUrl: url,
                 apiKey: apiKey
             })
         });
         
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again to configure PrestaShop.');
+        }
+        
         if (!response.ok) {
             const errorData = await response.json();
             throw new Error(errorData.error || 'Failed to save configuration');
         }
         
-        // Test connection
-        const testResponse = await apiFetch(`${API_BASE}/api/prestashop/test`);
+        // Test connection (requires auth token)
+        const testResponse = await authFetch(`${API_BASE}/api/prestashop/test`);
+        
+        // Check for 401 status before parsing JSON
+        if (!testResponse.ok && testResponse.status === 401) {
+            const errorData = await testResponse.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Authentication required. Please log in again to test PrestaShop connection.');
+        }
+        
         const testData = await testResponse.json();
         
         if (testData.success) {
-            // Save to localStorage when test succeeds
-            localStorage.setItem('prestashopConfig', JSON.stringify({ url, apiKey }));
+            // Configuration is now stored in database, no need for localStorage
             showToast(testData.message, 'success');
             prestashopConfigured = true;
             prestashopAuthorized = true; // Mark PrestaShop as authorized after successful test
@@ -3741,31 +3816,52 @@ async function testPrestashopConnection() {
     }
 }
 
-function loadPrestashopConfig() {
-    const saved = localStorage.getItem('prestashopConfig');
-    if (saved) {
-        try {
-            const config = JSON.parse(saved);
-            // Always use saved URL as default (user's entered URL)
-            document.getElementById('prestashopUrl').value = config.url || '';
-            document.getElementById('prestashopApiKey').value = config.apiKey || '';
+// Load PrestaShop config from API (database)
+async function loadPrestashopConfigFromAPI() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/prestashop/credentials`);
+        
+        if (!response.ok) {
+            if (response.status === 401) {
+                return; // Not authenticated, will be handled by authFetch
+            }
+            return;
+        }
+        
+        const data = await response.json();
+        
+        if (data.success && data.credentials && data.credentials.baseUrl) {
+            // Restore configuration to input fields
+            document.getElementById('prestashopUrl').value = data.credentials.baseUrl || '';
+            // API key is masked, so we don't populate it
             
             // Show saved configuration info
-            updatePrestashopSavedConfigDisplay(config.url);
+            updatePrestashopSavedConfigDisplay(data.credentials.baseUrl);
             
-        } catch (e) {
-            console.error('Error loading PrestaShop config:', e);
-            // Fallback to empty if parsing fails
+            // Mark as configured
+            prestashopConfigured = true;
+        } else {
+            // No saved config - leave empty so user enters their URL
             document.getElementById('prestashopUrl').value = '';
             document.getElementById('prestashopApiKey').value = '';
             hidePrestashopSavedConfigDisplay();
         }
-    } else {
-        // No saved config - leave empty so user enters their URL
+    } catch (error) {
+        // Silently fail - config may not be configured yet
+        console.log('No PrestaShop config found in database or error loading:', error.message);
         document.getElementById('prestashopUrl').value = '';
         document.getElementById('prestashopApiKey').value = '';
         hidePrestashopSavedConfigDisplay();
     }
+}
+
+// Legacy function name for backward compatibility
+function loadPrestashopConfig() {
+    // This function is called during initialization, but credentials should be loaded from API
+    // after login. For now, just clear the fields.
+    document.getElementById('prestashopUrl').value = '';
+    document.getElementById('prestashopApiKey').value = '';
+    hidePrestashopSavedConfigDisplay();
 }
 
 // Update saved configuration display
@@ -3786,7 +3882,14 @@ function hidePrestashopSavedConfigDisplay() {
 
 async function checkPrestashopStatus() {
     try {
-        const response = await apiFetch(`${API_BASE}/api/prestashop/status`);
+        const response = await authFetch(`${API_BASE}/api/prestashop/status`);
+        
+        // Check for 401 status before parsing JSON
+        if (!response.ok && response.status === 401) {
+            // Session expired, will be handled by authFetch
+            return;
+        }
+        
         const data = await response.json();
         
         prestashopConfigured = data.configured;
@@ -3795,7 +3898,12 @@ async function checkPrestashopStatus() {
         // Only set authorized to true if we can successfully test the connection
         if (prestashopConfigured) {
             try {
-                const testResponse = await apiFetch(`${API_BASE}/api/prestashop/test`);
+                const testResponse = await authFetch(`${API_BASE}/api/prestashop/test`);
+                if (!testResponse.ok && testResponse.status === 401) {
+                    // Session expired, can't test
+                    prestashopAuthorized = false;
+                    return;
+                }
                 const testData = await testResponse.json();
                 prestashopAuthorized = testData.success || false;
             } catch (error) {
@@ -3806,15 +3914,22 @@ async function checkPrestashopStatus() {
         }
         
         // Show/hide saved config display based on configured status
-        if (prestashopConfigured) {
-            const saved = localStorage.getItem('prestashopConfig');
-            if (saved) {
-                try {
-                    const config = JSON.parse(saved);
-                    updatePrestashopSavedConfigDisplay(config.url);
-                } catch (e) {
+        // Try to load config from API if authenticated
+        if (prestashopConfigured && getAuthToken()) {
+            try {
+                const response = await authFetch(`${API_BASE}/api/prestashop/credentials`).catch(() => null);
+                if (response && response.ok) {
+                    const data = await response.json();
+                    if (data.success && data.credentials && data.credentials.baseUrl) {
+                        updatePrestashopSavedConfigDisplay(data.credentials.baseUrl);
+                    } else {
+                        hidePrestashopSavedConfigDisplay();
+                    }
+                } else {
                     hidePrestashopSavedConfigDisplay();
                 }
+            } catch (error) {
+                hidePrestashopSavedConfigDisplay();
             }
         } else {
             hidePrestashopSavedConfigDisplay();
@@ -5770,15 +5885,38 @@ async function checkSyncPrerequisites() {
         } else {
             msgEl.style.display = 'block';
             msgEl.className = 'message error';
-            const missing = [];
-            if (!data.details.prestashopConfigured) missing.push('PrestaShop');
-            if (!data.details.allegroConfigured) missing.push('Allegro');
-            if (!data.details.hasOAuthToken) missing.push('Allegro OAuth');
-            msgEl.textContent = `Missing prerequisites: ${missing.join(', ')}. Please configure all required settings first.`;
+            
+            // Check if data.details exists before accessing it
+            if (data.details) {
+                const missing = [];
+                if (!data.details.prestashopConfigured) missing.push('PrestaShop');
+                if (!data.details.allegroConfigured) missing.push('Allegro');
+                if (!data.details.hasOAuthToken) missing.push('Allegro OAuth');
+                
+                if (missing.length > 0) {
+                    msgEl.textContent = `Missing prerequisites: ${missing.join(', ')}. Please configure all required settings first.`;
+                } else if (data.message) {
+                    msgEl.textContent = data.message;
+                } else {
+                    msgEl.textContent = 'Missing prerequisites. Please configure Allegro and PrestaShop first.';
+                }
+            } else if (data.message) {
+                msgEl.textContent = data.message;
+            } else if (data.error) {
+                msgEl.textContent = `Error checking prerequisites: ${data.error}`;
+            } else {
+                msgEl.textContent = 'Unable to check prerequisites. Please try again.';
+            }
             return false;
         }
     } catch (error) {
         console.error('Error checking prerequisites:', error);
+        const msgEl = document.getElementById('syncPrerequisitesMsg');
+        if (msgEl) {
+            msgEl.style.display = 'block';
+            msgEl.className = 'message error';
+            msgEl.textContent = `Error checking prerequisites: ${error.message || 'Unknown error'}. Please try again.`;
+        }
         return false;
     }
 }
