@@ -615,8 +615,8 @@ let userSyncStates = new Map(); // Map<userId, {running: boolean, lastSyncTime: 
 
 // Per-user sync timers
 let userSyncTimers = new Map(); // Map<userId, {intervalId: number, active: boolean}>
-// Sync interval in milliseconds (default: 7 minutes, configurable via SYNC_INTERVAL_MINUTES in .env)
-const SYNC_INTERVAL_MINUTES = parseInt(process.env.SYNC_INTERVAL_MINUTES) || 7;
+// Sync interval in milliseconds (default: 5 minutes, configurable via SYNC_INTERVAL_MINUTES in .env)
+const SYNC_INTERVAL_MINUTES = parseInt(process.env.SYNC_INTERVAL_MINUTES) || 5;
 const SYNC_INTERVAL_MS = SYNC_INTERVAL_MINUTES * 60 * 1000;
 
 // Sync queue system for managing concurrent syncs (prevents resource exhaustion)
@@ -1125,6 +1125,34 @@ async function extractCategoryNameFromPrestashop(productData) {
     // If category fetch fails, return null (non-blocking)
     console.warn(`Failed to fetch category name for product:`, error.message);
     return null;
+  }
+}
+
+/**
+ * Clear all sync logs for a specific user
+ * @param {number} appUserId - Application user ID (required)
+ */
+async function clearSyncLogs(appUserId) {
+  if (!appUserId) {
+    console.warn('clearSyncLogs called without appUserId, skipping');
+    return;
+  }
+
+  try {
+    if (!dbPool) {
+      console.warn('Database not initialized, cannot clear sync logs');
+      return;
+    }
+
+    const [result] = await dbPool.query(`
+      DELETE FROM sync_logs 
+      WHERE app_user_id = ?
+    `, [appUserId]);
+
+    console.log(`Cleared ${result.affectedRows} sync log entries for user ${appUserId}`);
+  } catch (error) {
+    console.error('Error clearing sync logs from database:', error.message);
+    // Don't throw - clearing logs shouldn't break sync
   }
 }
 
@@ -6332,6 +6360,38 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
   // Mark this user's sync as running (in-memory for quick checks)
   userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: true });
 
+  // Clear previous sync logs for this user when starting a new sync
+  await clearSyncLogs(appUserId);
+
+  // Update sync_interval_ms in database to match code default (5 minutes = 300000 ms)
+  // This ensures the database always uses the current code's sync interval
+  try {
+    if (dbPool) {
+      const [rows] = await dbPool.query(
+        'SELECT sync_interval_ms FROM user_sync_settings WHERE app_user_id = ?',
+        [appUserId]
+      );
+      
+      const currentInterval = rows.length > 0 ? rows[0].sync_interval_ms : null;
+      
+      // If interval doesn't match code default, update it
+      if (currentInterval !== SYNC_INTERVAL_MS) {
+        await dbPool.query(`
+          INSERT INTO user_sync_settings (app_user_id, sync_interval_ms, updated_at)
+          VALUES (?, ?, NOW())
+          ON DUPLICATE KEY UPDATE
+            sync_interval_ms = VALUES(sync_interval_ms),
+            updated_at = NOW()
+        `, [appUserId, SYNC_INTERVAL_MS]);
+        
+        console.log(`Updated sync_interval_ms for user ${appUserId} from ${currentInterval || 'default'} to ${SYNC_INTERVAL_MS} ms (${SYNC_INTERVAL_MINUTES} minutes)`);
+      }
+    }
+  } catch (error) {
+    console.error(`Error updating sync_interval_ms for user ${appUserId}:`, error.message);
+    // Don't fail sync if database update fails
+  }
+
   // Load that user's credentials and tokens
   await loadCredentials(appUserId);
   await loadTokens(appUserId);
@@ -6596,19 +6656,6 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
           // Don't set fallback here - let the frontend handle it
           // This way we can distinguish between actual product names and fallbacks
 
-          // Log that we're checking this product with the Allegro offer ID
-          await addSyncLog({
-            status: 'checking',
-            message: `Checking stock for Allegro offer ID: ${offerId}`,
-            productName: productName,
-            categoryName: categoryName,
-            offerId: offerId,
-            prestashopProductId: prestashopProductId,
-            stockChange: null,
-            allegroPrice: null,
-            prestashopPrice: prestashopPrice
-          }, appUserId);
-
           // Get current stock and price from Allegro for this offer ID
           // Use the new /sale/product-offers/{offerId} endpoint (old /sale/offers/{offerId} was deprecated in 2024)
           // Try to get stock and price from the parts endpoint first (more efficient), fallback to full offer data
@@ -6668,6 +6715,26 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
             
             // Reset 403 counter on success
             consecutive403Errors = 0;
+            
+            // Log that we're checking this product - now with the fetched price included
+            let checkingMessage = `Checking stock and price for Allegro offer ID: ${offerId}`;
+            if (allegroPrice === null) {
+              checkingMessage += ' (Price data not found in Allegro API response)';
+            }
+            if (prestashopPrice === null) {
+              checkingMessage += ' (Price data not found in PrestaShop)';
+            }
+            await addSyncLog({
+              status: 'checking',
+              message: checkingMessage,
+              productName: productName,
+              categoryName: categoryName,
+              offerId: offerId,
+              prestashopProductId: prestashopProductId,
+              stockChange: null,
+              allegroPrice: allegroPrice, // Include the fetched price
+              prestashopPrice: prestashopPrice
+            }, appUserId);
           } catch (error) {
             console.error(`Error fetching Allegro offer ${offerId} (from PrestaShop product ${prestashopProductId} reference):`, error.message);
             
@@ -7100,7 +7167,35 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
             }
           } else {
             // One or both prices are missing - skip price sync
-            // This is expected for some products, so we don't log it as an error
+            // Log the reason why price sync was skipped for better visibility
+            let priceSkipReason = '';
+            if (allegroPrice === null && prestashopPrice === null) {
+              priceSkipReason = 'Price data not available in Allegro API response and PrestaShop';
+            } else if (allegroPrice === null) {
+              priceSkipReason = 'Price data not available in Allegro API response (Allegro offer may not have price set)';
+            } else if (prestashopPrice === null) {
+              priceSkipReason = 'Price data not available in PrestaShop';
+            }
+            
+            if (priceSkipReason) {
+              console.log(`Skipping price sync for product ${prestashopProductId} (offer ${offerId}): ${priceSkipReason}`);
+              // Log price skip reason for visibility (stock sync status was already logged above)
+              // Include stock info if available for context
+              await addSyncLog({
+                status: 'info',
+                message: `Price sync skipped: ${priceSkipReason}`,
+                productName: productName,
+                categoryName: categoryName,
+                offerId: offerId,
+                prestashopProductId: prestashopProductId,
+                stockChange: (typeof allegroStockNum !== 'undefined' && typeof prestashopStockNum !== 'undefined') ? {
+                  from: prestashopStockNum,
+                  to: allegroStockNum
+                } : null,
+                allegroPrice: allegroPrice,
+                prestashopPrice: prestashopPrice
+              }, appUserId);
+            }
           }
         } catch (error) {
           const prestashopProductId = prestashopProduct.id?.toString();
