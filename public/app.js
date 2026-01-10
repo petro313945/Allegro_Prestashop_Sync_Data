@@ -157,11 +157,17 @@ async function login(email, password) {
         updateUserDisplay(data.user);
         
         // Load credentials from database in background (non-blocking for faster login)
-        Promise.all([
+        // Use Promise.allSettled() so one failure doesn't block the other
+        Promise.allSettled([
             loadCredentialsFromAPI(),
             loadPrestashopConfigFromAPI()
-        ]).catch(error => {
-            console.error('Error loading credentials in background:', error);
+        ]).then(results => {
+            results.forEach((result, index) => {
+                if (result.status === 'rejected') {
+                    const apiName = index === 0 ? 'loadCredentialsFromAPI' : 'loadPrestashopConfigFromAPI';
+                    console.error(`Error loading ${apiName} in background:`, result.reason);
+                }
+            });
         });
         
         return data;
@@ -229,10 +235,19 @@ async function checkAuth() {
             showMainInterface();
             
             // Load credentials from database in parallel for faster loading
-            await Promise.all([
+            // Use Promise.allSettled() so one failure doesn't block the other
+            const credentialResults = await Promise.allSettled([
                 loadCredentialsFromAPI(),
                 loadPrestashopConfigFromAPI()
             ]);
+            
+            // Log any failures but don't block the UI
+            credentialResults.forEach((result, index) => {
+                if (result.status === 'rejected') {
+                    const apiName = index === 0 ? 'loadCredentialsFromAPI' : 'loadPrestashopConfigFromAPI';
+                    console.error(`Error loading ${apiName}:`, result.reason);
+                }
+            });
             
             // Show message that user is already logged in
             if (currentUser && currentUser.email) {
@@ -291,14 +306,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             
             // Load data in background (non-blocking)
-            Promise.all([
+            // Use Promise.allSettled() so one failure doesn't block others
+            Promise.allSettled([
                 loadImportedOffers(),
                 loadPrestashopConfig(),
                 checkPrestashopStatus(),
                 loadSavedCredentials()
-            ]).catch(initError => {
-                console.error('Error initializing app components:', initError);
-                // UI is already shown, so just log the error
+            ]).then(results => {
+                results.forEach((result, index) => {
+                    if (result.status === 'rejected') {
+                        const apiNames = ['loadImportedOffers', 'loadPrestashopConfig', 'checkPrestashopStatus', 'loadSavedCredentials'];
+                        console.error(`Error initializing ${apiNames[index]}:`, result.reason);
+                    }
+                });
             });
         } catch (error) {
             loginErrorMessage.textContent = error.message || 'Login failed. Please try again.';
@@ -1436,7 +1456,7 @@ function updateUIState(configured) {
 
 async function checkApiStatus() {
     try {
-        const response = await apiFetch(`${API_BASE}/api/health`);
+        const response = await authFetch(`${API_BASE}/api/health`);
         const data = await response.json();
         // Status is now shown in Allegro API Configuration panel
         updateConfigStatuses();
@@ -2418,10 +2438,18 @@ async function displayOffersPage() {
     if (productsToFetch.length > 0) {
         console.log(`Fetching details for ${productsToFetch.length} products to get descriptions...`);
         // Fetch details in parallel (but limit concurrency to avoid overwhelming the API)
+        // Use Promise.allSettled() so one failure doesn't block others
         const batchSize = 5;
         for (let i = 0; i < productsToFetch.length; i += batchSize) {
             const batch = productsToFetch.slice(i, i + batchSize);
-            await Promise.all(batch.map(product => fetchProductDetails(product.id)));
+            const results = await Promise.allSettled(batch.map(product => fetchProductDetails(product.id)));
+            
+            // Log any failures but continue processing
+            results.forEach((result, index) => {
+                if (result.status === 'rejected') {
+                    console.error(`Failed to fetch details for product ${batch[index].id}:`, result.reason);
+                }
+            });
         }
     }
     
@@ -2445,7 +2473,7 @@ async function fetchProductDetails(offerId) {
         
         // Use /api/products/{offerId} which uses /sale/product-offers/{offerId}
         // This endpoint only works for the user's own offers
-        const response = await apiFetch(`${API_BASE}/api/products/${offerId}`);
+        const response = await authFetch(`${API_BASE}/api/products/${offerId}`);
         let product = null;
         
         if (response.ok) {
@@ -4164,6 +4192,11 @@ async function checkPrestashopStatus() {
  * Sync categories to PrestaShop after loading from Allegro
  * Creates categories in PrestaShop with proper tree structure (parent-child relationships)
  * Does not create categories that already exist
+ * 
+ * IMPORTANT: This function syncs ALL categories from allCategories, which includes
+ * categories from offers with ALL statuses (ACTIVE, INACTIVE, ENDED, ACTIVATING).
+ * This ensures categories for current-user-accounts with products are synchronized,
+ * regardless of the product status.
  */
 async function syncCategoriesToPrestashop() {
     // Check if PrestaShop is configured and authorized
@@ -4189,6 +4222,8 @@ async function syncCategoriesToPrestashop() {
     let createdCount = 0;
     let existingCount = 0;
     let errorCount = 0;
+    let skippedCount = 0;
+    const skippedCategories = []; // Track skipped categories for debugging
 
     // Step 1: Collect all unique categories from all paths (including parents)
     const allCategoryNodes = new Map(); // Map<categoryId, {id, name, parentId, level}>
@@ -4196,11 +4231,6 @@ async function syncCategoriesToPrestashop() {
     
     // Fetch parent paths for all categories
     for (const category of allCategories) {
-        // Skip if category doesn't have a valid name
-        if (!category.name || category.name === `Category ${category.id}` || category.name === 'N/A') {
-            continue;
-        }
-
         const categoryId = String(category.id);
         const pathKey = `path_${categoryId}`;
         
@@ -4208,11 +4238,36 @@ async function syncCategoriesToPrestashop() {
             continue;
         }
 
+        // Check if category has a placeholder name - we'll try to get the real name from the path
+        const hasPlaceholderName = !category.name || category.name === `Category ${categoryId}` || category.name === 'N/A';
+        
         try {
             // Fetch the full parent path for this category
+            // This will give us the real category names even if the original category had a placeholder name
             const path = await fetchCategoryPath(categoryId);
             
             if (path && path.length > 0) {
+                // Get the leaf category (last in path) - this is the actual category we're processing
+                const leafCategory = path[path.length - 1];
+                const leafCategoryId = String(leafCategory.id);
+                
+                // Use the name from the path if we had a placeholder name
+                const categoryName = hasPlaceholderName ? leafCategory.name : category.name;
+                
+                // Validate that we have a real name now
+                if (!categoryName || categoryName === `Category ${leafCategoryId}` || categoryName === 'N/A') {
+                    skippedCount++;
+                    skippedCategories.push({ id: categoryId, reason: 'Invalid name after path fetch', name: categoryName });
+                    console.warn(`Category ${categoryId} still has invalid name after fetching path, skipping: "${categoryName}"`);
+                    processedPaths.add(pathKey);
+                    continue;
+                }
+                
+                // Log successful name resolution for debugging (especially for "Modules" category)
+                if (hasPlaceholderName) {
+                    console.log(`✓ Resolved category name for ${categoryId}: "${categoryName}" (was placeholder)`);
+                }
+                
                 // Add all categories in the path (including parents)
                 for (let i = 0; i < path.length; i++) {
                     const pathNode = path[i];
@@ -4228,8 +4283,23 @@ async function syncCategoriesToPrestashop() {
                         });
                     }
                 }
+                
+                // Update the leaf category name if we had a placeholder
+                if (hasPlaceholderName && allCategoryNodes.has(leafCategoryId)) {
+                    allCategoryNodes.get(leafCategoryId).name = categoryName;
+                }
             } else {
-                // If no path found, treat as root level category
+                // If no path found, try to use the category name we have
+                // But skip if it's still a placeholder
+                if (hasPlaceholderName) {
+                    skippedCount++;
+                    skippedCategories.push({ id: categoryId, reason: 'No path and placeholder name', name: category.name });
+                    console.warn(`Category ${categoryId} has no path and placeholder name, skipping: "${category.name}"`);
+                    processedPaths.add(pathKey);
+                    continue;
+                }
+                
+                // Treat as root level category with valid name
                 if (!allCategoryNodes.has(categoryId)) {
                     allCategoryNodes.set(categoryId, {
                         id: categoryId,
@@ -4243,16 +4313,41 @@ async function syncCategoriesToPrestashop() {
             processedPaths.add(pathKey);
         } catch (error) {
             console.error(`Error fetching path for category ${categoryId}:`, error);
-            // Still add the category itself even if path fetch fails
-            if (!allCategoryNodes.has(categoryId)) {
-                allCategoryNodes.set(categoryId, {
-                    id: categoryId,
-                    name: category.name,
-                    parentId: null,
-                    level: 0
-                });
+            
+            // If we have a valid name, still add the category even if path fetch fails
+            if (!hasPlaceholderName && category.name) {
+                if (!allCategoryNodes.has(categoryId)) {
+                    allCategoryNodes.set(categoryId, {
+                        id: categoryId,
+                        name: category.name,
+                        parentId: null,
+                        level: 0
+                    });
+                }
+            } else {
+                skippedCount++;
+                skippedCategories.push({ id: categoryId, reason: 'Path fetch error and invalid/placeholder name', name: category.name });
+                console.warn(`Category ${categoryId} skipped due to path fetch error and invalid/placeholder name`);
             }
+            
+            processedPaths.add(pathKey);
         }
+    }
+    
+    // Log summary of category collection
+    console.log(`Category collection summary: ${allCategoryNodes.size} unique categories collected, ${skippedCount} skipped`);
+    if (skippedCount > 0) {
+        console.warn(`Skipped categories:`, skippedCategories);
+    }
+    
+    // Check if "Modules" category is in the collected categories (for testing)
+    const modulesCategory = Array.from(allCategoryNodes.values()).find(cat => 
+        cat.name && cat.name.toLowerCase().includes('module')
+    );
+    if (modulesCategory) {
+        console.log(`✓ "Modules" category found in collected categories: ID=${modulesCategory.id}, Name="${modulesCategory.name}", Level=${modulesCategory.level}`);
+    } else {
+        console.warn(`⚠ "Modules" category NOT found in collected categories. Check if it was skipped.`);
     }
 
     // Step 2: Group categories by level for proper creation order
@@ -4305,7 +4400,7 @@ async function syncCategoriesToPrestashop() {
             }
 
             try {
-                const response = await apiFetch(`${API_BASE}/api/prestashop/categories`, {
+                const response = await authFetch(`${API_BASE}/api/prestashop/categories`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -4349,14 +4444,30 @@ async function syncCategoriesToPrestashop() {
     }
 
     // Show summary
-    if (createdCount > 0 || existingCount > 0 || errorCount > 0) {
-        const message = `Category sync completed: ${createdCount} created, ${existingCount} already existed, ${errorCount} errors`;
+    if (createdCount > 0 || existingCount > 0 || errorCount > 0 || skippedCount > 0) {
+        const totalProcessed = createdCount + existingCount + errorCount + skippedCount;
+        const message = `✓ Category sync completed: ${totalProcessed} total (${createdCount} created, ${existingCount} existed, ${errorCount} errors${skippedCount > 0 ? `, ${skippedCount} skipped` : ''})`;
         console.log(message);
         
         // Show toast notification if there were results
         if (createdCount > 0 || errorCount > 0) {
             showToast(message, errorCount > 0 ? 'warning' : 'success');
         }
+    } else {
+        console.log('✓ Category sync completed: No categories to sync');
+    }
+    
+    // Final check: verify "Modules" category was synced
+    const syncedModulesCategory = Array.from(categoryIdMap.entries()).find(([allegroId, prestashopId]) => {
+        const node = allCategoryNodes.get(allegroId);
+        return node && node.name && node.name.toLowerCase().includes('module');
+    });
+    if (syncedModulesCategory) {
+        const [allegroId, prestashopId] = syncedModulesCategory;
+        const node = allCategoryNodes.get(allegroId);
+        console.log(`✓ "Modules" category successfully synced: Allegro ID=${allegroId}, PrestaShop ID=${prestashopId}, Name="${node.name}"`);
+    } else {
+        console.warn(`⚠ "Modules" category was NOT synced. Check skipped categories list above.`);
     }
 }
 
@@ -4464,7 +4575,7 @@ async function exportToPrestashop() {
                 }
             }
             
-            const response = await apiFetch(`${API_BASE}/api/prestashop/products`, {
+            const response = await authFetch(`${API_BASE}/api/prestashop/products`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -4503,11 +4614,16 @@ async function exportToPrestashop() {
     }
     
     // Show final results
+    const totalExported = successCount + errorCount;
     if (errorCount > 0) {
-        showToast(`Export completed: ${successCount} success, ${errorCount} errors`, 'error', 10000);
+        const message = `✗ Product export completed: ${totalExported} total (${successCount} success, ${errorCount} errors)`;
+        console.log(message);
+        showToast(message, 'error', 10000);
         console.error('Export errors:', errors);
     } else {
-        showToast(`Successfully exported ${successCount} product(s) to PrestaShop!`, 'success', 10000);
+        const message = `✓ Product export completed: ${successCount} product(s) exported successfully`;
+        console.log(message);
+        showToast(message, 'success', 10000);
     }
 
     // Hide progress UI after a short delay
@@ -4545,7 +4661,7 @@ async function exportCategoriesCsv() {
     }
     
     try {
-        const response = await apiFetch(`${API_BASE}/api/export/categories.csv`);
+        const response = await authFetch(`${API_BASE}/api/export/categories.csv`);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to export categories' }));
@@ -4592,7 +4708,7 @@ async function exportProductsCsv() {
     }
     
     try {
-        const response = await apiFetch(`${API_BASE}/api/export/products.csv`);
+        const response = await authFetch(`${API_BASE}/api/export/products.csv`);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ error: 'Failed to export products' }));
@@ -4687,7 +4803,7 @@ async function fetchCategoryData(categoryId) {
     }
     
     try {
-        const response = await apiFetch(`${API_BASE}/api/categories/${categoryId}`);
+        const response = await authFetch(`${API_BASE}/api/categories/${categoryId}`);
         if (!response.ok) {
             return null;
         }
@@ -4764,7 +4880,8 @@ async function buildCategoryTreeWithProducts(categoriesWithCounts) {
     
     for (let i = 0; i < categoryIds.length; i += batchSize) {
         const batch = categoryIds.slice(i, i + batchSize);
-        await Promise.all(batch.map(async (catId) => {
+        // Use Promise.allSettled() so one failure doesn't block others
+        const results = await Promise.allSettled(batch.map(async (catId) => {
             const category = categoryMap.get(catId);
             const path = await fetchCategoryPath(catId);
             
@@ -4803,6 +4920,13 @@ async function buildCategoryTreeWithProducts(categoriesWithCounts) {
                 }
             }
         }));
+        
+        // Log any failures but continue processing
+        results.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                console.error(`Failed to fetch category path for ${batch[index]}:`, result.reason);
+            }
+        });
     }
     
     // Set category counts correctly: leaf categories get their direct product count,
@@ -4944,8 +5068,9 @@ async function loadCategoriesFromOffers() {
     categoriesListEl.innerHTML = '<div style="text-align: center; padding: 20px; color: #1a73e8; font-size: 0.9em;">Loading categories from your offers...</div>';
     
     try {
-        // Fetch ACTIVE offers by default to match Allegro website count
-        // This ensures category counts match what Allegro displays
+        // Fetch offers with ALL statuses to ensure all categories with products are collected
+        // This is critical for category synchronization - categories must be synced even if their products are not ACTIVE
+        // Categories for current-user-accounts with products should be synchronized from Allegro to PrestaShop
         let allOffers = [];
         let offset = 0;
         const limit = 1000; // Maximum allowed by API
@@ -4953,9 +5078,10 @@ async function loadCategoriesFromOffers() {
         let totalCountFromAPI = null; // Store API's totalCount for accurate display
         
         while (hasMore) {
-            // Filter by ACTIVE status to match Allegro website (which shows ACTIVE offers by default)
+            // Fetch offers with all statuses (ACTIVE, INACTIVE, ENDED, ACTIVATING) to collect all categories
             // Use authenticated fetch because /api/offers is protected by JWT authMiddleware
-            const response = await authFetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}&status=ACTIVE`);
+            // Pass statuses as comma-separated string (server handles this format)
+            const response = await authFetch(`${API_BASE}/api/offers?offset=${offset}&limit=${limit}&status=ACTIVE,INACTIVE,ENDED,ACTIVATING`);
             
             if (!response.ok) {
                 if (response.status === 401) {
@@ -5002,7 +5128,7 @@ async function loadCategoriesFromOffers() {
             }
         }
         
-        // Filter to only active offers for accurate counts
+        // Filter to only active offers for accurate display counts
         const activeOffersForCount = allOffers.filter(offer => {
             return offer?.publication?.status === 'ACTIVE';
         });
@@ -5023,15 +5149,17 @@ async function loadCategoriesFromOffers() {
             totalOffersCountFromAPI = activeOffersForCount.length;
         }
         
-        // Extract unique categories from offers with counts
-        // Only count offers with ACTIVE status
+        // Extract unique categories from ALL offers (not just ACTIVE)
+        // This ensures all categories with products are collected for synchronization
+        // Categories for current-user-accounts with products should be synchronized from Allegro to PrestaShop
         const categoriesFromOffers = new Map();
         
-        // Use the already filtered active offers for counting
+        // Process ALL offers to collect categories (not just active ones)
         let offersWithCategories = 0;
         let offersWithoutCategories = 0;
+        let activeOffersWithCategories = 0; // Track active offers separately for display
         
-        activeOffersForCount.forEach(offer => {
+        allOffers.forEach(offer => {
             let offerCategoryId = null;
             let offerCategoryName = null;
             
@@ -5057,26 +5185,37 @@ async function loadCategoriesFromOffers() {
             
             if (offerCategoryId) {
                 offersWithCategories++;
+                // Track active offers separately for display purposes
+                if (offer?.publication?.status === 'ACTIVE') {
+                    activeOffersWithCategories++;
+                }
+                
                 const catId = String(offerCategoryId);
                 if (!categoriesFromOffers.has(catId)) {
                     categoriesFromOffers.set(catId, {
                         id: catId,
                         name: offerCategoryName || categoryNameCache[catId] || `Category ${catId}`,
-                        count: 0
+                        count: 0, // Count will track active offers for display
+                        totalCount: 0 // Track total offers (all statuses) for sync purposes
                     });
                 }
-                categoriesFromOffers.get(catId).count++;
+                // Increment count only for active offers (for display)
+                if (offer?.publication?.status === 'ACTIVE') {
+                    categoriesFromOffers.get(catId).count++;
+                }
+                // Always increment totalCount to track that this category has products
+                categoriesFromOffers.get(catId).totalCount++;
             } else {
                 offersWithoutCategories++;
             }
         });
         
-        console.log(`Category extraction: ${offersWithCategories} offers with categories, ${offersWithoutCategories} offers without categories`);
+        console.log(`Category extraction: ${offersWithCategories} offers with categories (${activeOffersWithCategories} ACTIVE), ${offersWithoutCategories} offers without categories`);
         
         // Convert map to array and fetch category names if needed
         const categoriesArray = Array.from(categoriesFromOffers.values());
         
-        console.log(`Found ${categoriesArray.length} unique categories from ${activeOffersForCount.length} active offers`);
+        console.log(`Found ${categoriesArray.length} unique categories from ${allOffers.length} total offers (${activeOffersForCount.length} ACTIVE)`);
         if (categoriesArray.length > 0) {
             const totalProductsInCategories = categoriesArray.reduce((sum, cat) => sum + (cat.count || 0), 0);
             console.log(`Total products in categories: ${totalProductsInCategories}`);
@@ -5092,7 +5231,8 @@ async function loadCategoriesFromOffers() {
         // Category counts reflect the number of offers loaded, which may differ from Allegro website
         
         // Fetch category names for categories without names, in parallel for speed
-        await Promise.all(categoriesArray.map(async (cat) => {
+        // Use Promise.allSettled() so one failure doesn't block others
+        const categoryNameResults = await Promise.allSettled(categoriesArray.map(async (cat) => {
             if (cat.name === `Category ${cat.id}` || !cat.name) {
                 try {
                     const catName = await fetchCategoryName(cat.id);
@@ -5105,6 +5245,13 @@ async function loadCategoriesFromOffers() {
                 }
             }
         }));
+        
+        // Log any failures (though individual errors are already caught above)
+        categoryNameResults.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                console.error(`Failed to process category name for ${categoriesArray[index].id}:`, result.reason);
+            }
+        });
         
         // Build category tree with only categories that have products
         await buildCategoryTreeWithProducts(categoriesArray);
@@ -5293,7 +5440,7 @@ async function fetchCategoryName(categoryId) {
     }
     
     try {
-        const response = await apiFetch(`${API_BASE}/api/categories/${categoryId}`);
+        const response = await authFetch(`${API_BASE}/api/categories/${categoryId}`);
         if (!response.ok) {
             return 'N/A';
         }
@@ -5800,17 +5947,58 @@ function displaySyncLogs(logs) {
         return;
     }
     
-    // Separate product checking logs from summary/info logs
-    const productLogs = logs.filter(log => log.productName && log.status !== 'info');
-    const summaryLogs = logs.filter(log => !log.productName || log.status === 'info');
+    // Filter out "checking" status logs (they're temporary and shouldn't be displayed)
+    // Also filter out info logs without product names (like "No products found")
+    const filteredLogs = logs.filter(log => {
+      // Don't show checking status (shouldn't be in DB anymore, but filter just in case)
+      if (log.status === 'checking') return false;
+      // Don't show info logs without product names
+      if (log.status === 'info' && !log.productName) return false;
+      return true;
+    });
     
-    // Display product checking list if there are product logs
-    if (productLogs.length > 0 && productCheckingList && productCheckingItems) {
+    // Separate product logs from summary/info logs
+    const productLogs = filteredLogs.filter(log => log.productName && log.status !== 'info');
+    const summaryLogs = filteredLogs.filter(log => !log.productName || log.status === 'info');
+    
+    // Find the most recent sync start log to identify current sync session
+    const syncStartLog = summaryLogs.find(log => 
+        log.message && log.message.includes('Starting stock sync')
+    );
+    
+    // Only count logs from the current sync session (after the most recent sync start)
+    // If no sync start log found, it means no sync has run (or sync found 0 products and didn't log)
+    // In this case, don't show any progress - return early
+    if (!syncStartLog) {
+        // No sync start log means either:
+        // 1. No sync has run yet, OR
+        // 2. Sync ran but found 0 products (so no start log was created)
+        // In either case, don't show progress from old logs
+        if (productCheckingList) productCheckingList.style.display = 'none';
+        if (checkingProgress) checkingProgress.textContent = '';
+        
+        // No sync start log means either:
+        // 1. No sync has run yet, OR
+        // 2. Sync ran but found 0 products (so no start log was created)
+        // In either case, don't show progress from old logs
+        // Continue to show summary logs below if any exist
+    }
+    
+    const syncStartTime = new Date(syncStartLog.timestamp).getTime();
+    
+    // Filter product logs to only include those from current sync session
+    const currentSessionLogs = productLogs.filter(log => {
+        const logTime = new Date(log.timestamp).getTime();
+        return logTime >= syncStartTime;
+    });
+    
+    // Only display product checking list if there are actual product sync logs from current session
+    if (currentSessionLogs.length > 0 && productCheckingList && productCheckingItems) {
         productCheckingList.style.display = 'block';
         
-        // Group products by name to show latest status
+        // Group products by name to show latest status (only from current session)
         const productStatusMap = new Map();
-        productLogs.forEach(log => {
+        currentSessionLogs.forEach(log => {
             const key = log.prestashopProductId || log.offerId || log.productName;
             if (!productStatusMap.has(key) || new Date(log.timestamp) > new Date(productStatusMap.get(key).timestamp)) {
                 productStatusMap.set(key, log);
@@ -5818,17 +6006,20 @@ function displaySyncLogs(logs) {
         });
         
         const productArray = Array.from(productStatusMap.values());
-        const checkingCount = productArray.filter(p => p.status === 'checking').length;
+        // Don't count checking status (shouldn't be in DB, but filter just in case)
+        const checkingCount = 0; // productArray.filter(p => p.status === 'checking').length;
         const syncedCount = productArray.filter(p => p.status === 'success').length;
         const unchangedCount = productArray.filter(p => p.status === 'unchanged').length;
         const errorCount = productArray.filter(p => p.status === 'error').length;
         const skippedCount = productArray.filter(p => p.status === 'warning' || p.status === 'skipped').length;
         const totalCount = productArray.length;
         
-        // Update progress
-        if (checkingProgress) {
+        // Update progress - only show if we have logs from current session
+        if (checkingProgress && totalCount > 0) {
             const completed = totalCount - checkingCount;
             checkingProgress.textContent = `Progress: ${completed}/${totalCount} checked (${syncedCount} synced, ${unchangedCount} unchanged, ${skippedCount} skipped, ${errorCount} errors)`;
+        } else if (checkingProgress) {
+            checkingProgress.textContent = '';
         }
         
         // Sort by timestamp (oldest first for checking list to show progress)
@@ -5863,6 +6054,12 @@ function displaySyncLogs(logs) {
                 if (log.offerId) parts.push(`Allegro: ${log.offerId}`);
                 if (log.prestashopProductId) parts.push(`PrestaShop: ${log.prestashopProductId}`);
                 idsInfo = `<span>${parts.join(' | ')}</span>`;
+            }
+            
+            // Add message/reason display for checking status
+            let messageInfo = '';
+            if (log.message && log.message.trim() !== '') {
+                messageInfo = `<span class="product-check-message" style="color: #666; font-size: 0.85em; font-style: italic;">${escapeHtml(log.message)}</span>`;
             }
             
             let productDisplayName = '';
@@ -5902,6 +6099,7 @@ function displaySyncLogs(logs) {
                         <div class="product-check-name">${productDisplayName}</div>
                         <div class="product-check-details">
                             <span>${statusText}</span>
+                            ${messageInfo}
                             ${stockInfo}
                             ${priceInfo}
                             ${idsInfo}
@@ -5912,7 +6110,9 @@ function displaySyncLogs(logs) {
             `;
         }).join('');
     } else {
+        // Hide progress section if no current session logs
         if (productCheckingList) productCheckingList.style.display = 'none';
+        if (checkingProgress) checkingProgress.textContent = '';
     }
     
     // Display summary logs (excluding info status logs)
