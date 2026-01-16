@@ -5831,32 +5831,20 @@ function setupTabNavigation() {
             if (targetContent) {
                 targetContent.classList.add('active');
                 
-                // Load sync logs when sync-log tab is opened
+                // Load sync statistics when sync-log tab is opened
                 if (targetTab === 'sync-log') {
-                    loadSyncLogs();
+                    loadSyncStatistics();
                     checkSyncPrerequisites();
                     updateSyncControlButtons();
-                    // Auto-refresh sync logs every 2 seconds when tab is active for real-time updates
-                    if (window.syncLogInterval) {
-                        clearInterval(window.syncLogInterval);
-                    }
-                    window.syncLogInterval = setInterval(() => {
-                        if (targetContent.classList.contains('active')) {
-                            loadSyncLogs();
-                            updateSyncStatusFromServer();
-                        }
-                    }, 2000); // Poll every 2 seconds for real-time updates
-                    
                     // Start real-time timer updates
                     startSyncTimer();
                 } else if (targetTab === 'user-management') {
                     // Load users when user-management tab is opened
                     loadUsers();
                 } else {
-                    // Clear interval when switching away from sync-log tab
-                    if (window.syncLogInterval) {
-                        clearInterval(window.syncLogInterval);
-                        window.syncLogInterval = null;
+                    // Stop long polling when switching away from sync-log tab
+                    if (window.syncStatisticsLongPoll) {
+                        window.syncStatisticsLongPoll = false;
                     }
                     // Stop timer when switching away
                     if (syncTimerInterval) {
@@ -5916,325 +5904,286 @@ function truncateText(text, maxLength) {
     return text.substring(0, maxLength) + '...';
 }
 
-// Sync Stock Log Functions
-async function loadSyncLogs() {
+// Sync Statistics Functions with Long Polling
+let lastKnownSyncEndTime = null;
+
+async function loadSyncStatistics() {
+    const syncStatisticsList = document.getElementById('syncStatisticsList');
+    const syncStatisticsLoading = document.getElementById('syncStatisticsLoading');
+    
+    if (!syncStatisticsList) return;
+    
     try {
-        const response = await authFetch('/api/sync/logs?limit=200');
-        const data = await response.json();
-        
-        if (data.success) {
-            displaySyncLogs(data.logs);
-            updateSyncStatus(data.lastSyncTime, data.nextSyncTime);
-        } else {
-            console.error('Failed to load sync logs:', data.error);
+        // Show loading indicator if waiting for sync
+        const userState = await getSyncStatus();
+        if (userState && userState.running) {
+            syncStatisticsLoading.style.display = 'block';
         }
+        
+        // Start long polling
+        window.syncStatisticsLongPoll = true;
+        await longPollSyncStatistics();
     } catch (error) {
-        console.error('Error loading sync logs:', error);
+        console.error('Error loading sync statistics:', error);
+        syncStatisticsLoading.style.display = 'none';
+        syncStatisticsList.innerHTML = '<div class="sync-statistics-empty">Error loading sync statistics. Please refresh.</div>';
     }
 }
 
-function displaySyncLogs(logs) {
-    const syncLogList = document.getElementById('syncLogList');
-    const productCheckingList = document.getElementById('productCheckingList');
-    const productCheckingItems = document.getElementById('productCheckingItems');
-    const checkingProgress = document.getElementById('checkingProgress');
+async function longPollSyncStatistics() {
+    const syncStatisticsList = document.getElementById('syncStatisticsList');
+    const syncStatisticsLoading = document.getElementById('syncStatisticsLoading');
     
-    if (!syncLogList) return;
-    
-    if (!logs || logs.length === 0) {
-        syncLogList.innerHTML = '<div class="sync-log-empty">No sync logs yet. Stock sync will run automatically at configured intervals.</div>';
-        if (productCheckingList) productCheckingList.style.display = 'none';
+    if (!window.syncStatisticsLongPoll) {
+        syncStatisticsLoading.style.display = 'none';
         return;
     }
     
-    // Filter out "checking" status logs (they're temporary and shouldn't be displayed)
-    // Also filter out info logs without product names (like "No products found")
-    const filteredLogs = logs.filter(log => {
-      // Don't show checking status (shouldn't be in DB anymore, but filter just in case)
-      if (log.status === 'checking') return false;
-      // Don't show info logs without product names
-      if (log.status === 'info' && !log.productName) return false;
-      return true;
-    });
-    
-    // Separate product logs from summary/info logs
-    const productLogs = filteredLogs.filter(log => log.productName && log.status !== 'info');
-    const summaryLogs = filteredLogs.filter(log => !log.productName || log.status === 'info');
-    
-    // Find the most recent sync start log to identify current sync session
-    const syncStartLog = summaryLogs.find(log => 
-        log.message && log.message.includes('Starting stock sync')
-    );
-    
-    // Only count logs from the current sync session (after the most recent sync start)
-    // If no sync start log found, it means no sync has run (or sync found 0 products and didn't log)
-    // In this case, don't show any progress - return early
-    if (!syncStartLog) {
-        // No sync start log means either:
-        // 1. No sync has run yet, OR
-        // 2. Sync ran but found 0 products (so no start log was created)
-        // In either case, don't show progress from old logs
-        if (productCheckingList) productCheckingList.style.display = 'none';
-        if (checkingProgress) checkingProgress.textContent = '';
+    try {
+        const url = `/api/sync/statistics?longPoll=true&timeout=60000${lastKnownSyncEndTime ? `&lastSyncEndTime=${encodeURIComponent(lastKnownSyncEndTime)}` : ''}`;
+        const response = await authFetch(url);
+        const data = await response.json();
         
-        // No sync start log means either:
-        // 1. No sync has run yet, OR
-        // 2. Sync ran but found 0 products (so no start log was created)
-        // In either case, don't show progress from old logs
-        // Continue to show summary logs below if any exist
-    }
-    
-    const syncStartTime = new Date(syncStartLog.timestamp).getTime();
-    
-    // Filter product logs to only include those from current sync session
-    const currentSessionLogs = productLogs.filter(log => {
-        const logTime = new Date(log.timestamp).getTime();
-        return logTime >= syncStartTime;
-    });
-    
-    // Only display product checking list if there are actual product sync logs from current session
-    if (currentSessionLogs.length > 0 && productCheckingList && productCheckingItems) {
-        productCheckingList.style.display = 'block';
-        
-        // Group products by name to show latest status (only from current session)
-        const productStatusMap = new Map();
-        currentSessionLogs.forEach(log => {
-            const key = log.prestashopProductId || log.offerId || log.productName;
-            if (!productStatusMap.has(key) || new Date(log.timestamp) > new Date(productStatusMap.get(key).timestamp)) {
-                productStatusMap.set(key, log);
-            }
-        });
-        
-        const productArray = Array.from(productStatusMap.values());
-        // Don't count checking status (shouldn't be in DB, but filter just in case)
-        const checkingCount = 0; // productArray.filter(p => p.status === 'checking').length;
-        const syncedCount = productArray.filter(p => p.status === 'success').length;
-        const unchangedCount = productArray.filter(p => p.status === 'unchanged').length;
-        const errorCount = productArray.filter(p => p.status === 'error').length;
-        const skippedCount = productArray.filter(p => p.status === 'warning' || p.status === 'skipped').length;
-        const totalCount = productArray.length;
-        
-        // Update progress - only show if we have logs from current session
-        if (checkingProgress && totalCount > 0) {
-            const completed = totalCount - checkingCount;
-            checkingProgress.textContent = `Progress: ${completed}/${totalCount} checked (${syncedCount} synced, ${unchangedCount} unchanged, ${skippedCount} skipped, ${errorCount} errors)`;
-        } else if (checkingProgress) {
-            checkingProgress.textContent = '';
-        }
-        
-        // Sort by timestamp (oldest first for checking list to show progress)
-        productArray.sort((a, b) => {
-            const dateA = new Date(a.timestamp);
-            const dateB = new Date(b.timestamp);
-            return dateA - dateB; // Oldest first
-        });
-        
-        productCheckingItems.innerHTML = productArray.map(log => {
-            const statusClass = log.status || 'info';
-            const statusIcon = getStatusIcon(statusClass);
-            const statusText = getStatusText(statusClass);
+        if (data.success) {
+            displaySyncStatistics(data.statistics);
+            updateSyncStatus(data.lastSyncTime, data.nextSyncTime);
             
-            let stockInfo = '';
-            if (log.stockChange && log.stockChange.from !== null && log.stockChange.to !== null) {
-                stockInfo = `<span class="product-check-stock">Stock: ${log.stockChange.from} → ${log.stockChange.to}</span>`;
+            // Update last known sync end time
+            if (data.statistics && data.statistics.length > 0) {
+                lastKnownSyncEndTime = data.statistics[0].syncEndTime;
             }
             
-            let priceInfo = '';
-            if (log.allegroPrice !== null && log.allegroPrice !== undefined || log.prestashopPrice !== null && log.prestashopPrice !== undefined) {
-                const formatPrice = (price) => {
-                    if (price === null || price === undefined) return 'N/A';
-                    return typeof price === 'number' ? price.toFixed(2) : parseFloat(price).toFixed(2);
-                };
-                priceInfo = `<span class="product-check-price">Price: ${formatPrice(log.prestashopPrice)} PLN → ${formatPrice(log.allegroPrice)} PLN</span>`;
+            // Hide loading if sync completed
+            if (!data.running) {
+                syncStatisticsLoading.style.display = 'none';
             }
             
-            let idsInfo = '';
-            if (log.offerId || log.prestashopProductId) {
-                const parts = [];
-                if (log.offerId) parts.push(`Allegro: ${log.offerId}`);
-                if (log.prestashopProductId) parts.push(`PrestaShop: ${log.prestashopProductId}`);
-                idsInfo = `<span>${parts.join(' | ')}</span>`;
+            // If sync is still running or we got a new sync, continue polling
+            if (window.syncStatisticsLongPoll && (data.running || data.hasNewSync)) {
+                // Immediately poll again if sync is running or new sync detected
+                setTimeout(() => longPollSyncStatistics(), 100);
+            } else if (window.syncStatisticsLongPoll) {
+                // If not running, wait a bit longer before next poll
+                setTimeout(() => longPollSyncStatistics(), 2000);
             }
-            
-            // Add message/reason display for checking status
-            let messageInfo = '';
-            if (log.message && log.message.trim() !== '') {
-                messageInfo = `<span class="product-check-message" style="color: #666; font-size: 0.85em; font-style: italic;">${escapeHtml(log.message)}</span>`;
-            }
-            
-            let productDisplayName = '';
-            if (log.productName && log.productName.trim() !== '' && !log.productName.startsWith('Offer ')) {
-                productDisplayName = escapeHtml(log.productName);
-            } else if (log.offerId) {
-                productDisplayName = `Offer ${escapeHtml(log.offerId)}`;
-            } else if (log.prestashopProductId) {
-                productDisplayName = `Product ID ${escapeHtml(log.prestashopProductId)}`;
-            } else {
-                productDisplayName = 'Unknown Product';
-            }
-            
-            if (log.categoryName) {
-                productDisplayName += `<span style="font-weight: 400; color: #666; font-size: 0.9em;"> • ${escapeHtml(log.categoryName)}</span>`;
-            }
-            
-            // Format sync date from timestamp
-            let syncDateDisplay = '';
-            if (log.timestamp) {
-                const syncDate = new Date(log.timestamp);
-                syncDateDisplay = syncDate.toLocaleString('en-US', {
-                    year: 'numeric',
-                    month: '2-digit',
-                    day: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                    hour12: false
-                });
-            }
-            
-            return `
-                <div class="product-checking-item ${statusClass}">
-                    <div class="product-check-status ${statusClass}">${statusIcon}</div>
-                    <div class="product-check-info">
-                        <div class="product-check-name">${productDisplayName}</div>
-                        <div class="product-check-details">
-                            <span>${statusText}</span>
-                            ${messageInfo}
-                            ${stockInfo}
-                            ${priceInfo}
-                            ${idsInfo}
-                        </div>
-                    </div>
-                    <div class="product-check-sync-date" style="font-size: 0.75em; color: #999;">${syncDateDisplay}</div>
-                </div>
-            `;
-        }).join('');
-    } else {
-        // Hide progress section if no current session logs
-        if (productCheckingList) productCheckingList.style.display = 'none';
-        if (checkingProgress) checkingProgress.textContent = '';
-    }
-    
-    // Display summary logs (excluding info status logs)
-    const sortedLogs = [...summaryLogs]
-        .filter(log => (log.status || 'info') !== 'info') // Filter out info logs
-        .sort((a, b) => {
-            const dateA = new Date(a.timestamp);
-            const dateB = new Date(b.timestamp);
-            return dateB - dateA; // Newest first
-        });
-    
-    syncLogList.innerHTML = sortedLogs.map(log => {
-        const timestamp = new Date(log.timestamp).toLocaleString();
-        const statusClass = log.status || 'info';
-        
-        const formatPrice = (price) => {
-            if (price === null || price === undefined) return 'N/A';
-            return typeof price === 'number' ? price.toFixed(2) : parseFloat(price).toFixed(2);
-        };
-        
-        // Always display stock if stockChange data is available
-        let stockChangeHtml = '';
-        if (log.stockChange && log.stockChange.from !== null && log.stockChange.to !== null) {
-            stockChangeHtml = `
-                <div class="sync-log-stock-change" style="font-size: 0.9em; color: #555; margin-top: 4px;">
-                    <span style="font-weight: 500;">Stock:</span> ${log.stockChange.from} → ${log.stockChange.to}
-                </div>
-            `;
-        }
-        
-        // Always display prices from Allegro and PrestaShop if available
-        let priceHtml = '';
-        if (log.allegroPrice !== null && log.allegroPrice !== undefined || log.prestashopPrice !== null && log.prestashopPrice !== undefined) {
-            priceHtml = `
-                <div class="sync-log-price" style="font-size: 0.9em; color: #555; margin-top: 4px;">
-                    <span style="font-weight: 500;">Price:</span> 
-                    <span style="color: #4CAF50;">${formatPrice(log.prestashopPrice)} PLN</span> → 
-                    <span style="color: #2196F3;">${formatPrice(log.allegroPrice)} PLN</span>
-                </div>
-            `;
-        }
-        
-        // Display product name prominently - use product name if available, otherwise show offer ID
-        let productInfo = '';
-        let displayName = '';
-        let categoryInfo = '';
-        
-        if (log.categoryName) {
-            categoryInfo = `<span style="font-weight: 400; color: #666; font-size: 0.9em;"> • ${escapeHtml(log.categoryName)}</span>`;
-        }
-        
-        if (log.productName && log.productName.trim() !== '' && !log.productName.startsWith('Offer ')) {
-            // Product name is available and not a fallback "Offer {ID}" format
-            displayName = escapeHtml(log.productName);
-        } else if (log.offerId) {
-            // Fallback to showing offer ID if no proper product name
-            displayName = `Offer ${escapeHtml(log.offerId)}`;
-        } else if (log.prestashopProductId) {
-            // Last resort: show PrestaShop ID
-            displayName = `Product ID ${escapeHtml(log.prestashopProductId)}`;
         } else {
-            displayName = 'Unknown Product';
+            syncStatisticsLoading.style.display = 'none';
+            syncStatisticsList.innerHTML = '<div class="sync-statistics-empty">Error loading sync statistics.</div>';
+            // Retry after delay
+            if (window.syncStatisticsLongPoll) {
+                setTimeout(() => longPollSyncStatistics(), 5000);
+            }
         }
+    } catch (error) {
+        console.error('Error in long polling sync statistics:', error);
+        syncStatisticsLoading.style.display = 'none';
+        // Retry after delay
+        if (window.syncStatisticsLongPoll) {
+            setTimeout(() => longPollSyncStatistics(), 5000);
+        }
+    }
+}
+
+async function getSyncStatus() {
+    try {
+        const response = await authFetch('/api/sync/status');
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Error getting sync status:', error);
+        return null;
+    }
+}
+
+function displaySyncStatistics(statistics) {
+    const syncStatisticsList = document.getElementById('syncStatisticsList');
+    if (!syncStatisticsList) return;
+    
+    if (!statistics || statistics.length === 0) {
+        syncStatisticsList.innerHTML = '<div class="sync-statistics-empty">No sync statistics yet. Sync will run automatically at configured intervals.</div>';
+        return;
+    }
+    
+    syncStatisticsList.innerHTML = statistics.map(stat => {
+        const syncStartTime = stat.syncStartTime ? new Date(stat.syncStartTime).toLocaleString('en-US', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        }) : 'N/A';
         
-        if (displayName) {
-            productInfo = `<div class="sync-log-product" style="font-weight: 600; margin-bottom: 4px;">${displayName}${categoryInfo}</div>`;
-        }
+        const syncEndTime = stat.syncEndTime ? new Date(stat.syncEndTime).toLocaleString('en-US', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        }) : 'N/A';
         
-        let detailsHtml = '';
-        if (log.offerId || log.prestashopProductId) {
-            const parts = [];
-            if (log.offerId) parts.push(`Allegro: ${log.offerId}`);
-            if (log.prestashopProductId) parts.push(`PrestaShop: ${log.prestashopProductId}`);
-            detailsHtml = `<div style="font-size: 0.85em; color: #999; margin-top: 4px;">${parts.join(' | ')}</div>`;
-        }
-        
-        // Skip "checking" status logs in the main log list (they're shown in checking list)
-        if (statusClass === 'checking') {
-            return '';
-        }
+        const duration = stat.syncStartTime && stat.syncEndTime 
+            ? formatDuration(new Date(stat.syncEndTime) - new Date(stat.syncStartTime))
+            : 'N/A';
         
         return `
-            <div class="sync-log-entry ${statusClass}">
-                <div class="sync-log-header">
-                    <div class="sync-log-timestamp" style="font-size: 0.75em; color: #999;">${timestamp}</div>
-                    <span class="sync-log-status ${statusClass}">${statusClass}</span>
+            <div class="sync-statistics-card">
+                <div class="sync-statistics-header">
+                    <div class="sync-statistics-time-section">
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon time-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+                                    <path d="M12 6V12L16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">Start</span>
+                                <span class="sync-statistics-time-value">${syncStartTime}</span>
+                            </div>
+                        </div>
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon time-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+                                    <path d="M12 6V12L16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">End</span>
+                                <span class="sync-statistics-time-value">${syncEndTime}</span>
+                            </div>
+                        </div>
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon duration-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">Duration</span>
+                                <span class="sync-statistics-time-value">${duration}</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="sync-log-details">
-                    ${productInfo}
-                    <div class="sync-log-message">${escapeHtml(log.message || '')}</div>
-                    ${stockChangeHtml}
-                    ${priceHtml}
-                    ${detailsHtml}
+                <div class="sync-statistics-metrics">
+                    <div class="sync-statistics-metric-item">
+                        <div class="sync-statistics-icon product-icon">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M21 16V8C20.9996 7.64928 20.9071 7.30481 20.7315 7.00116C20.556 6.69751 20.3037 6.44536 20 6.27L13 2.27C12.696 2.09446 12.3511 2.00205 12 2.00205C11.6489 2.00205 11.304 2.09446 11 2.27L4 6.27C3.69626 6.44536 3.44398 6.69751 3.26846 7.00116C3.09294 7.30481 3.00036 7.64928 3 8V16C3.00036 16.3507 3.09294 16.6952 3.26846 16.9988C3.44398 17.3025 3.69626 17.5546 4 17.73L11 21.73C11.304 21.9055 11.6489 21.9979 12 21.9979C12.3511 21.9979 12.696 21.9055 13 21.73L20 17.73C20.3037 17.5546 20.556 17.3025 20.7315 16.9988C20.9071 16.6952 20.9996 16.3507 21 16Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M3.27 6.96L12 12.01L20.73 6.96" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M12 22.08V12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="sync-statistics-metric-content">
+                            <span class="sync-statistics-metric-label">Prestashop product</span>
+                            <span class="sync-statistics-metric-value">${stat.totalProductsChecked}</span>
+                        </div>
+                    </div>
+                    <div class="sync-statistics-metric-item">
+                        <div class="sync-statistics-icon stock-icon">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M6 9V20C6 20.5304 6.21071 21.0391 6.58579 21.4142C6.96086 21.7893 7.46957 22 8 22H16C16.5304 22 17.0391 21.7893 17.4142 21.4142C17.7893 21.0391 18 20.5304 18 20V9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M2 5H6V9H2V5Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M10 5H14V9H10V5Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M18 5H22V9H18V5Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M6 5V2C6 1.73478 6.10536 1.48043 6.29289 1.29289C6.48043 1.10536 6.73478 1 7 1H9C9.26522 1 9.51957 1.10536 9.70711 1.29289C9.89464 1.48043 10 1.73478 10 2V5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M14 5V2C14 1.73478 14.1054 1.48043 14.2929 1.29289C14.4804 1.10536 14.7348 1 15 1H17C17.2652 1 17.5196 1.10536 17.7071 1.29289C17.8946 1.48043 18 1.73478 18 2V5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="sync-statistics-metric-content">
+                            <span class="sync-statistics-metric-label">Synced Stock</span>
+                            <span class="sync-statistics-metric-value">${stat.stockSyncedCount}</span>
+                        </div>
+                    </div>
+                    <div class="sync-statistics-metric-item">
+                        <div class="sync-statistics-icon price-icon">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M12 2V22" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M17 5H9.5C8.57174 5 7.6815 5.36875 7.02513 6.02513C6.36875 6.6815 6 7.57174 6 8.5C6 9.42826 6.36875 10.3185 7.02513 10.9749C7.6815 11.6313 8.57174 12 9.5 12H14.5C15.4283 12 16.3185 12.3687 16.9749 13.0251C17.6313 13.6815 18 14.5717 18 15.5C18 16.4283 17.6313 17.3185 16.9749 17.9749C16.3185 18.6313 15.4283 19 14.5 19H6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="sync-statistics-metric-content">
+                            <span class="sync-statistics-metric-label">Synced Price</span>
+                            <span class="sync-statistics-metric-value">${stat.priceSyncedCount}</span>
+                        </div>
+                    </div>
                 </div>
+                ${stat.changedInfo && Array.isArray(stat.changedInfo) && stat.changedInfo.length > 0 ? `
+                <div class="sync-statistics-changes">
+                    <div class="sync-statistics-changes-header">
+                        <h4>Changed Products (${stat.changedInfo.length})</h4>
+                    </div>
+                    <div class="sync-statistics-changes-list">
+                        ${stat.changedInfo.map(change => {
+                            const hasPriceChange = change.priceBefore !== change.priceAfter;
+                            const hasStockChange = change.stockBefore !== change.stockAfter;
+                            
+                            return `
+                            <div class="sync-statistics-change-item">
+                                <div class="sync-statistics-change-product">
+                                    <div class="sync-statistics-change-product-name">${escapeHtml(change.productName || 'Unknown Product')}</div>
+                                    <div class="sync-statistics-change-product-ids">
+                                        <span class="sync-statistics-change-id">PrestaShop ID: ${change.prestashopProductId}</span>
+                                        ${change.allegroOfferId ? `<span class="sync-statistics-change-id">Allegro ID: ${change.allegroOfferId}</span>` : ''}
+                                    </div>
+                                </div>
+                                <div class="sync-statistics-change-details">
+                                    ${hasPriceChange ? `
+                                    <div class="sync-statistics-change-detail">
+                                        <span class="sync-statistics-change-label">Price:</span>
+                                        <span class="sync-statistics-change-value">${formatPrice(change.priceBefore)} → ${formatPrice(change.priceAfter)}</span>
+                                    </div>
+                                    ` : ''}
+                                    ${hasStockChange ? `
+                                    <div class="sync-statistics-change-detail">
+                                        <span class="sync-statistics-change-label">Stock:</span>
+                                        <span class="sync-statistics-change-value">${change.stockBefore} → ${change.stockAfter}</span>
+                                    </div>
+                                    ` : ''}
+                                </div>
+                            </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+                ` : ''}
             </div>
         `;
-    }).filter(html => html !== '').join('');
+    }).join('');
 }
 
-function getStatusIcon(status) {
-    switch(status) {
-        case 'checking': return '⟳';
-        case 'success': return '✓';
-        case 'unchanged': return '○';
-        case 'error': return '✗';
-        case 'warning':
-        case 'skipped': return '⚠';
-        default: return '•';
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatPrice(price) {
+    if (price === null || price === undefined) return 'N/A';
+    return parseFloat(price).toFixed(2) + ' PLN';
+}
+
+function formatDuration(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    
+    if (hours > 0) {
+        return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+    } else if (minutes > 0) {
+        return `${minutes}m ${seconds % 60}s`;
+    } else {
+        return `${seconds}s`;
     }
 }
 
-function getStatusText(status) {
-    switch(status) {
-        case 'checking': return 'Checking...';
-        case 'success': return 'Synced';
-        case 'unchanged': return 'Unchanged';
-        case 'error': return 'Error';
-        case 'warning':
-        case 'skipped': return 'Skipped';
-        default: return 'Info';
-    }
-}
+// All old sync log display code removed - replaced with sync statistics display
 
 // Store sync times for real-time updates
 let currentLastSyncTime = null;
@@ -6568,9 +6517,9 @@ async function triggerSyncNow() {
         
         if (data.success) {
             showToast('Sync triggered successfully', 'success');
-            // Refresh logs after a short delay
+            // Refresh statistics after a short delay
             setTimeout(() => {
-                loadSyncLogs();
+                loadSyncStatistics();
                 updateSyncStatusFromServer();
             }, 2000);
         } else {

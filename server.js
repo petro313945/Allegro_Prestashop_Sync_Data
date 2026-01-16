@@ -536,6 +536,51 @@ async function initDatabase() {
   `);
 
 
+  // Create sync_statistics table (per-user sync statistics summary)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS sync_statistics (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
+      stock_synced_count INT UNSIGNED NOT NULL DEFAULT 0,
+      price_synced_count INT UNSIGNED NOT NULL DEFAULT 0,
+      total_products_checked INT UNSIGNED NOT NULL DEFAULT 0,
+      stock_unchanged_count INT UNSIGNED NOT NULL DEFAULT 0,
+      stock_skipped_count INT UNSIGNED NOT NULL DEFAULT 0,
+      stock_error_count INT UNSIGNED NOT NULL DEFAULT 0,
+      price_unchanged_count INT UNSIGNED NOT NULL DEFAULT 0,
+      price_error_count INT UNSIGNED NOT NULL DEFAULT 0,
+      sync_start_time DATETIME NOT NULL,
+      sync_end_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      changed_info JSON NULL,
+      INDEX idx_user_timestamp (app_user_id, sync_end_time),
+      INDEX idx_user_start_time (app_user_id, sync_start_time),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // Add changed_info column if it doesn't exist (migration for existing tables)
+  try {
+    await dbPool.query(`
+      ALTER TABLE sync_statistics 
+      ADD COLUMN IF NOT EXISTS changed_info JSON NULL
+    `);
+  } catch (error) {
+    // Column might already exist, or MySQL version doesn't support IF NOT EXISTS
+    // Try without IF NOT EXISTS as fallback
+    try {
+      await dbPool.query(`
+        ALTER TABLE sync_statistics 
+        ADD COLUMN changed_info JSON NULL
+      `);
+    } catch (alterError) {
+      // Column likely already exists, which is fine
+      if (!alterError.message.includes('Duplicate column name')) {
+        console.warn('Migration note for changed_info column:', alterError.message);
+      }
+    }
+  }
+
+
   // Ensure at least one admin user exists if ADMIN_EMAIL / ADMIN_PASSWORD are provided
   const adminEmail = process.env.ADMIN_EMAIL;
   const adminPassword = process.env.ADMIN_PASSWORD;
@@ -1223,135 +1268,13 @@ async function extractCategoryNameFromPrestashop(productData) {
   }
 }
 
-/**
- * Clear all sync logs for a specific user
- * @param {number} appUserId - Application user ID (required)
- */
-async function clearSyncLogs(appUserId) {
-  if (!appUserId) {
-    console.warn('clearSyncLogs called without appUserId, skipping');
-    return;
-  }
+// clearSyncLogs function removed - sync logs are no longer used
 
-  try {
-    if (!dbPool) {
-      console.warn('Database not initialized, cannot clear sync logs');
-      return;
-    }
-
-    const [result] = await dbPool.query(`
-      DELETE FROM sync_logs 
-      WHERE app_user_id = ?
-    `, [appUserId]);
-
-    console.log(`Cleared ${result.affectedRows} sync log entries for user ${appUserId}`);
-  } catch (error) {
-    console.error('Error clearing sync logs from database:', error.message);
-    // Don't throw - clearing logs shouldn't break sync
-  }
-}
-
-/**
- * Add a sync log entry to database (per-user)
- * @param {object} entry - Log entry object
- * @param {number} appUserId - Application user ID (required)
- */
+// addSyncLog function removed - sync statistics are now stored in sync_statistics table
 async function addSyncLog(entry, appUserId) {
-  if (!appUserId) {
-    console.warn('addSyncLog called without appUserId, skipping log entry');
-    return;
-  }
-
-  try {
-    if (!dbPool) {
-      console.warn('Database not initialized, cannot save sync log');
-      return;
-    }
-
-    const logEntry = {
-      ...entry,
-      timestamp: new Date().toISOString()
-    };
-
-    const status = logEntry.status || 'info';
-    
-    // Don't persist "checking" status logs to database - they're temporary and confusing
-    // Only log final statuses (success, unchanged, error, skipped, warning, info)
-    if (status === 'checking') {
-      // Just log to console for debugging, but don't save to database
-      console.log(`[Sync] Checking: ${logEntry.productName || logEntry.offerId || 'Unknown product'}`);
-      return;
-    }
-
-    // When logging a final status, delete any previous "checking" logs for the same product
-    // This prevents "checking" logs from staying in the database and confusing users
-    if (logEntry.prestashopProductId || logEntry.offerId) {
-      try {
-        const deleteConditions = [];
-        const deleteParams = [appUserId];
-        
-        if (logEntry.prestashopProductId) {
-          deleteConditions.push('prestashop_product_id = ?');
-          deleteParams.push(logEntry.prestashopProductId);
-        }
-        if (logEntry.offerId) {
-          deleteConditions.push('offer_id = ?');
-          deleteParams.push(logEntry.offerId);
-        }
-        
-        if (deleteConditions.length > 0) {
-          await dbPool.query(`
-            DELETE FROM sync_logs 
-            WHERE app_user_id = ? 
-            AND status = 'checking'
-            AND (${deleteConditions.join(' OR ')})
-          `, deleteParams);
-        }
-      } catch (deleteError) {
-        // Don't fail if cleanup fails - just log it
-        console.warn('Error cleaning up checking logs:', deleteError.message);
-      }
-    }
-
-    // Insert log entry into database
-    await dbPool.query(`
-      INSERT INTO sync_logs (
-        app_user_id, status, message, product_name, offer_id, 
-        prestashop_product_id, stock_change_from, stock_change_to,
-        allegro_price, prestashop_price, category_name, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      appUserId,
-      status,
-      logEntry.message || '',
-      logEntry.productName || null,
-      logEntry.offerId || null,
-      logEntry.prestashopProductId || null,
-      logEntry.stockChange?.from ?? null,
-      logEntry.stockChange?.to ?? null,
-      logEntry.allegroPrice ?? null,
-      logEntry.prestashopPrice ?? null,
-      logEntry.categoryName || null,
-      logEntry.timestamp
-    ]);
-
-    // Clean up old logs for this user (keep last 1000 entries per user)
-    await dbPool.query(`
-      DELETE FROM sync_logs 
-      WHERE app_user_id = ? 
-      AND id NOT IN (
-        SELECT id FROM (
-          SELECT id FROM sync_logs 
-          WHERE app_user_id = ? 
-          ORDER BY timestamp DESC 
-          LIMIT 1000
-        ) AS keep_logs
-      )
-    `, [appUserId, appUserId]);
-  } catch (error) {
-    console.error('Error saving sync log to database:', error.message);
-    // Don't throw - logging failures shouldn't break sync
-  }
+  // Function removed - no longer logging to sync_logs table
+  // Statistics are saved to sync_statistics table instead
+  return;
 }
 
 /**
@@ -1597,6 +1520,69 @@ async function updateSyncState(appUserId, state) {
   } catch (error) {
     // Silently fail - state updates shouldn't break sync
     console.error('Error updating sync state in database:', error.message);
+  }
+}
+
+/**
+ * Save sync statistics to database
+ * Only keeps the latest sync result per user (deletes old results before inserting new one)
+ * @param {number} appUserId - Application user ID
+ * @param {object} stats - Statistics object with sync counts
+ */
+async function saveSyncStatistics(appUserId, stats) {
+  if (!appUserId) {
+    return; // Silently skip if no user ID
+  }
+
+  try {
+    if (!dbPool) {
+      return; // Silently skip if database not initialized
+    }
+
+    // Delete old sync results for this user (keep only one sync result per user)
+    await dbPool.query(`
+      DELETE FROM sync_statistics 
+      WHERE app_user_id = ?
+    `, [appUserId]);
+
+    // Prepare changed_info JSON (array of product changes)
+    const changedInfoJson = (stats.changedInfo && Array.isArray(stats.changedInfo) && stats.changedInfo.length > 0)
+      ? JSON.stringify(stats.changedInfo)
+      : null;
+
+    // Insert new sync statistics
+    await dbPool.query(`
+      INSERT INTO sync_statistics (
+        app_user_id, 
+        stock_synced_count, 
+        price_synced_count, 
+        total_products_checked,
+        stock_unchanged_count,
+        stock_skipped_count,
+        stock_error_count,
+        price_unchanged_count,
+        price_error_count,
+        sync_start_time,
+        sync_end_time,
+        changed_info
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      appUserId,
+      stats.stockSyncedCount || 0,
+      stats.priceSyncedCount || 0,
+      stats.totalProductsChecked || 0,
+      stats.stockUnchangedCount || 0,
+      stats.stockSkippedCount || 0,
+      stats.stockErrorCount || 0,
+      stats.priceUnchangedCount || 0,
+      stats.priceErrorCount || 0,
+      stats.syncStartTime ? new Date(stats.syncStartTime).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' '),
+      stats.syncEndTime ? new Date(stats.syncEndTime).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' '),
+      changedInfoJson
+    ]);
+  } catch (error) {
+    // Silently fail - statistics saving shouldn't break sync
+    console.error('Error saving sync statistics to database:', error.message);
   }
 }
 
@@ -6931,9 +6917,6 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
   // Mark this user's sync as running (in-memory for quick checks)
   userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: true });
 
-  // Clear previous sync logs for this user when starting a new sync
-  await clearSyncLogs(appUserId);
-
   // Update sync_interval_ms in database to match code default (5 minutes = 300000 ms)
   // This ensures the database always uses the current code's sync interval
   try {
@@ -7011,20 +6994,12 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
     console.log(`Token validated successfully for user ${appUserId}, proceeding with sync...`);
   } catch (tokenError) {
     console.error(`Token validation error for user ${appUserId}:`, tokenError.message);
-    await addSyncLog({
-      status: 'error',
-      message: `OAuth token validation failed: ${tokenError.message}. Please reconnect your Allegro account in the Settings tab.`,
-      productName: null,
-      offerId: null,
-      prestashopProductId: null,
-      stockChange: null
-    }, appUserId);
     userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: false });
     return;
   }
   
   const syncStartTime = new Date().toISOString();
-  let syncedCount = 0;
+  let stockSyncedCount = 0;
   let errorCount = 0;
   let skippedCount = 0;
   let unchangedCount = 0;
@@ -7033,6 +7008,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
   let priceErrorCount = 0;
   let consecutive403Errors = 0;
   const MAX_CONSECUTIVE_403 = 3; // Stop after 3 consecutive 403 errors
+  const productChanges = []; // Track product changes (price/stock) for this sync
 
   try {
     console.log('Starting stock & price sync from Allegro to PrestaShop...');
@@ -7542,7 +7518,19 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                       });
                       await prestashopApiRequest(`stock_availables/${stockAvailableIdRetry}`, 'PUT', stockXml, appUserId);
                       
-                      syncedCount++;
+                      stockSyncedCount++;
+                      
+                      // Record product change
+                      productChanges.push({
+                        productName: productName || 'Unknown Product',
+                        prestashopProductId: prestashopProductId,
+                        allegroOfferId: offerId,
+                        priceBefore: prestashopPrice,
+                        priceAfter: prestashopPrice, // Price unchanged in this case
+                        stockBefore: prestashopStockNum,
+                        stockAfter: allegroStockNum
+                      });
+                      
                       await addSyncLog({
                         status: 'success',
                         message: `Stock synced from Allegro to PrestaShop: ${prestashopStockNum} → ${allegroStockNum} (stock entry created automatically)`,
@@ -7581,7 +7569,19 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                 return;
               }
 
-              syncedCount++;
+              stockSyncedCount++;
+              
+              // Record product change
+              productChanges.push({
+                productName: productName || 'Unknown Product',
+                prestashopProductId: prestashopProductId,
+                allegroOfferId: offerId,
+                priceBefore: prestashopPrice,
+                priceAfter: prestashopPrice, // Price unchanged in this case
+                stockBefore: prestashopStockNum,
+                stockAfter: allegroStockNum
+              });
+              
               await addSyncLog({
                 status: 'success',
                 message: `Stock synced from Allegro to PrestaShop: ${prestashopStockNum} → ${allegroStockNum}`,
@@ -7719,6 +7719,32 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                 await prestashopApiRequest(`products/${prestashopProductId}`, 'PUT', productXml, appUserId);
                 
                 priceSyncedCount++;
+                
+                // Record product change (update existing entry if stock was also changed, otherwise add new)
+                const existingChangeIndex = productChanges.findIndex(
+                  change => change.prestashopProductId === prestashopProductId && 
+                           change.allegroOfferId === offerId
+                );
+                
+                const changeInfo = {
+                  productName: productName || 'Unknown Product',
+                  prestashopProductId: prestashopProductId,
+                  allegroOfferId: offerId,
+                  priceBefore: prestashopPrice,
+                  priceAfter: allegroPrice,
+                  stockBefore: prestashopStockNum,
+                  stockAfter: allegroStockNum
+                };
+                
+                if (existingChangeIndex >= 0) {
+                  // Update existing entry with price change
+                  productChanges[existingChangeIndex].priceBefore = prestashopPrice;
+                  productChanges[existingChangeIndex].priceAfter = allegroPrice;
+                } else {
+                  // Add new entry for price change only
+                  productChanges.push(changeInfo);
+                }
+                
                 await addSyncLog({
                   status: 'success',
                   message: `Price synced from Allegro to PrestaShop: ${prestashopPrice.toFixed(2)} PLN → ${allegroPrice.toFixed(2)} PLN`,
@@ -7869,12 +7895,12 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
     }
 
     // Calculate total products checked (synced + unchanged + skipped + errors)
-    const totalProductsChecked = syncedCount + unchangedCount + skippedCount + errorCount;
+    const totalProductsChecked = stockSyncedCount + unchangedCount + skippedCount + errorCount;
     
     // Add summary log with product count information
     let summaryMessage = `Stock & Price sync completed: Checked ${totalProductsChecked} PrestaShop products. `;
     const parts = [];
-    if (syncedCount > 0) parts.push(`${syncedCount} stock synced`);
+    if (stockSyncedCount > 0) parts.push(`${stockSyncedCount} stock synced`);
     if (unchangedCount > 0) parts.push(`${unchangedCount} stock unchanged`);
     if (skippedCount > 0) parts.push(`${skippedCount} skipped (no/invalid Allegro offer ID)`);
     if (errorCount > 0) parts.push(`${errorCount} stock errors`);
@@ -7924,8 +7950,26 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
     // Remove from queue running set (if it was in queue)
     syncQueue.running.delete(appUserId);
     
+    // Capture sync end time
+    const syncEndTime = new Date().toISOString();
+    
+    // Save sync statistics to database
+    await saveSyncStatistics(appUserId, {
+      stockSyncedCount: stockSyncedCount,
+      priceSyncedCount: priceSyncedCount,
+      totalProductsChecked: totalProductsChecked,
+      stockUnchangedCount: unchangedCount,
+      stockSkippedCount: skippedCount,
+      stockErrorCount: errorCount,
+      priceUnchangedCount: priceUnchangedCount,
+      priceErrorCount: priceErrorCount,
+      syncStartTime: syncStartTime,
+      syncEndTime: syncEndTime,
+      changedInfo: productChanges
+    });
+    
     // Logs are in-memory only - no file saving needed
-    console.log(`Stock & Price sync completed for user ${appUserId}: Checked ${totalProductsChecked} PrestaShop products. Stock: ${syncedCount} synced, ${unchangedCount} unchanged, ${skippedCount} skipped, ${errorCount} errors. Price: ${priceSyncedCount} synced, ${priceUnchangedCount} unchanged, ${priceErrorCount} errors`);
+    console.log(`Stock & Price sync completed for user ${appUserId}: Checked ${totalProductsChecked} PrestaShop products. Stock: ${stockSyncedCount} synced, ${unchangedCount} unchanged, ${skippedCount} skipped, ${errorCount} errors. Price: ${priceSyncedCount} synced, ${priceUnchangedCount} unchanged, ${priceErrorCount} errors`);
   } catch (error) {
     console.error(`Stock sync error for user ${appUserId}:`, error.message);
     await addSyncLog({
@@ -8107,13 +8151,15 @@ async function startStockSyncCronManual(appUserId) {
 }
 
 /**
- * API: Get sync logs (per-user)
+ * API: Get sync statistics with long polling support
+ * Returns latest sync statistics and waits for new sync completion if longPoll=true
  */
-app.get('/api/sync/logs', authMiddleware, async (req, res) => {
+app.get('/api/sync/statistics', authMiddleware, async (req, res) => {
   try {
     const appUserId = req.user.userId;
-    const limit = parseInt(req.query.limit) || 100;
-    const status = req.query.status; // Optional filter by status
+    const longPoll = req.query.longPoll === 'true';
+    const timeout = parseInt(req.query.timeout) || 60000; // Default 60 seconds
+    const lastSyncEndTime = req.query.lastSyncEndTime; // Client's last known sync end time
     
     if (!dbPool) {
       return res.status(503).json({
@@ -8122,82 +8168,147 @@ app.get('/api/sync/logs', authMiddleware, async (req, res) => {
       });
     }
 
-    // Build query with user filter
-    let query = 'SELECT * FROM sync_logs WHERE app_user_id = ?';
-    const params = [appUserId];
+    // Get latest sync statistics (only one result per user)
+    const [rows] = await dbPool.query(`
+      SELECT * FROM sync_statistics 
+      WHERE app_user_id = ? 
+      ORDER BY sync_end_time DESC 
+      LIMIT 1
+    `, [appUserId]);
     
-    // Filter by status if provided
-    if (status) {
-      query += ' AND status = ?';
-      params.push(status);
-    }
-    
-    // Order by timestamp (newest first) and limit
-    query += ' ORDER BY timestamp DESC LIMIT ?';
-    params.push(limit);
-    
-    const [rows] = await dbPool.query(query, params);
+    const statistics = rows.map(row => {
+      // Parse changed_info JSON if it exists
+      let changedInfo = null;
+      if (row.changed_info) {
+        try {
+          changedInfo = typeof row.changed_info === 'string' 
+            ? JSON.parse(row.changed_info) 
+            : row.changed_info;
+        } catch (parseError) {
+          console.warn('Error parsing changed_info JSON:', parseError.message);
+          changedInfo = null;
+        }
+      }
+      
+      return {
+        id: row.id,
+        stockSyncedCount: row.stock_synced_count,
+        priceSyncedCount: row.price_synced_count,
+        totalProductsChecked: row.total_products_checked,
+        stockUnchangedCount: row.stock_unchanged_count,
+        stockSkippedCount: row.stock_skipped_count,
+        stockErrorCount: row.stock_error_count,
+        priceUnchangedCount: row.price_unchanged_count,
+        priceErrorCount: row.price_error_count,
+        syncStartTime: row.sync_start_time ? new Date(row.sync_start_time + 'Z').toISOString() : null,
+        syncEndTime: row.sync_end_time ? new Date(row.sync_end_time + 'Z').toISOString() : null,
+        changedInfo: changedInfo
+      };
+    });
     
     // Get user sync state
     const userState = userSyncStates.get(appUserId) || { running: false, lastSyncTime: null, nextSyncTime: null };
     
-    // Format logs
-    const logs = rows.map(row => ({
-      status: row.status,
-      message: row.message,
-      productName: row.product_name,
-      offerId: row.offer_id,
-      prestashopProductId: row.prestashop_product_id,
-      stockChange: row.stock_change_from !== null && row.stock_change_to !== null 
-        ? { from: row.stock_change_from, to: row.stock_change_to }
-        : null,
-      allegroPrice: row.allegro_price ? parseFloat(row.allegro_price) : null,
-      prestashopPrice: row.prestashop_price ? parseFloat(row.prestashop_price) : null,
-      categoryName: row.category_name,
-      timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : null
-    }));
-    
-    // Get total count for this user
-    const [countRows] = await dbPool.query(
-      'SELECT COUNT(*) as total FROM sync_logs WHERE app_user_id = ?',
-      [appUserId]
-    );
-    const total = countRows[0]?.total || 0;
-    
-    res.json({
-      success: true,
-      logs: logs,
-      total: total,
-      lastSyncTime: userState.lastSyncTime,
-      nextSyncTime: userState.nextSyncTime
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * API: Clear sync logs (per-user)
- */
-app.post('/api/sync/logs/clear', authMiddleware, async (req, res) => {
-  try {
-    const appUserId = req.user.userId;
-    
-    if (!dbPool) {
-      return res.status(503).json({
-        success: false,
-        error: 'Database not initialized'
-      });
+    // If long polling and sync is running, wait for completion
+    if (longPoll && userState.running) {
+      const startTime = Date.now();
+      const checkInterval = 1000; // Check every second
+      
+      const checkSync = setInterval(async () => {
+        const currentState = userSyncStates.get(appUserId) || { running: false };
+        
+        // If sync completed or timeout reached
+        if (!currentState.running || (Date.now() - startTime) >= timeout) {
+          clearInterval(checkSync);
+          
+          try {
+            // Get updated statistics (only one result per user)
+            const [updatedRows] = await dbPool.query(`
+              SELECT * FROM sync_statistics 
+              WHERE app_user_id = ? 
+              ORDER BY sync_end_time DESC 
+              LIMIT 1
+            `, [appUserId]);
+            
+            const updatedStats = updatedRows.map(row => {
+              // Parse changed_info JSON if it exists
+              let changedInfo = null;
+              if (row.changed_info) {
+                try {
+                  changedInfo = typeof row.changed_info === 'string' 
+                    ? JSON.parse(row.changed_info) 
+                    : row.changed_info;
+                } catch (parseError) {
+                  console.warn('Error parsing changed_info JSON:', parseError.message);
+                  changedInfo = null;
+                }
+              }
+              
+              return {
+                id: row.id,
+                stockSyncedCount: row.stock_synced_count,
+                priceSyncedCount: row.price_synced_count,
+                totalProductsChecked: row.total_products_checked,
+                stockUnchangedCount: row.stock_unchanged_count,
+                stockSkippedCount: row.stock_skipped_count,
+                stockErrorCount: row.stock_error_count,
+                priceUnchangedCount: row.price_unchanged_count,
+                priceErrorCount: row.price_error_count,
+                syncStartTime: row.sync_start_time ? new Date(row.sync_start_time + 'Z').toISOString() : null,
+                syncEndTime: row.sync_end_time ? new Date(row.sync_end_time + 'Z').toISOString() : null,
+                changedInfo: changedInfo
+              };
+            });
+            
+            const updatedState = userSyncStates.get(appUserId) || { running: false, lastSyncTime: null, nextSyncTime: null };
+            
+            res.json({
+              success: true,
+              statistics: updatedStats,
+              running: updatedState.running,
+              lastSyncTime: updatedState.lastSyncTime,
+              nextSyncTime: updatedState.nextSyncTime,
+              hasNewSync: lastSyncEndTime && updatedStats.length > 0 && updatedStats[0].syncEndTime !== lastSyncEndTime
+            });
+          } catch (error) {
+            clearInterval(checkSync);
+            res.status(500).json({
+              success: false,
+              error: error.message
+            });
+          }
+        }
+      }, checkInterval);
+      
+      // Set timeout to respond even if sync doesn't complete
+      setTimeout(() => {
+        clearInterval(checkSync);
+        if (!res.headersSent) {
+          res.json({
+            success: true,
+            statistics: statistics,
+            running: userState.running,
+            lastSyncTime: userState.lastSyncTime,
+            nextSyncTime: userState.nextSyncTime,
+            hasNewSync: false,
+            timeout: true
+          });
+        }
+      }, timeout);
+      
+      return; // Don't send response immediately
     }
-
-    await dbPool.query('DELETE FROM sync_logs WHERE app_user_id = ?', [appUserId]);
+    
+    // Check if there's a new sync (if lastSyncEndTime provided)
+    const hasNewSync = lastSyncEndTime && statistics.length > 0 && statistics[0].syncEndTime !== lastSyncEndTime;
     
     res.json({
       success: true,
-      message: 'Sync logs cleared for your account'
+      statistics: statistics,
+      running: userState.running,
+      lastSyncTime: userState.lastSyncTime,
+      nextSyncTime: userState.nextSyncTime,
+      hasNewSync: hasNewSync
     });
   } catch (error) {
     res.status(500).json({

@@ -295,15 +295,13 @@
                         <div id="syncPrerequisitesMsg" class="message" style="display: none; margin-bottom: 15px;"></div>
                         <div style="margin-bottom: 2px; padding-bottom: 2px; overflow: hidden;">
                             <div class="sync-status-row" style="float: left; margin: 0; margin-left: 8px; font-size: 0.9em; color: #333; font-weight: normal;">Sync Status: <span id="syncTimerStatus" class="sync-status-value">Stopped</span></div>
-                            <div id="checkingProgress" class="checking-progress" style="float: right; font-size: 0.85em;"></div>
                         </div>
-                        <div id="syncLogContainer" class="sync-log-container">
-                            <!-- Product Checking List -->
-                            <div id="productCheckingList" class="product-checking-list" style="display: none;">
-                                <div id="productCheckingItems" class="product-checking-items"></div>
+                        <div id="syncStatisticsContainer" class="sync-statistics-container">
+                            <div id="syncStatisticsList" class="sync-statistics-list"></div>
+                            <div id="syncStatisticsLoading" class="loading" style="display: none;">
+                                <div class="spinner"></div>
+                                <p>Waiting for sync completion...</p>
                             </div>
-                            <!-- Sync Logs -->
-                            <div id="syncLogList" class="sync-log-list"></div>
                         </div>
                     </div>
                 </div>
