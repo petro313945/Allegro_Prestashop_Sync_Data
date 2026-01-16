@@ -3,7 +3,7 @@ My telegram address is @petrob22
 
 ---
 
-## Allegro → PrestaShop Integration Tool
+## Allegro → PrestaShop Integration Tool 
 
 A comprehensive Node.js application for synchronizing product data between Allegro.pl marketplace and PrestaShop e-commerce platform. This tool provides a web-based interface for importing products, managing categories, and automatically syncing stock and prices.
 
