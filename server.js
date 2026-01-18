@@ -7637,7 +7637,9 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
           if (allegroPrice !== null && prestashopPrice !== null) {
             // Compare prices with tolerance for floating point precision
             const priceDiff = Math.abs(allegroPrice - prestashopPrice);
-            const priceTolerance = 0.01; // 1 grosz tolerance (0.01 PLN)
+            const priceTolerance = 0.009; // Tolerance for floating point precision (0.009 PLN)
+            // This allows differences of 0.01 PLN (1 grosz) or more to be synced
+            // while ignoring tiny floating point errors
             
             if (priceDiff > priceTolerance) {
               // Prices differ - sync from Allegro to PrestaShop
