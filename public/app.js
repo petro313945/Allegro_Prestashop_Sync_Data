@@ -699,21 +699,23 @@ function updateButtonStates() {
 
 // Update sync category button state based on categories and PrestaShop configuration
 function updateSyncCategoryButtonState() {
-    const syncCategoriesBtn = document.getElementById('syncCategoriesBtn');
-    if (!syncCategoriesBtn) return;
+    const triggerCategorySyncBtn = document.getElementById('triggerCategorySyncBtn');
     
     // Enable button only if categories are loaded and PrestaShop is configured and authorized
     const hasCategories = allCategories && allCategories.length > 0;
     const canSync = hasCategories && prestashopConfigured && prestashopAuthorized;
     
-    syncCategoriesBtn.disabled = !canSync;
-    
-    if (!hasCategories) {
-        syncCategoriesBtn.title = 'Load categories first';
-    } else if (!prestashopConfigured || !prestashopAuthorized) {
-        syncCategoriesBtn.title = 'PrestaShop must be configured and authorized';
-    } else {
-        syncCategoriesBtn.title = '';
+    // Update Sync Now button (triggerCategorySyncBtn)
+    if (triggerCategorySyncBtn) {
+        triggerCategorySyncBtn.disabled = !canSync;
+        
+        if (!hasCategories) {
+            triggerCategorySyncBtn.title = 'Load categories first';
+        } else if (!prestashopConfigured || !prestashopAuthorized) {
+            triggerCategorySyncBtn.title = 'PrestaShop must be configured and authorized';
+        } else {
+            triggerCategorySyncBtn.title = '';
+        }
     }
 }
 
@@ -800,6 +802,19 @@ function setupEventListeners() {
     if (triggerSyncBtn) {
         triggerSyncBtn.addEventListener('click', triggerSyncNow);
     }
+    
+    // Category sync timer control buttons
+    const startCategorySyncBtn = document.getElementById('startCategorySyncBtn');
+    if (startCategorySyncBtn) {
+        startCategorySyncBtn.addEventListener('click', startCategorySyncTimerControl);
+    }
+    const stopCategorySyncBtn = document.getElementById('stopCategorySyncBtn');
+    if (stopCategorySyncBtn) {
+        stopCategorySyncBtn.addEventListener('click', stopCategorySyncTimerControl);
+    }
+    // Note: triggerCategorySyncBtn event listener is set up later in the file (around line 912)
+    // We'll update it there to also call updateCategorySyncStatusFromServer
+    
     const authorizeAccountBtn = document.getElementById('authorizeAccountBtn');
     if (authorizeAccountBtn) {
         authorizeAccountBtn.addEventListener('click', authorizeAccount);
@@ -906,31 +921,14 @@ function setupEventListeners() {
     document.getElementById('clearImportedBtn').addEventListener('click', clearImportedProducts);
     document.getElementById('exportToPrestashopBtn').addEventListener('click', exportToPrestashop);
     
-    // Sync Categories button event listener
-    const syncCategoriesBtn = document.getElementById('syncCategoriesBtn');
-    if (syncCategoriesBtn) {
-        syncCategoriesBtn.addEventListener('click', async () => {
-            if (syncCategoriesBtn.disabled) return;
+    // Sync Now button (triggerCategorySyncBtn) event listener
+    const triggerCategorySyncBtn = document.getElementById('triggerCategorySyncBtn');
+    if (triggerCategorySyncBtn) {
+        triggerCategorySyncBtn.addEventListener('click', async () => {
+            if (triggerCategorySyncBtn.disabled) return;
             
-            // Show confirmation alert
-            if (!confirm('Are you sure you want to sync categories to PrestaShop.\nOnly use this feature if there are no categories in PrestaShop.\nIf there are categories in PrestaShop, they can be duplicated.')) {
-                return;
-            }
-            
-            syncCategoriesBtn.disabled = true;
-            syncCategoriesBtn.textContent = 'Syncing...';
-            
-            try {
-                await syncCategoriesToPrestashop();
-                // Note: syncCategoriesToPrestashop() already shows toast notifications
-            } catch (error) {
-                console.error('Error syncing categories:', error);
-                showToast('Failed to sync categories. Please try again.', 'error');
-            } finally {
-                syncCategoriesBtn.disabled = false;
-                syncCategoriesBtn.textContent = 'Sync Category';
-                updateSyncCategoryButtonState();
-            }
+            // Call triggerCategorySyncNow with showConfirmation=true for manual sync
+            await triggerCategorySyncNow(true);
         });
     }
     
@@ -2254,6 +2252,11 @@ function initializeImageRotation() {
 
 // Start image rotation for a specific product card
 function startImageRotation(card, imageUrls, imgElement) {
+    // Initialize imageRotationIntervals if it doesn't exist
+    if (!window.imageRotationIntervals) {
+        window.imageRotationIntervals = [];
+    }
+    
     // Clear any existing rotation for this card
     if (card.dataset.rotationInterval) {
         clearInterval(parseInt(card.dataset.rotationInterval));
@@ -2693,7 +2696,7 @@ async function fetchProductDetails(offerId) {
                              loading="lazy"
                              data-current-image-index="0"
                              ${totalImageCount > 1 ? `onclick="navigateImage(event, '${productIdForImage}', 'next')" title="Click to see next image"` : ''}
-                             onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                             onerror="this.onerror=null; this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';">
                         ${totalImageCount > 0 ? `
                             <div class="offer-image-count-badge" title="${totalImageCount} image${totalImageCount > 1 ? 's' : ''} available from Allegro${totalImageCount > 1 ? ' - Click image to navigate' : ''}">
                                 <span class="offer-image-count-icon">📷</span>
@@ -3152,7 +3155,7 @@ function createOfferCard(product) {
                              loading="lazy"
                              data-current-image-index="0"
                              ${totalImageCount > 1 ? `onclick="navigateImage(event, '${productId}', 'next')" title="Click to see next image"` : ''}
-                             onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                             onerror="this.onerror=null; this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';">
                         ${totalImageCount > 0 ? `
                             <div class="offer-image-count-badge" title="${totalImageCount} image${totalImageCount > 1 ? 's' : ''} available from Allegro${totalImageCount > 1 ? ' - Click image to navigate' : ''}">
                                 <span class="offer-image-count-icon">📷</span>
@@ -3664,7 +3667,7 @@ function displayImportedOffers() {
                              loading="lazy"
                              data-current-image-index="0"
                              ${totalImageCount > 1 ? `onclick="navigateImage(event, '${offer.id}', 'next')" title="Click to see next image"` : ''}
-                             onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                             onerror="this.onerror=null; this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';">
                     ${totalImageCount > 1 ? `
                         <button class="offer-image-nav-btn offer-image-nav-prev" onclick="navigateImage(event, '${offer.id}', 'prev')" title="Previous image">‹</button>
                         <button class="offer-image-nav-btn offer-image-nav-next" onclick="navigateImage(event, '${offer.id}', 'next')" title="Next image">›</button>
@@ -4213,11 +4216,11 @@ async function syncCategoriesToPrestashop() {
 
     console.log(`Starting sync of ${allCategories.length} categories to PrestaShop with tree structure...`);
 
+    // Capture sync start time
+    const syncStartTime = new Date().toISOString();
+
     // Map to store Allegro category ID -> PrestaShop category ID
     const categoryIdMap = new Map();
-    // Map to store category name + parent -> PrestaShop category ID (for finding existing categories)
-    // Key format: "name|parentId" to handle same name under different parents
-    const categoryNameParentMap = new Map();
     
     let createdCount = 0;
     let existingCount = 0;
@@ -4373,29 +4376,25 @@ async function syncCategoriesToPrestashop() {
             const allegroParentId = categoryNode.parentId;
             
             // Determine PrestaShop parent ID
+            // Step 7: Find parent category via meta_title (Allegro ID)
             let prestashopParentId = 2; // Default to Home (ID: 2)
             
             if (allegroParentId && categoryIdMap.has(allegroParentId)) {
                 // Use mapped PrestaShop parent ID (parent was created in previous level)
                 prestashopParentId = categoryIdMap.get(allegroParentId);
             } else if (allegroParentId) {
-                // Parent should have been created in a previous level
-                // If not found in map, it might already exist in PrestaShop or wasn't processed yet
-                // Since we process level by level, if parent is not in map, use Home as fallback
-                // The backend API will handle finding existing categories by name+parent correctly
-                console.warn(`Parent category ${allegroParentId} not found in map for "${categoryName}", using Home as parent`);
-                prestashopParentId = 2; // Fallback to Home
+                // Parent should be found by meta_title (Allegro ID) on the backend
+                // We'll pass allegroParentId and let the backend find it
+                // For now, use default parent - backend will find it by meta_title
+                prestashopParentId = 2; // Backend will find parent by meta_title
             }
 
-            // Check if we've already processed a category with the same name and parent in this sync session
+            // Check if we've already processed this category by Allegro ID in this sync session
             // This prevents duplicate API calls for the same category
-            const categoryKey = `${categoryName}|${prestashopParentId}`;
-            if (categoryNameParentMap.has(categoryKey)) {
-                // Category with same name and parent already processed, use existing mapping
-                const existingPrestashopId = categoryNameParentMap.get(categoryKey);
-                categoryIdMap.set(allegroCategoryId, existingPrestashopId);
+            if (categoryIdMap.has(allegroCategoryId)) {
+                const existingPrestashopId = categoryIdMap.get(allegroCategoryId);
                 existingCount++;
-                console.log(`Category "${categoryName}" (Parent: ${prestashopParentId}) already processed in this sync session (ID: ${existingPrestashopId}), skipping API call`);
+                console.log(`Category "${categoryName}" (Allegro ID: ${allegroCategoryId}) already processed in this sync session (PrestaShop ID: ${existingPrestashopId}), skipping API call`);
                 continue;
             }
 
@@ -4408,7 +4407,9 @@ async function syncCategoriesToPrestashop() {
                     body: JSON.stringify({
                         name: categoryName,
                         idParent: prestashopParentId,
-                        active: 1
+                        active: 1,
+                        allegroCategoryId: allegroCategoryId,
+                        allegroParentId: allegroParentId
                     })
                 });
 
@@ -4417,17 +4418,15 @@ async function syncCategoriesToPrestashop() {
                 if (result.success && result.category && result.category.id) {
                     const prestashopCategoryId = result.category.id;
                     
-                    // Store mapping using composite key (name + parent) to handle duplicates
-                    const categoryKey = `${categoryName}|${prestashopParentId}`;
+                    // Store mapping: Allegro category ID -> PrestaShop category ID
                     categoryIdMap.set(allegroCategoryId, prestashopCategoryId);
-                    categoryNameParentMap.set(categoryKey, prestashopCategoryId);
                     
                     if (result.existing) {
                         existingCount++;
-                        console.log(`Category "${categoryName}" already exists in PrestaShop (ID: ${prestashopCategoryId}, Parent: ${prestashopParentId})`);
+                        console.log(`Category "${categoryName}" (Allegro ID: ${allegroCategoryId}) already exists in PrestaShop (ID: ${prestashopCategoryId})`);
                     } else {
                         createdCount++;
-                        console.log(`Created category "${categoryName}" in PrestaShop (ID: ${prestashopCategoryId}, Parent: ${prestashopParentId})`);
+                        console.log(`Created category "${categoryName}" (Allegro ID: ${allegroCategoryId}) in PrestaShop (ID: ${prestashopCategoryId})`);
                     }
                 } else {
                     errorCount++;
@@ -4443,9 +4442,12 @@ async function syncCategoriesToPrestashop() {
         }
     }
 
+    // Capture sync end time
+    const syncEndTime = new Date().toISOString();
+    const totalProcessed = createdCount + existingCount + errorCount + skippedCount;
+
     // Show summary
     if (createdCount > 0 || existingCount > 0 || errorCount > 0 || skippedCount > 0) {
-        const totalProcessed = createdCount + existingCount + errorCount + skippedCount;
         const message = `✓ Category sync completed: ${totalProcessed} total (${createdCount} created, ${existingCount} existed, ${errorCount} errors${skippedCount > 0 ? `, ${skippedCount} skipped` : ''})`;
         console.log(message);
         
@@ -4455,6 +4457,29 @@ async function syncCategoriesToPrestashop() {
         }
     } else {
         console.log('✓ Category sync completed: No categories to sync');
+    }
+    
+    // Save category sync statistics to database
+    try {
+        await authFetch(`${API_BASE}/api/category-sync/statistics`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                categoriesCreatedCount: createdCount,
+                categoriesExistingCount: existingCount,
+                categoriesErrorCount: errorCount,
+                categoriesSkippedCount: skippedCount,
+                totalCategoriesChecked: totalProcessed,
+                syncStartTime: syncStartTime,
+                syncEndTime: syncEndTime,
+                changedInfo: [] // Could be enhanced to track individual category changes
+            })
+        });
+    } catch (error) {
+        console.error('Error saving category sync statistics:', error);
+        // Don't fail the sync if statistics saving fails
     }
     
     // Final check: verify "Modules" category was synced
@@ -5838,6 +5863,14 @@ function setupTabNavigation() {
                     updateSyncControlButtons();
                     // Start real-time timer updates
                     startSyncTimer();
+                } else if (targetTab === 'sync-category-log') {
+                    // Load category sync status when category sync tab is opened
+                    checkCategorySyncPrerequisites();
+                    updateCategorySyncControlButtons();
+                    // Start real-time timer updates
+                    startCategorySyncTimer();
+                    // Load category sync statistics
+                    loadCategorySyncStatistics();
                 } else if (targetTab === 'user-management') {
                     // Load users when user-management tab is opened
                     loadUsers();
@@ -5846,10 +5879,19 @@ function setupTabNavigation() {
                     if (window.syncStatisticsLongPoll) {
                         window.syncStatisticsLongPoll = false;
                     }
+                    // Stop category sync statistics long polling when switching away
+                    if (window.categorySyncStatisticsLongPoll) {
+                        window.categorySyncStatisticsLongPoll = false;
+                    }
                     // Stop timer when switching away
                     if (syncTimerInterval) {
                         clearInterval(syncTimerInterval);
                         syncTimerInterval = null;
+                    }
+                    // Stop category sync timer when switching away
+                    if (categorySyncTimerInterval) {
+                        clearInterval(categorySyncTimerInterval);
+                        categorySyncTimerInterval = null;
                     }
                 }
             }
@@ -5953,8 +5995,8 @@ async function longPollSyncStatistics() {
                 lastKnownSyncEndTime = data.statistics[0].syncEndTime;
             }
             
-            // Hide loading if sync completed
-            if (!data.running) {
+            // Hide loading if sync completed or if timeout occurred and sync is not running
+            if (!data.running || (data.timeout && !data.running)) {
                 syncStatisticsLoading.style.display = 'none';
             }
             
@@ -6157,6 +6199,213 @@ function displaySyncStatistics(statistics) {
     }).join('');
 }
 
+// Category Sync Statistics Functions with Long Polling
+let lastKnownCategorySyncEndTime = null;
+
+async function loadCategorySyncStatistics() {
+    const categorySyncStatisticsList = document.getElementById('categorySyncStatisticsList');
+    const categorySyncStatisticsLoading = document.getElementById('categorySyncStatisticsLoading');
+    
+    if (!categorySyncStatisticsList) return;
+    
+    try {
+        // Show loading indicator
+        categorySyncStatisticsLoading.style.display = 'block';
+        
+        // Start long polling
+        window.categorySyncStatisticsLongPoll = true;
+        await longPollCategorySyncStatistics();
+    } catch (error) {
+        console.error('Error loading category sync statistics:', error);
+        if (categorySyncStatisticsLoading) {
+            categorySyncStatisticsLoading.style.display = 'none';
+        }
+        if (categorySyncStatisticsList) {
+            categorySyncStatisticsList.innerHTML = '<div class="sync-statistics-empty">Error loading category sync statistics. Please refresh.</div>';
+        }
+    }
+}
+
+async function longPollCategorySyncStatistics() {
+    const categorySyncStatisticsList = document.getElementById('categorySyncStatisticsList');
+    const categorySyncStatisticsLoading = document.getElementById('categorySyncStatisticsLoading');
+    
+    if (!window.categorySyncStatisticsLongPoll) {
+        if (categorySyncStatisticsLoading) {
+            categorySyncStatisticsLoading.style.display = 'none';
+        }
+        return;
+    }
+    
+    try {
+        const url = `/api/category-sync/statistics?longPoll=true&timeout=60000${lastKnownCategorySyncEndTime ? `&lastSyncEndTime=${encodeURIComponent(lastKnownCategorySyncEndTime)}` : ''}`;
+        const response = await authFetch(url);
+        const data = await response.json();
+        
+        if (data.success) {
+            displayCategorySyncStatistics(data.statistics);
+            
+            // Update last known sync end time
+            if (data.statistics && data.statistics.length > 0) {
+                lastKnownCategorySyncEndTime = data.statistics[0].syncEndTime;
+            }
+            
+            // Hide loading
+            if (categorySyncStatisticsLoading) {
+                categorySyncStatisticsLoading.style.display = 'none';
+            }
+            
+            // If we got a new sync, continue polling
+            if (window.categorySyncStatisticsLongPoll && data.hasNewSync) {
+                // Immediately poll again if new sync detected
+                setTimeout(() => longPollCategorySyncStatistics(), 100);
+            } else if (window.categorySyncStatisticsLongPoll) {
+                // If not running, wait a bit longer before next poll
+                setTimeout(() => longPollCategorySyncStatistics(), 2000);
+            }
+        } else {
+            if (categorySyncStatisticsLoading) {
+                categorySyncStatisticsLoading.style.display = 'none';
+            }
+            if (categorySyncStatisticsList) {
+                categorySyncStatisticsList.innerHTML = '<div class="sync-statistics-empty">Error loading category sync statistics.</div>';
+            }
+            // Retry after delay
+            if (window.categorySyncStatisticsLongPoll) {
+                setTimeout(() => longPollCategorySyncStatistics(), 5000);
+            }
+        }
+    } catch (error) {
+        console.error('Error in long polling category sync statistics:', error);
+        if (categorySyncStatisticsLoading) {
+            categorySyncStatisticsLoading.style.display = 'none';
+        }
+        // Retry after delay
+        if (window.categorySyncStatisticsLongPoll) {
+            setTimeout(() => longPollCategorySyncStatistics(), 5000);
+        }
+    }
+}
+
+function displayCategorySyncStatistics(statistics) {
+    const categorySyncStatisticsList = document.getElementById('categorySyncStatisticsList');
+    if (!categorySyncStatisticsList) return;
+    
+    if (!statistics || statistics.length === 0) {
+        categorySyncStatisticsList.innerHTML = '<div class="sync-statistics-empty">No category sync statistics available yet.</div>';
+        return;
+    }
+    
+    categorySyncStatisticsList.innerHTML = statistics.map(stat => {
+        const syncStartTime = stat.syncStartTime ?
+            new Date(stat.syncStartTime).toLocaleString('en-US', {
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true
+            }) : 'N/A';
+        
+        const syncEndTime = stat.syncEndTime ? new Date(stat.syncEndTime).toLocaleString('en-US', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        }) : 'N/A';
+        
+        const duration = stat.syncStartTime && stat.syncEndTime 
+            ? formatDuration(new Date(stat.syncEndTime) - new Date(stat.syncStartTime))
+            : 'N/A';
+        
+        return `
+            <div class="sync-statistics-card">
+                <div class="sync-statistics-header">
+                    <div class="sync-statistics-time-section">
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon time-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+                                    <path d="M12 6V12L16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">Start</span>
+                                <span class="sync-statistics-time-value">${syncStartTime}</span>
+                            </div>
+                        </div>
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon time-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+                                    <path d="M12 6V12L16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">End</span>
+                                <span class="sync-statistics-time-value">${syncEndTime}</span>
+                            </div>
+                        </div>
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon time-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">Duration</span>
+                                <span class="sync-statistics-time-value">${duration}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="sync-statistics-body">
+                    <div class="sync-statistics-time-section">
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon time-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M9 11L12 14L22 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M21 12V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V5C3 4.46957 3.21071 3.96086 3.58579 3.58579C3.96086 3.21071 4.46957 3 5 3H16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">Total Checked</span>
+                                <span class="sync-statistics-time-value">${stat.totalCategoriesChecked || 0}</span>
+                            </div>
+                        </div>
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon duration-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">Created</span>
+                                <span class="sync-statistics-time-value">${stat.categoriesCreatedCount || 0}</span>
+                            </div>
+                        </div>
+                        <div class="sync-statistics-time-item">
+                            <div class="sync-statistics-icon time-icon">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M9 12L11 14L15 10M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </div>
+                            <div class="sync-statistics-time-content">
+                                <span class="sync-statistics-time-label">PrestaShop Categories</span>
+                                <span class="sync-statistics-time-value">${stat.categoriesExistingCount || 0}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
 function escapeHtml(text) {
     if (!text) return '';
     const div = document.createElement('div');
@@ -6190,6 +6439,13 @@ let currentLastSyncTime = null;
 let currentNextSyncTime = null;
 let syncTimerInterval = null;
 let isTimerActive = false; // Track if sync timer is running
+
+// Store category sync times for real-time updates
+let currentCategoryLastSyncTime = null;
+let currentCategoryNextSyncTime = null;
+let categorySyncTimerInterval = null;
+let isCategoryTimerActive = false; // Track if category sync timer is running
+let categorySyncCheckInterval = null; // Interval to check if it's time to sync categories
 
 function updateSyncStatus(lastSyncTime, nextSyncTime) {
     currentLastSyncTime = lastSyncTime;
@@ -6532,6 +6788,386 @@ async function triggerSyncNow() {
         if (triggerBtn) {
             triggerBtn.disabled = false;
             triggerBtn.querySelector('span').textContent = 'Sync Now';
+        }
+    }
+}
+
+// ============================================
+// Category Sync Timer Functions
+// ============================================
+
+function updateCategorySyncStatus(lastSyncTime, nextSyncTime) {
+    currentCategoryLastSyncTime = lastSyncTime;
+    currentCategoryNextSyncTime = nextSyncTime;
+    
+    const lastSyncTimeEl = document.getElementById('lastCategorySyncTime');
+    const nextSyncTimeEl = document.getElementById('nextCategorySyncTime');
+    
+    if (lastSyncTimeEl) {
+        if (lastSyncTime) {
+            const lastSync = new Date(lastSyncTime);
+            lastSyncTimeEl.textContent = lastSync.toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+        } else {
+            lastSyncTimeEl.textContent = 'Never';
+        }
+    }
+    
+    if (nextSyncTimeEl) {
+        if (nextSyncTime) {
+            const nextSync = new Date(nextSyncTime);
+            nextSyncTimeEl.textContent = nextSync.toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+        } else {
+            nextSyncTimeEl.textContent = 'Calculating...';
+        }
+    }
+    
+    // Start real-time timer updates
+    startCategorySyncTimer();
+}
+
+function startCategorySyncTimer() {
+    // Clear existing timer if any
+    if (categorySyncTimerInterval) {
+        clearInterval(categorySyncTimerInterval);
+    }
+    
+    // Update immediately
+    updateCategorySyncTimers();
+    
+    // Update every second
+    categorySyncTimerInterval = setInterval(() => {
+        updateCategorySyncTimers();
+    }, 1000);
+}
+
+function updateCategorySyncTimers() {
+    const timeSinceEl = document.getElementById('timeSinceLastCategorySync');
+    const timeUntilEl = document.getElementById('timeUntilNextCategorySync');
+    
+    // Update "time since last sync"
+    if (timeSinceEl && currentCategoryLastSyncTime) {
+        const lastSync = new Date(currentCategoryLastSyncTime);
+        const now = new Date();
+        const elapsed = Math.floor((now - lastSync) / 1000); // seconds
+        timeSinceEl.textContent = `(${formatTimeElapsed(elapsed)} ago)`;
+        timeSinceEl.style.color = '#666';
+    } else if (timeSinceEl) {
+        timeSinceEl.textContent = '';
+    }
+    
+    // Update "time until next sync"
+    if (timeUntilEl) {
+        if (!isCategoryTimerActive) {
+            // Timer is stopped - don't show next sync time
+            timeUntilEl.textContent = '';
+        } else if (currentCategoryNextSyncTime) {
+            const nextSync = new Date(currentCategoryNextSyncTime);
+            const now = new Date();
+            const remaining = Math.floor((nextSync - now) / 1000); // seconds
+            
+            if (remaining > 0) {
+                timeUntilEl.textContent = `(in ${formatTimeRemaining(remaining)})`;
+                timeUntilEl.style.color = '#1a73e8';
+            } else {
+                // Timer is active and time has passed - sync should be running
+                timeUntilEl.textContent = '(sync running...)';
+                timeUntilEl.style.color = '#34a853';
+            }
+        } else {
+            timeUntilEl.textContent = '';
+        }
+    }
+}
+
+// Check if prerequisites are met for category sync
+async function checkCategorySyncPrerequisites() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/sync/prerequisites`);
+        const data = await response.json();
+        
+        const msgEl = document.getElementById('categorySyncPrerequisitesMsg');
+        if (!msgEl) return;
+        
+        if (data.success && data.prerequisitesMet) {
+            msgEl.style.display = 'none';
+            return true;
+        } else {
+            msgEl.style.display = 'block';
+            msgEl.className = 'message error';
+            
+            if (data.details) {
+                const missing = [];
+                if (!data.details.prestashopConfigured) missing.push('PrestaShop');
+                if (!data.details.allegroConfigured) missing.push('Allegro');
+                if (!data.details.hasOAuthToken) missing.push('Allegro OAuth');
+                
+                if (missing.length > 0) {
+                    msgEl.textContent = `Missing prerequisites: ${missing.join(', ')}. Please configure all required settings first.`;
+                } else if (data.message) {
+                    msgEl.textContent = data.message;
+                } else {
+                    msgEl.textContent = 'Missing prerequisites. Please configure Allegro and PrestaShop first.';
+                }
+            } else if (data.message) {
+                msgEl.textContent = data.message;
+            } else if (data.error) {
+                msgEl.textContent = `Error checking prerequisites: ${data.error}`;
+            } else {
+                msgEl.textContent = 'Unable to check prerequisites. Please try again.';
+            }
+            return false;
+        }
+    } catch (error) {
+        console.error('Error checking prerequisites:', error);
+        const msgEl = document.getElementById('categorySyncPrerequisitesMsg');
+        if (msgEl) {
+            msgEl.style.display = 'block';
+            msgEl.className = 'message error';
+            msgEl.textContent = `Error checking prerequisites: ${error.message || 'Unknown error'}. Please try again.`;
+        }
+        return false;
+    }
+}
+
+// Update category sync control buttons based on status
+async function updateCategorySyncControlButtons() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/category-sync/status`);
+        const data = await response.json();
+        
+        const startBtn = document.getElementById('startCategorySyncBtn');
+        const stopBtn = document.getElementById('stopCategorySyncBtn');
+        const triggerBtn = document.getElementById('triggerCategorySyncBtn');
+        const statusEl = document.getElementById('categorySyncTimerStatus');
+        
+        const prerequisitesMet = await checkCategorySyncPrerequisites();
+        
+        if (startBtn) {
+            startBtn.disabled = !prerequisitesMet || data.timerActive;
+            if (data.timerActive) {
+                startBtn.style.display = 'none';
+            } else {
+                startBtn.style.display = 'inline-block';
+            }
+        }
+        
+        if (stopBtn) {
+            stopBtn.style.display = data.timerActive ? 'inline-block' : 'none';
+        }
+        
+        if (triggerBtn) {
+            triggerBtn.disabled = !prerequisitesMet;
+        }
+        
+        if (statusEl) {
+            statusEl.textContent = data.timerActive ? 'Running' : 'Stopped';
+            statusEl.style.color = data.timerActive ? '#34a853' : '#ea4335';
+        }
+        
+        // Store timer active state for use in updateCategorySyncTimers
+        isCategoryTimerActive = data.timerActive || false;
+        
+        // Update sync times
+        if (data.lastSyncTime || data.nextSyncTime) {
+            updateCategorySyncStatus(data.lastSyncTime, data.nextSyncTime);
+        } else {
+            // If no next sync time and timer is stopped, clear it
+            if (!data.timerActive) {
+                currentCategoryNextSyncTime = null;
+                const timeUntilEl = document.getElementById('timeUntilNextCategorySync');
+                if (timeUntilEl) {
+                    timeUntilEl.textContent = '';
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error updating category sync control buttons:', error);
+    }
+}
+
+// Update category sync status from server
+async function updateCategorySyncStatusFromServer() {
+    try {
+        const response = await authFetch(`${API_BASE}/api/category-sync/status`);
+        const data = await response.json();
+        
+        const statusEl = document.getElementById('categorySyncTimerStatus');
+        if (statusEl) {
+            statusEl.textContent = data.timerActive ? 'Running' : 'Stopped';
+            statusEl.style.color = data.timerActive ? '#34a853' : '#ea4335';
+        }
+        
+        // Store timer active state for use in updateCategorySyncTimers
+        isCategoryTimerActive = data.timerActive || false;
+        
+        if (data.lastSyncTime || data.nextSyncTime) {
+            updateCategorySyncStatus(data.lastSyncTime, data.nextSyncTime);
+        } else {
+            // If no next sync time and timer is stopped, clear it
+            if (!data.timerActive) {
+                currentCategoryNextSyncTime = null;
+                const timeUntilEl = document.getElementById('timeUntilNextCategorySync');
+                if (timeUntilEl) {
+                    timeUntilEl.textContent = '';
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error updating category sync status:', error);
+    }
+}
+
+// Start category sync timer
+async function startCategorySyncTimerControl() {
+    const startBtn = document.getElementById('startCategorySyncBtn');
+    if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.querySelector('span').textContent = 'Starting...';
+    }
+    
+    try {
+        const response = await authFetch(`${API_BASE}/api/category-sync/start`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Category sync timer started successfully (runs every 48 hours)', 'success');
+            await updateCategorySyncControlButtons();
+            // Start checking if it's time to sync
+            startCategorySyncCheck();
+        } else {
+            showToast(data.error || 'Failed to start category sync timer', 'error');
+            await updateCategorySyncControlButtons();
+        }
+    } catch (error) {
+        console.error('Error starting category sync timer:', error);
+        showToast('Failed to start category sync timer: ' + error.message, 'error');
+        await updateCategorySyncControlButtons();
+    }
+}
+
+// Stop category sync timer
+async function stopCategorySyncTimerControl() {
+    const stopBtn = document.getElementById('stopCategorySyncBtn');
+    if (stopBtn) {
+        stopBtn.disabled = true;
+        stopBtn.querySelector('span').textContent = 'Stopping...';
+    }
+    
+    try {
+        const response = await authFetch(`${API_BASE}/api/category-sync/stop`, {
+            method: 'POST'
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            showToast('Category sync timer stopped successfully', 'info');
+            await updateCategorySyncControlButtons();
+            // Stop checking for sync time
+            stopCategorySyncCheck();
+        } else {
+            showToast(data.error || 'Failed to stop category sync timer', 'error');
+            await updateCategorySyncControlButtons();
+        }
+    } catch (error) {
+        console.error('Error stopping category sync timer:', error);
+        showToast('Failed to stop category sync timer: ' + error.message, 'error');
+        await updateCategorySyncControlButtons();
+    }
+}
+
+// Start checking if it's time to sync categories (check every minute)
+function startCategorySyncCheck() {
+    // Clear existing check interval if any
+    if (categorySyncCheckInterval) {
+        clearInterval(categorySyncCheckInterval);
+    }
+    
+    // Check immediately
+    checkAndTriggerCategorySync();
+    
+    // Then check every minute
+    categorySyncCheckInterval = setInterval(() => {
+        checkAndTriggerCategorySync();
+    }, 60000); // Check every minute
+}
+
+// Stop checking for category sync time
+function stopCategorySyncCheck() {
+    if (categorySyncCheckInterval) {
+        clearInterval(categorySyncCheckInterval);
+        categorySyncCheckInterval = null;
+    }
+}
+
+// Check if it's time to sync categories and trigger if needed
+async function checkAndTriggerCategorySync() {
+    if (!isCategoryTimerActive) {
+        return; // Timer is not active, don't check
+    }
+    
+    try {
+        const response = await authFetch(`${API_BASE}/api/category-sync/status`);
+        const data = await response.json();
+        
+        if (data.success && data.nextSyncTime) {
+            const nextSync = new Date(data.nextSyncTime);
+            const now = new Date();
+            
+            // If next sync time has passed, trigger the sync
+            if (nextSync.getTime() <= now.getTime()) {
+                console.log('Category sync time reached, triggering sync...');
+                // Update status first
+                updateCategorySyncStatus(data.lastSyncTime, data.nextSyncTime);
+                
+                // Trigger the category sync automatically (no confirmation)
+                await triggerCategorySyncNow(false);
+            }
+        }
+    } catch (error) {
+        console.error('Error checking category sync time:', error);
+    }
+}
+
+// Trigger category sync now (automatic sync - no confirmation)
+async function triggerCategorySyncNow(showConfirmation = false) {
+    const triggerBtn = document.getElementById('triggerCategorySyncBtn');
+    
+    // For automatic sync, don't require button to be enabled
+    if (showConfirmation && triggerBtn && triggerBtn.disabled) {
+        return;
+    }
+    
+    if (triggerBtn) {
+        triggerBtn.disabled = true;
+        triggerBtn.querySelector('span').textContent = 'Syncing...';
+    }
+    
+    try {
+        // Update last sync time on server
+        await authFetch(`${API_BASE}/api/category-sync/trigger`, {
+            method: 'POST'
+        });
+        
+        // Perform the actual category sync
+        await syncCategoriesToPrestashop();
+        
+        // Update status
+        await updateCategorySyncStatusFromServer();
+        
+        if (!showConfirmation) {
+            // For automatic sync, show a toast notification
+            showToast('Category sync completed automatically', 'success');
+        }
+    } catch (error) {
+        console.error('Error triggering category sync:', error);
+        showToast('Failed to trigger category sync: ' + error.message, 'error');
+    } finally {
+        if (triggerBtn) {
+            triggerBtn.disabled = false;
+            triggerBtn.querySelector('span').textContent = 'Sync Now';
+            updateSyncCategoryButtonState();
         }
     }
 }

@@ -528,12 +528,46 @@ async function initDatabase() {
       last_sync_time DATETIME NULL,
       next_sync_time DATETIME NULL,
       sync_timer_active TINYINT(1) NOT NULL DEFAULT 0,
+      category_sync_interval_ms INT UNSIGNED NOT NULL DEFAULT 172800000,
+      category_last_sync_time DATETIME NULL,
+      category_next_sync_time DATETIME NULL,
+      category_sync_timer_active TINYINT(1) NOT NULL DEFAULT 0,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY unique_user (app_user_id),
       FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+
+  // Add category sync columns if they don't exist (for existing databases)
+  try {
+    // Check if columns exist first
+    const [columns] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'user_sync_settings' 
+      AND COLUMN_NAME IN ('category_sync_interval_ms', 'category_last_sync_time', 'category_next_sync_time', 'category_sync_timer_active')
+    `);
+    
+    const existingColumns = columns.map(row => row.COLUMN_NAME);
+    
+    if (!existingColumns.includes('category_sync_interval_ms')) {
+      await dbPool.query(`ALTER TABLE user_sync_settings ADD COLUMN category_sync_interval_ms INT UNSIGNED NOT NULL DEFAULT 172800000`);
+    }
+    if (!existingColumns.includes('category_last_sync_time')) {
+      await dbPool.query(`ALTER TABLE user_sync_settings ADD COLUMN category_last_sync_time DATETIME NULL`);
+    }
+    if (!existingColumns.includes('category_next_sync_time')) {
+      await dbPool.query(`ALTER TABLE user_sync_settings ADD COLUMN category_next_sync_time DATETIME NULL`);
+    }
+    if (!existingColumns.includes('category_sync_timer_active')) {
+      await dbPool.query(`ALTER TABLE user_sync_settings ADD COLUMN category_sync_timer_active TINYINT(1) NOT NULL DEFAULT 0`);
+    }
+  } catch (error) {
+    // Columns might already exist or other error, log but don't fail
+    console.log('Note: Category sync columns migration:', error.message);
+  }
 
 
   // Create sync_statistics table (per-user sync statistics summary)
@@ -579,6 +613,25 @@ async function initDatabase() {
       }
     }
   }
+
+  // Create category_sync_statistics table (per-user category sync statistics)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS category_sync_statistics (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      app_user_id INT UNSIGNED NOT NULL,
+      categories_created_count INT UNSIGNED NOT NULL DEFAULT 0,
+      categories_existing_count INT UNSIGNED NOT NULL DEFAULT 0,
+      categories_error_count INT UNSIGNED NOT NULL DEFAULT 0,
+      categories_skipped_count INT UNSIGNED NOT NULL DEFAULT 0,
+      total_categories_checked INT UNSIGNED NOT NULL DEFAULT 0,
+      sync_start_time DATETIME NOT NULL,
+      sync_end_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      changed_info JSON NULL,
+      INDEX idx_user_timestamp (app_user_id, sync_end_time),
+      INDEX idx_user_start_time (app_user_id, sync_start_time),
+      FOREIGN KEY (app_user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
 
 
   // Ensure at least one admin user exists if ADMIN_EMAIL / ADMIN_PASSWORD are provided
@@ -744,6 +797,12 @@ let userSyncTimers = new Map(); // Map<userId, {intervalId: number, active: bool
 // Sync interval in milliseconds (default: 5 minutes, configurable via SYNC_INTERVAL_MINUTES in .env)
 const SYNC_INTERVAL_MINUTES = parseInt(process.env.SYNC_INTERVAL_MINUTES) || 5;
 const SYNC_INTERVAL_MS = SYNC_INTERVAL_MINUTES * 60 * 1000;
+
+// Per-user category sync timers
+let userCategorySyncTimers = new Map(); // Map<userId, {intervalId: number, active: boolean}>
+// Category sync interval in milliseconds (48 hours = 172800000 ms)
+const CATEGORY_SYNC_INTERVAL_HOURS = 48;
+const CATEGORY_SYNC_INTERVAL_MS = CATEGORY_SYNC_INTERVAL_HOURS * 60 * 60 * 1000;
 
 // Sync queue system for managing concurrent syncs (prevents resource exhaustion)
 const syncQueue = {
@@ -1383,12 +1442,85 @@ async function loadSyncSettings(appUserId) {
         }
       }
       
+      // Handle category sync settings
+      const storedCategoryIntervalMs = row.category_sync_interval_ms || CATEGORY_SYNC_INTERVAL_MS;
+      const currentCategoryIntervalMs = CATEGORY_SYNC_INTERVAL_MS;
+      
+      let categoryLastSyncTime = null;
+      if (row.category_last_sync_time) {
+        const dt = new Date(row.category_last_sync_time + 'Z');
+        categoryLastSyncTime = dt.toISOString();
+      }
+      
+      let categoryNextSyncTime = null;
+      if (row.category_next_sync_time) {
+        const dt = new Date(row.category_next_sync_time + 'Z');
+        const storedCategoryNextSync = dt.getTime();
+        const now = Date.now();
+        
+        if (storedCategoryIntervalMs !== currentCategoryIntervalMs || storedCategoryNextSync <= now) {
+          categoryNextSyncTime = new Date(now + currentCategoryIntervalMs).toISOString();
+          try {
+            await dbPool.query(`
+              UPDATE user_sync_settings
+              SET category_next_sync_time = ?, category_sync_interval_ms = ?, updated_at = NOW()
+              WHERE app_user_id = ?
+            `, [
+              categoryNextSyncTime.slice(0, 19).replace('T', ' '),
+              currentCategoryIntervalMs,
+              appUserId
+            ]);
+          } catch (updateError) {
+            console.error('Error updating category_next_sync_time in loadSyncSettings:', updateError.message);
+          }
+        } else {
+          categoryNextSyncTime = dt.toISOString();
+        }
+      } else if (row.category_last_sync_time && storedCategoryIntervalMs === currentCategoryIntervalMs) {
+        const dt = new Date(row.category_last_sync_time + 'Z');
+        categoryNextSyncTime = new Date(dt.getTime() + currentCategoryIntervalMs).toISOString();
+        if (new Date(categoryNextSyncTime).getTime() > Date.now()) {
+          try {
+            await dbPool.query(`
+              UPDATE user_sync_settings
+              SET category_next_sync_time = ?, category_sync_interval_ms = ?, updated_at = NOW()
+              WHERE app_user_id = ?
+            `, [
+              categoryNextSyncTime.slice(0, 19).replace('T', ' '),
+              currentCategoryIntervalMs,
+              appUserId
+            ]);
+          } catch (updateError) {
+            console.error('Error updating category_next_sync_time in loadSyncSettings:', updateError.message);
+          }
+        } else {
+          categoryNextSyncTime = new Date(Date.now() + currentCategoryIntervalMs).toISOString();
+          try {
+            await dbPool.query(`
+              UPDATE user_sync_settings
+              SET category_next_sync_time = ?, category_sync_interval_ms = ?, updated_at = NOW()
+              WHERE app_user_id = ?
+            `, [
+              categoryNextSyncTime.slice(0, 19).replace('T', ' '),
+              currentCategoryIntervalMs,
+              appUserId
+            ]);
+          } catch (updateError) {
+            console.error('Error updating category_next_sync_time in loadSyncSettings:', updateError.message);
+          }
+        }
+      }
+      
       return {
         autoSyncEnabled: !!row.auto_sync_enabled,
         syncIntervalMs: currentIntervalMs,
         lastSyncTime: lastSyncTime,
         nextSyncTime: nextSyncTime,
-        syncTimerActive: !!row.sync_timer_active
+        syncTimerActive: !!row.sync_timer_active,
+        categorySyncIntervalMs: currentCategoryIntervalMs,
+        categoryLastSyncTime: categoryLastSyncTime,
+        categoryNextSyncTime: categoryNextSyncTime,
+        categorySyncTimerActive: !!row.category_sync_timer_active
       };
     } else {
       // No settings found, return defaults
@@ -1397,7 +1529,11 @@ async function loadSyncSettings(appUserId) {
         syncIntervalMs: SYNC_INTERVAL_MS,
         lastSyncTime: null,
         nextSyncTime: null,
-        syncTimerActive: false
+        syncTimerActive: false,
+        categorySyncIntervalMs: CATEGORY_SYNC_INTERVAL_MS,
+        categoryLastSyncTime: null,
+        categoryNextSyncTime: null,
+        categorySyncTimerActive: false
       };
     }
   } catch (error) {
@@ -1408,7 +1544,11 @@ async function loadSyncSettings(appUserId) {
       syncIntervalMs: SYNC_INTERVAL_MS,
       lastSyncTime: null,
       nextSyncTime: null,
-      syncTimerActive: false
+      syncTimerActive: false,
+      categorySyncIntervalMs: CATEGORY_SYNC_INTERVAL_MS,
+      categoryLastSyncTime: null,
+      categoryNextSyncTime: null,
+      categorySyncTimerActive: false
     };
   }
 }
@@ -1432,15 +1572,21 @@ async function saveSyncSettings(appUserId, settings) {
     const [result] = await dbPool.query(`
       INSERT INTO user_sync_settings (
         app_user_id, auto_sync_enabled, sync_interval_ms,
-        last_sync_time, next_sync_time, sync_timer_active, updated_at
+        last_sync_time, next_sync_time, sync_timer_active,
+        category_sync_interval_ms, category_last_sync_time,
+        category_next_sync_time, category_sync_timer_active, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, NOW())
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
       ON DUPLICATE KEY UPDATE
         auto_sync_enabled = VALUES(auto_sync_enabled),
         sync_interval_ms = VALUES(sync_interval_ms),
         last_sync_time = VALUES(last_sync_time),
         next_sync_time = VALUES(next_sync_time),
         sync_timer_active = VALUES(sync_timer_active),
+        category_sync_interval_ms = VALUES(category_sync_interval_ms),
+        category_last_sync_time = VALUES(category_last_sync_time),
+        category_next_sync_time = VALUES(category_next_sync_time),
+        category_sync_timer_active = VALUES(category_sync_timer_active),
         updated_at = NOW()
     `, [
       appUserId,
@@ -1448,7 +1594,11 @@ async function saveSyncSettings(appUserId, settings) {
       settings.syncIntervalMs || SYNC_INTERVAL_MS,
       settings.lastSyncTime || null,
       settings.nextSyncTime || null,
-      settings.syncTimerActive ? 1 : 0
+      settings.syncTimerActive ? 1 : 0,
+      settings.categorySyncIntervalMs || CATEGORY_SYNC_INTERVAL_MS,
+      settings.categoryLastSyncTime || null,
+      settings.categoryNextSyncTime || null,
+      settings.categorySyncTimerActive ? 1 : 0
     ]);
 
     console.log(`✓ Saved sync settings for user ${appUserId}`);
@@ -1583,6 +1733,63 @@ async function saveSyncStatistics(appUserId, stats) {
   } catch (error) {
     // Silently fail - statistics saving shouldn't break sync
     console.error('Error saving sync statistics to database:', error.message);
+  }
+}
+
+/**
+ * Save category sync statistics to database
+ * Only keeps the latest sync result per user (deletes old results before inserting new one)
+ * @param {number} appUserId - Application user ID
+ * @param {object} stats - Statistics object with category sync counts
+ */
+async function saveCategorySyncStatistics(appUserId, stats) {
+  if (!appUserId) {
+    return; // Silently skip if no user ID
+  }
+
+  try {
+    if (!dbPool) {
+      return; // Silently skip if database not initialized
+    }
+
+    // Delete old category sync results for this user (keep only one sync result per user)
+    await dbPool.query(`
+      DELETE FROM category_sync_statistics 
+      WHERE app_user_id = ?
+    `, [appUserId]);
+
+    // Prepare changed_info JSON (array of category changes)
+    const changedInfoJson = (stats.changedInfo && Array.isArray(stats.changedInfo) && stats.changedInfo.length > 0)
+      ? JSON.stringify(stats.changedInfo)
+      : null;
+
+    // Insert new category sync statistics
+    await dbPool.query(`
+      INSERT INTO category_sync_statistics (
+        app_user_id, 
+        categories_created_count, 
+        categories_existing_count, 
+        categories_error_count,
+        categories_skipped_count,
+        total_categories_checked,
+        sync_start_time,
+        sync_end_time,
+        changed_info
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      appUserId,
+      stats.categoriesCreatedCount || 0,
+      stats.categoriesExistingCount || 0,
+      stats.categoriesErrorCount || 0,
+      stats.categoriesSkippedCount || 0,
+      stats.totalCategoriesChecked || 0,
+      stats.syncStartTime ? new Date(stats.syncStartTime).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' '),
+      stats.syncEndTime ? new Date(stats.syncEndTime).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' '),
+      changedInfoJson
+    ]);
+  } catch (error) {
+    // Silently fail - statistics saving shouldn't break sync
+    console.error('Error saving category sync statistics to database:', error.message);
   }
 }
 
@@ -3058,6 +3265,7 @@ function buildCategoryXml(category) {
   const nameXml = buildLocalizedFieldXml('name', category.name);
   const linkRewriteXml = buildLocalizedFieldXml('link_rewrite', category.link_rewrite);
   const descriptionXml = category.description ? buildLocalizedFieldXml('description', category.description) : '';
+  const metaTitleXml = category.meta_title ? buildLocalizedFieldXml('meta_title', category.meta_title) : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -3067,6 +3275,7 @@ function buildCategoryXml(category) {
     <active>${xmlEscape(category.active)}</active>
     ${linkRewriteXml}
     ${descriptionXml}
+    ${metaTitleXml}
   </category>
 </prestashop>`;
 }
@@ -4757,27 +4966,19 @@ async function findCategoryByNameAndParent(categoryName, idParent = null, appUse
       .replace(/\s+/g, ' ')
       .trim();
     
-    // Check cache first to avoid fetching all categories repeatedly
+    // Fetch all categories (without cache)
     let allCategories = [];
-    const cacheKey = appUserId || 'default';
-    const cached = prestashopCategoryListCache.get(cacheKey);
-    const now = Date.now();
+    let limit = 1000;
+    let offset = 0;
+    let hasMore = true;
+    let paginationSupported = true;
     
-    if (cached && (now - cached.timestamp) < PRESTASHOP_CATEGORY_LIST_CACHE_TTL) {
-      allCategories = cached.categories;
-    } else {
-      // Fetch all categories (with pagination support)
-      let limit = 1000;
-      let offset = 0;
-      let hasMore = true;
-      let paginationSupported = true;
-      
-      // Fetch categories in batches to handle pagination
-      // Add retry logic with exponential backoff for 500 errors
-      const maxRetries = 3;
-      let retryCount = 0;
-      
-      while (hasMore) {
+    // Fetch categories in batches to handle pagination
+    // Add retry logic with exponential backoff for 500 errors
+    const maxRetries = 3;
+    let retryCount = 0;
+    
+    while (hasMore) {
       try {
         // Request id, name, and id_parent to check both name and parent
         const data = await prestashopApiRequest(
@@ -4853,15 +5054,6 @@ async function findCategoryByNameAndParent(categoryName, idParent = null, appUse
           }
         }
       }
-      } // Close while loop
-      
-      // Cache the fetched categories
-      if (allCategories.length > 0) {
-        prestashopCategoryListCache.set(cacheKey, {
-          categories: allCategories,
-          timestamp: Date.now()
-        });
-      }
     }
     
     // Search for category with matching name AND parent
@@ -4927,14 +5119,146 @@ async function findCategoryByNameAndParent(categoryName, idParent = null, appUse
   } catch (error) {
     // Log error but don't throw - allow sync to continue
     // If category lookup fails, the category will be created as new
-    if (error.response?.status === 500) {
-      console.warn(`PrestaShop API returned 500 error while checking for category "${categoryName}". Category will be created as new if it doesn't exist.`);
-      // Clear cache on 500 error to force refresh on next attempt
-      const cacheKey = appUserId || 'default';
-      prestashopCategoryListCache.delete(cacheKey);
-    } else {
-      console.error(`Error finding category by name and parent for "${categoryName}":`, error.message);
+    console.error(`Error finding category by name and parent for "${categoryName}":`, error.message);
+    return null; // Return null on error to allow creation to proceed
+  }
+}
+
+/**
+ * Find category in PrestaShop by meta_title (Allegro ID)
+ * @param {string} allegroCategoryId - Allegro category ID to search for
+ * @param {number} appUserId - Optional application user ID to use per-user credentials
+ * @returns {Promise<number|null>} - Category ID if found, null otherwise
+ */
+async function findCategoryByMetaTitle(allegroCategoryId, appUserId = null) {
+  if (!allegroCategoryId) {
+    return null;
+  }
+
+  try {
+    // Fetch all categories (without cache)
+    let allCategories = [];
+    let limit = 1000;
+    let offset = 0;
+    let hasMore = true;
+    let paginationSupported = true;
+    
+    // Fetch categories in batches to handle pagination
+    const maxRetries = 3;
+    let retryCount = 0;
+    
+    while (hasMore) {
+      try {
+        // Request id, name, id_parent, and meta_title to check meta_title
+        const data = await prestashopApiRequest(
+          `categories?display=[id,name,id_parent,meta_title]&limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`,
+          'GET',
+          null,
+          appUserId
+        );
+        
+        // Reset retry count on success
+        retryCount = 0;
+        
+        // PrestaShop returns categories in format: { categories: [{ category: {...} }] } or { category: {...} }
+        let categories = [];
+        if (data.categories) {
+          if (Array.isArray(data.categories)) {
+            categories = data.categories.map(item => item.category || item);
+          } else if (data.categories.category) {
+            categories = Array.isArray(data.categories.category) 
+              ? data.categories.category 
+              : [data.categories.category];
+          }
+        } else if (data.category) {
+          categories = Array.isArray(data.category) ? data.category : [data.category];
+        }
+        
+        if (categories.length === 0) {
+          hasMore = false;
+        } else {
+          allCategories = allCategories.concat(categories);
+          // If we got fewer categories than the limit, we've reached the end
+          if (categories.length < limit) {
+            hasMore = false;
+          } else if (paginationSupported) {
+            offset += limit;
+          } else {
+            // Pagination not supported, stop after first batch
+            hasMore = false;
+          }
+        }
+      } catch (paginationError) {
+        // Handle 500 errors with retry logic
+        if (paginationError.response?.status === 500) {
+          retryCount++;
+          if (retryCount <= maxRetries) {
+            const delay = Math.min(1000 * Math.pow(2, retryCount - 1), 10000); // Exponential backoff, max 10s
+            console.warn(`PrestaShop API returned 500 error, retrying (${retryCount}/${maxRetries}) after ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue; // Retry the same request
+          } else {
+            console.error(`PrestaShop API returned 500 error after ${maxRetries} retries. Returning null.`);
+            return null;
+          }
+        }
+        
+        // If pagination fails (404), PrestaShop may not support offset parameter
+        if (paginationError.response?.status === 404 && offset > 0) {
+          paginationSupported = false;
+          hasMore = false;
+        } else {
+          console.error(`Error fetching categories from PrestaShop: ${paginationError.message}`);
+          if (allCategories.length > 0) {
+            hasMore = false;
+          } else {
+            return null;
+          }
+        }
+      }
     }
+    
+    // Search for category with matching meta_title (Allegro ID)
+    for (const category of allCategories) {
+      if (category.meta_title) {
+        // Handle both array format and object format
+        let metaTitleArray = [];
+        if (Array.isArray(category.meta_title)) {
+          metaTitleArray = category.meta_title;
+        } else if (category.meta_title.language && Array.isArray(category.meta_title.language)) {
+          metaTitleArray = category.meta_title.language;
+        } else if (category.meta_title.language) {
+          metaTitleArray = [category.meta_title.language];
+        } else if (typeof category.meta_title === 'object' && category.meta_title.value) {
+          metaTitleArray = [category.meta_title];
+        } else if (typeof category.meta_title === 'string') {
+          // Direct string meta_title
+          if (category.meta_title === String(allegroCategoryId)) {
+            const categoryId = category.id || category.category?.id;
+            if (categoryId) {
+              return categoryId;
+            }
+          }
+        }
+        
+        // Check if any language version matches the Allegro ID
+        for (const metaTitleEntry of metaTitleArray) {
+          if (!metaTitleEntry) continue;
+          const rawValue = metaTitleEntry.value || (typeof metaTitleEntry === 'string' ? metaTitleEntry : null);
+          if (!rawValue || typeof rawValue !== 'string') continue;
+          if (rawValue === String(allegroCategoryId)) {
+            const categoryId = category.id || category.category?.id;
+            if (categoryId) {
+              return categoryId;
+            }
+          }
+        }
+      }
+    }
+    
+    return null; // Category not found
+  } catch (error) {
+    console.error(`Error finding category by meta_title (Allegro ID "${allegroCategoryId}"):`, error.message);
     return null; // Return null on error to allow creation to proceed
   }
 }
@@ -5262,7 +5586,7 @@ app.get('/api/prestashop/categories', async (req, res) => {
  */
 app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
   try {
-    const { name, idParent = 2, active = 1 } = req.body;
+    const { name, idParent = 2, active = 1, allegroCategoryId, allegroParentId } = req.body;
     const appUserId = req.user.userId;
     
     if (!name) {
@@ -5275,51 +5599,18 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
     // Load user's PrestaShop credentials before making any API calls
     await loadPrestashopCredentials(appUserId);
 
-    // Normalize category name for cache lookup
-    const normalizedName = name
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    // Check cache first (per-user)
-    let existingCategoryId = await CategoryCacheDB.get(normalizedName, appUserId);
-    
-    // If cache has an ID, verify it actually exists in PrestaShop
-    // This prevents using stale cache entries when PrestaShop was reset or categories were deleted
-    if (existingCategoryId && !isNaN(existingCategoryId)) {
-      const categoryExists = await verifyCategoryExists(existingCategoryId, appUserId);
-      if (!categoryExists) {
-        // Clear invalid cache entry
-        await CategoryCacheDB.delete(normalizedName, appUserId);
-        existingCategoryId = null;
-      } else {
-        // Verify the category name and parent match (to handle cases where category was moved or renamed)
-        const verifiedId = await findCategoryByNameAndParent(name, idParent, appUserId);
-        if (verifiedId && verifiedId != existingCategoryId) {
-          await updateCategoryCache(normalizedName, verifiedId, appUserId);
-          existingCategoryId = verifiedId;
-        } else if (!verifiedId) {
-          // Category doesn't exist with this name and parent, but cache says it does
-          await CategoryCacheDB.delete(normalizedName, appUserId);
-          existingCategoryId = null;
-        }
-      }
+    // Step 1: Check if category exists by meta_title (Allegro ID) - this is the primary key
+    let existingCategoryId = null;
+    if (allegroCategoryId) {
+      existingCategoryId = await findCategoryByMetaTitle(allegroCategoryId, appUserId);
     }
-    
-    // If not in cache or cache was invalid, check PrestaShop directly by name AND parent
-    // This prevents duplicates when the same category name exists under different parents
+
+    // Step 2: If not found by meta_title, check by name AND parent (fallback)
     if (!existingCategoryId || isNaN(existingCategoryId)) {
       existingCategoryId = await findCategoryByNameAndParent(name, idParent, appUserId);
-      
-      // If found in PrestaShop, update cache
-      if (existingCategoryId && !isNaN(existingCategoryId)) {
-        await updateCategoryCache(normalizedName, existingCategoryId, appUserId);
-      }
     }
 
-    // If we found a matching category with the same name AND parent, just return it
+    // If we found a matching category, just return it
     if (existingCategoryId && !isNaN(existingCategoryId)) {
       return res.json({
         success: true,
@@ -5329,19 +5620,39 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
       });
     }
 
-    // No matching category name in PrestaShop – create a new one
+    // Step 3: Determine parent ID - if allegroParentId is provided, find parent by meta_title
+    let finalParentId = idParent;
+    if (allegroParentId) {
+      const parentCategoryId = await findCategoryByMetaTitle(allegroParentId, appUserId);
+      if (parentCategoryId && !isNaN(parentCategoryId)) {
+        finalParentId = parentCategoryId;
+        console.log(`Found parent category by meta_title (Allegro ID: ${allegroParentId}) -> PrestaShop ID: ${finalParentId}`);
+      } else {
+        console.warn(`Parent category with Allegro ID ${allegroParentId} not found by meta_title, using provided idParent: ${idParent}`);
+      }
+    }
+
+    // No matching category in PrestaShop – create a new one
     const categoryData = {
       name: [
         { id: 1, value: name }, // Polish (id: 1)
         { id: 2, value: name }  // English (id: 2)
       ],
-      id_parent: idParent,
+      id_parent: finalParentId,
       active: active,
       link_rewrite: [
         { id: 1, value: name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') },
         { id: 2, value: name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') }
       ]
     };
+
+    // Add meta_title (Allegro ID) if provided
+    if (allegroCategoryId) {
+      categoryData.meta_title = [
+        { id: 1, value: String(allegroCategoryId) }, // Polish (id: 1)
+        { id: 2, value: String(allegroCategoryId) }  // English (id: 2)
+      ];
+    }
 
     const xmlBody = buildCategoryXml(categoryData);
     const data = await prestashopApiRequest('categories', 'POST', xmlBody, appUserId);
@@ -5357,12 +5668,7 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
       });
     }
     
-    console.log(`✓ Created category "${name}" (ID: ${createdCategoryId}, Parent: ${idParent})`);
-    
-    // Save to cache (per-user)
-    if (createdCategoryId && !isNaN(createdCategoryId)) {
-      await updateCategoryCache(normalizedName, createdCategoryId, appUserId);
-    }
+    console.log(`✓ Created category "${name}" (ID: ${createdCategoryId}, Parent: ${finalParentId}${allegroCategoryId ? `, Allegro ID: ${allegroCategoryId}` : ''})`);
 
     res.json({
       success: true,
@@ -8286,12 +8592,14 @@ app.get('/api/sync/statistics', authMiddleware, async (req, res) => {
       setTimeout(() => {
         clearInterval(checkSync);
         if (!res.headersSent) {
+          // Check current state, not the initial state
+          const currentState = userSyncStates.get(appUserId) || { running: false, lastSyncTime: null, nextSyncTime: null };
           res.json({
             success: true,
             statistics: statistics,
-            running: userState.running,
-            lastSyncTime: userState.lastSyncTime,
-            nextSyncTime: userState.nextSyncTime,
+            running: currentState.running,
+            lastSyncTime: currentState.lastSyncTime,
+            nextSyncTime: currentState.nextSyncTime,
             hasNewSync: false,
             timeout: true
           });
@@ -8638,6 +8946,482 @@ app.get('/api/sync/status', authMiddleware, async (req, res) => {
       useIntervalTimer: USE_INTERVAL_TIMER
     });
   } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Start the category sync timer manually for a specific user
+ */
+async function startCategorySyncCronManual(appUserId) {
+  if (!appUserId) {
+    return { success: false, error: 'User ID is required' };
+  }
+  
+  // Check if timer is already running for this user
+  const userTimer = userCategorySyncTimers.get(appUserId);
+  if (userTimer && userTimer.active) {
+    return { success: false, error: 'Category sync timer is already running for this user' };
+  }
+  
+  if (!USE_INTERVAL_TIMER) {
+    return { success: false, error: 'Internal timer is disabled. Use external cron instead.' };
+  }
+  
+  // Clear any existing interval for this user
+  if (userTimer && userTimer.intervalId) {
+    clearInterval(userTimer.intervalId);
+  }
+  
+  // Initialize user state if not exists
+  if (!userSyncStates.has(appUserId)) {
+    userSyncStates.set(appUserId, { running: false, lastSyncTime: null, nextSyncTime: null });
+  }
+  
+  // Start new interval for this user (48 hours)
+  const now = Date.now();
+  const nextSyncTime = new Date(now + CATEGORY_SYNC_INTERVAL_MS).toISOString();
+  
+  const intervalId = setInterval(async () => {
+    const nextSyncTime = new Date(Date.now() + CATEGORY_SYNC_INTERVAL_MS).toISOString();
+    // Persist nextSyncTime to database
+    try {
+      const settings = await loadSyncSettings(appUserId);
+      await saveSyncSettings(appUserId, {
+        ...settings,
+        categoryNextSyncTime: nextSyncTime
+      });
+    } catch (error) {
+      console.error(`Error updating category_next_sync_time in timer for user ${appUserId}:`, error.message);
+    }
+    // Trigger category sync via API endpoint (client will call it)
+    // Note: Category sync is triggered client-side, so we just update the next sync time
+    console.log(`Category sync timer triggered for user ${appUserId} (next sync in 48 hours)`);
+  }, CATEGORY_SYNC_INTERVAL_MS);
+  
+  userCategorySyncTimers.set(appUserId, { intervalId, active: true });
+  console.log(`Category sync timer started manually for user ${appUserId} (runs every ${CATEGORY_SYNC_INTERVAL_HOURS} hours)`);
+  
+  // Save timer state to database
+  try {
+    const settings = await loadSyncSettings(appUserId);
+    await saveSyncSettings(appUserId, {
+      ...settings,
+      categoryNextSyncTime: nextSyncTime,
+      categorySyncTimerActive: true
+    });
+  } catch (error) {
+    console.error(`Error saving category sync timer state for user ${appUserId}:`, error.message);
+  }
+  
+  return {
+    success: true,
+    message: `Category sync timer started (runs every ${CATEGORY_SYNC_INTERVAL_HOURS} hours)`
+  };
+}
+
+/**
+ * API: Start category sync timer (per-user)
+ */
+app.post('/api/category-sync/start', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    
+    // Load user's credentials and tokens
+    await loadCredentials(appUserId);
+    await loadTokens(appUserId);
+    await loadPrestashopCredentials(appUserId);
+    
+    // Check prerequisites first
+    const prestashopCreds = getPrestashopCredentials(appUserId);
+    const hasPrestashopConfig =
+      !!(prestashopCreds.baseUrl && prestashopCreds.apiKey);
+    const tokens = getUserOAuthTokens(appUserId);
+    const creds = getUserCredentials(appUserId);
+    const hasAllegroConfig =
+      !!(
+        (tokens.accessToken || tokens.refreshToken) &&
+        creds.clientId &&
+        creds.clientSecret
+      );
+
+    if (!hasPrestashopConfig || !hasAllegroConfig) {
+      return res.status(400).json({
+        success: false,
+        error: 'Prerequisites not met. Please configure Allegro and PrestaShop first.',
+        prerequisitesMet: false
+      });
+    }
+
+    const result = await startCategorySyncCronManual(appUserId);
+    const userTimer = userCategorySyncTimers.get(appUserId);
+    if (result.success) {
+      res.json({
+        success: true,
+        message: result.message,
+        timerActive: userTimer ? userTimer.active : false
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        error: result.error
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Stop category sync timer (per-user)
+ */
+app.post('/api/category-sync/stop', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    
+    // Stop timer for this user
+    const userTimer = userCategorySyncTimers.get(appUserId);
+    if (userTimer && userTimer.intervalId) {
+      clearInterval(userTimer.intervalId);
+      userCategorySyncTimers.set(appUserId, { intervalId: null, active: false });
+      
+      // Save timer state to database
+      try {
+        const settings = await loadSyncSettings(appUserId);
+        await saveSyncSettings(appUserId, {
+          ...settings,
+          categorySyncTimerActive: false
+        });
+      } catch (error) {
+        console.error(`Error saving category sync timer state for user ${appUserId}:`, error.message);
+      }
+      
+      res.json({
+        success: true,
+        message: 'Category sync timer stopped',
+        timerActive: false
+      });
+    } else {
+      // Even if timer wasn't running in memory, update database to ensure consistency
+      try {
+        const settings = await loadSyncSettings(appUserId);
+        await saveSyncSettings(appUserId, {
+          ...settings,
+          categorySyncTimerActive: false
+        });
+      } catch (error) {
+        console.error(`Error saving category sync timer state for user ${appUserId}:`, error.message);
+      }
+      
+      res.json({
+        success: true,
+        message: 'Category sync timer was not running',
+        timerActive: false
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Get category sync status (per-user)
+ */
+app.get('/api/category-sync/status', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    
+    // Load sync settings from database to restore state
+    const settings = await loadSyncSettings(appUserId);
+    
+    // Restore timer if it was active in database but not in memory
+    const userTimer = userCategorySyncTimers.get(appUserId);
+    if (settings.categorySyncTimerActive && (!userTimer || !userTimer.active)) {
+      // Timer was active in database but not in memory - restore it
+      if (USE_INTERVAL_TIMER) {
+        try {
+          // Load user's credentials and tokens to check prerequisites
+          await loadCredentials(appUserId);
+          await loadTokens(appUserId);
+          await loadPrestashopCredentials(appUserId);
+          
+          const prestashopCreds = getPrestashopCredentials(appUserId);
+          const hasPrestashopConfig =
+            !!(prestashopCreds.baseUrl && prestashopCreds.apiKey);
+          const tokens = getUserOAuthTokens(appUserId);
+          const creds = getUserCredentials(appUserId);
+          const hasAllegroConfig =
+            !!(
+              (tokens.accessToken || tokens.refreshToken) &&
+              creds.clientId &&
+              creds.clientSecret
+            );
+          
+          // Only restore timer if prerequisites are met
+          if (hasPrestashopConfig && hasAllegroConfig) {
+            // Check again if timer is now active (race condition protection)
+            const currentTimer = userCategorySyncTimers.get(appUserId);
+            if (!currentTimer || !currentTimer.active) {
+              const result = await startCategorySyncCronManual(appUserId);
+              if (result.success) {
+                console.log(`Restored category sync timer for user ${appUserId} from database`);
+                // Update nextSyncTime from database if available
+                if (settings.categoryNextSyncTime) {
+                  // Already set in startCategorySyncCronManual
+                }
+              }
+            }
+          } else {
+            // Prerequisites not met - update database to reflect that timer cannot be active
+            console.log(`Cannot restore category sync timer for user ${appUserId}: prerequisites not met`);
+            try {
+              await saveSyncSettings(appUserId, {
+                ...settings,
+                categorySyncTimerActive: false
+              });
+            } catch (saveError) {
+              console.error(`Error saving category sync timer state for user ${appUserId}:`, saveError.message);
+            }
+          }
+        } catch (restoreError) {
+          console.error(`Error restoring category sync timer for user ${appUserId}:`, restoreError.message);
+        }
+      }
+    }
+    
+    // Get current state (after potential restoration)
+    const currentTimer = userCategorySyncTimers.get(appUserId);
+    
+    res.json({
+      success: true,
+      lastSyncTime: settings.categoryLastSyncTime,
+      nextSyncTime: settings.categoryNextSyncTime,
+      timerActive: currentTimer ? currentTimer.active : false,
+      useIntervalTimer: USE_INTERVAL_TIMER
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Trigger category sync now (per-user)
+ */
+app.post('/api/category-sync/trigger', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    
+    // Update last sync time
+    const now = new Date().toISOString();
+    const nextSyncTime = new Date(Date.now() + CATEGORY_SYNC_INTERVAL_MS).toISOString();
+    
+    try {
+      const settings = await loadSyncSettings(appUserId);
+      await saveSyncSettings(appUserId, {
+        ...settings,
+        categoryLastSyncTime: now,
+        categoryNextSyncTime: nextSyncTime
+      });
+    } catch (error) {
+      console.error(`Error updating category sync time for user ${appUserId}:`, error.message);
+    }
+    
+    res.json({
+      success: true,
+      message: 'Category sync triggered. Please check the client for sync status.',
+      lastSyncTime: now,
+      nextSyncTime: nextSyncTime
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Save category sync statistics
+ */
+app.post('/api/category-sync/statistics', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    const stats = req.body;
+
+    if (!stats) {
+      return res.status(400).json({
+        success: false,
+        error: 'Statistics data is required'
+      });
+    }
+
+    await saveCategorySyncStatistics(appUserId, stats);
+
+    res.json({
+      success: true,
+      message: 'Category sync statistics saved'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * API: Get category sync statistics with long polling support
+ * Returns latest category sync statistics and waits for new sync completion if longPoll=true
+ */
+app.get('/api/category-sync/statistics', authMiddleware, async (req, res) => {
+  try {
+    const appUserId = req.user.userId;
+    const longPoll = req.query.longPoll === 'true';
+    const timeout = parseInt(req.query.timeout) || 60000; // Default 60 seconds
+    const lastSyncEndTime = req.query.lastSyncEndTime; // Client's last known sync end time
+    
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not initialized'
+      });
+    }
+
+    // Get latest category sync statistics (only one result per user)
+    const [rows] = await dbPool.query(`
+      SELECT * FROM category_sync_statistics 
+      WHERE app_user_id = ? 
+      ORDER BY sync_end_time DESC 
+      LIMIT 1
+    `, [appUserId]);
+    
+    const statistics = rows.map(row => {
+      // Parse changed_info JSON if it exists
+      let changedInfo = null;
+      if (row.changed_info) {
+        try {
+          changedInfo = typeof row.changed_info === 'string' 
+            ? JSON.parse(row.changed_info) 
+            : row.changed_info;
+        } catch (parseError) {
+          console.warn('Error parsing changed_info JSON:', parseError.message);
+          changedInfo = null;
+        }
+      }
+      
+      return {
+        id: row.id,
+        categoriesCreatedCount: row.categories_created_count,
+        categoriesExistingCount: row.categories_existing_count,
+        categoriesErrorCount: row.categories_error_count,
+        categoriesSkippedCount: row.categories_skipped_count,
+        totalCategoriesChecked: row.total_categories_checked,
+        syncStartTime: row.sync_start_time ? new Date(row.sync_start_time + 'Z').toISOString() : null,
+        syncEndTime: row.sync_end_time ? new Date(row.sync_end_time + 'Z').toISOString() : null,
+        changedInfo: changedInfo
+      };
+    });
+
+    // Check if we have a new sync (different end time than client's last known)
+    const hasNewSync = lastSyncEndTime && statistics.length > 0 && statistics[0].syncEndTime !== lastSyncEndTime;
+
+    // If not long polling, return immediately
+    if (!longPoll) {
+      return res.json({
+        success: true,
+        statistics: statistics,
+        hasNewSync: hasNewSync
+      });
+    }
+
+    // Long polling: wait for new sync or timeout
+    if (hasNewSync) {
+      // Already have new sync, return immediately
+      return res.json({
+        success: true,
+        statistics: statistics,
+        hasNewSync: true
+      });
+    }
+
+    // Wait for new sync or timeout
+    const startTime = Date.now();
+    const checkInterval = 1000; // Check every second
+    
+    const checkSync = setInterval(async () => {
+      try {
+        const [updatedRows] = await dbPool.query(`
+          SELECT * FROM category_sync_statistics 
+          WHERE app_user_id = ? 
+          ORDER BY sync_end_time DESC 
+          LIMIT 1
+        `, [appUserId]);
+      
+        const updatedStats = updatedRows.map(row => {
+          // Parse changed_info JSON if it exists
+          let changedInfo = null;
+          if (row.changed_info) {
+            try {
+              changedInfo = typeof row.changed_info === 'string' 
+                ? JSON.parse(row.changed_info) 
+                : row.changed_info;
+            } catch (parseError) {
+              console.warn('Error parsing changed_info JSON:', parseError.message);
+              changedInfo = null;
+            }
+          }
+          
+          return {
+            id: row.id,
+            categoriesCreatedCount: row.categories_created_count,
+            categoriesExistingCount: row.categories_existing_count,
+            categoriesErrorCount: row.categories_error_count,
+            categoriesSkippedCount: row.categories_skipped_count,
+            totalCategoriesChecked: row.total_categories_checked,
+            syncStartTime: row.sync_start_time ? new Date(row.sync_start_time + 'Z').toISOString() : null,
+            syncEndTime: row.sync_end_time ? new Date(row.sync_end_time + 'Z').toISOString() : null,
+            changedInfo: changedInfo
+          };
+        });
+        
+        const hasNewSyncNow = lastSyncEndTime && updatedStats.length > 0 && updatedStats[0].syncEndTime !== lastSyncEndTime;
+        
+        if (hasNewSyncNow || (Date.now() - startTime) >= timeout) {
+          clearInterval(checkSync);
+          res.json({
+            success: true,
+            statistics: updatedStats,
+            hasNewSync: hasNewSyncNow
+          });
+        }
+      } catch (error) {
+        clearInterval(checkSync);
+        console.error('Error in category sync statistics long polling:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
+    }, checkInterval);
+
+    // Cleanup on client disconnect
+    req.on('close', () => {
+      clearInterval(checkSync);
+    });
+  } catch (error) {
+    console.error('Error getting category sync statistics:', error);
     res.status(500).json({
       success: false,
       error: error.message
