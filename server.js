@@ -1592,12 +1592,12 @@ async function saveSyncSettings(appUserId, settings) {
       appUserId,
       settings.autoSyncEnabled ? 1 : 0,
       settings.syncIntervalMs || SYNC_INTERVAL_MS,
-      settings.lastSyncTime || null,
-      settings.nextSyncTime || null,
+      convertToMySQLDateTime(settings.lastSyncTime),
+      convertToMySQLDateTime(settings.nextSyncTime),
       settings.syncTimerActive ? 1 : 0,
       settings.categorySyncIntervalMs || CATEGORY_SYNC_INTERVAL_MS,
-      settings.categoryLastSyncTime || null,
-      settings.categoryNextSyncTime || null,
+      convertToMySQLDateTime(settings.categoryLastSyncTime),
+      convertToMySQLDateTime(settings.categoryNextSyncTime),
       settings.categorySyncTimerActive ? 1 : 0
     ]);
 
@@ -1811,6 +1811,22 @@ async function updateCategoryCache(normalizedName, categoryId, appUserId) {
 }
 
 /**
+ * Convert ISO datetime string to MySQL datetime format (YYYY-MM-DD HH:MM:SS)
+ * @param {string|null|undefined} isoString - ISO 8601 datetime string
+ * @returns {string|null} MySQL datetime format string or null
+ */
+function convertToMySQLDateTime(isoString) {
+  if (!isoString) {
+    return null;
+  }
+  const dt = new Date(isoString);
+  if (isNaN(dt.getTime())) {
+    return null; // Invalid date
+  }
+  return dt.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+/**
  * Database wrapper functions for Product Mappings
  * Uses MariaDB/MySQL with proper indexes for fast performance
  */
@@ -1886,8 +1902,8 @@ const ProductMappingsDB = {
         appUserId,
         offerId.toString(),
         mapping.prestashopProductId,
-        mapping.syncedAt || null,
-        mapping.lastStockSync || null
+        convertToMySQLDateTime(mapping.syncedAt),
+        convertToMySQLDateTime(mapping.lastStockSync)
       ]);
 
       // Log only updates to reduce spam (new mappings are logged when products are created)
