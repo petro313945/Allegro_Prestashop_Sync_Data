@@ -253,6 +253,27 @@ async function initDatabase() {
     console.warn('Warning: Could not add is_active column:', error.message);
   }
 
+  // Add suspended_at column if it doesn't exist (for existing databases)
+  try {
+    const [columns] = await dbPool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'users' 
+      AND COLUMN_NAME = 'suspended_at'
+    `);
+    
+    if (columns.length === 0) {
+      await dbPool.query(`
+        ALTER TABLE users 
+        ADD COLUMN suspended_at DATETIME NULL
+      `);
+      console.log('✓ Added suspended_at column to users table');
+    }
+  } catch (error) {
+    console.warn('Warning: Could not add suspended_at column:', error.message);
+  }
+
   // Create allegro_credentials table (multi-user configuration)
   await dbPool.query(`
     CREATE TABLE IF NOT EXISTS allegro_credentials (
@@ -614,6 +635,28 @@ async function initDatabase() {
     }
   }
 
+  // Add x_rate column if it doesn't exist (migration for existing tables)
+  try {
+    await dbPool.query(`
+      ALTER TABLE sync_statistics 
+      ADD COLUMN IF NOT EXISTS x_rate DECIMAL(5,2) NOT NULL DEFAULT 100.00
+    `);
+  } catch (error) {
+    // Column might already exist, or MySQL version doesn't support IF NOT EXISTS
+    // Try without IF NOT EXISTS as fallback
+    try {
+      await dbPool.query(`
+        ALTER TABLE sync_statistics 
+        ADD COLUMN x_rate DECIMAL(5,2) NOT NULL DEFAULT 100.00
+      `);
+    } catch (alterError) {
+      // Column likely already exists, which is fine
+      if (!alterError.message.includes('Duplicate column name')) {
+        console.warn('Migration note for x_rate column:', alterError.message);
+      }
+    }
+  }
+
   // Create category_sync_statistics table (per-user category sync statistics)
   await dbPool.query(`
     CREATE TABLE IF NOT EXISTS category_sync_statistics (
@@ -816,8 +859,9 @@ const syncQueue = {
  * Add user to sync queue
  * @param {number} appUserId - User ID to sync
  * @param {number} priority - Priority (lower = higher priority, default: Date.now())
+ * @param {number} xRate - Price multiplier rate (default: 100)
  */
-function enqueueSync(appUserId, priority = null) {
+function enqueueSync(appUserId, priority = null, xRate = null) {
   if (syncQueue.running.has(appUserId)) {
     console.log(`User ${appUserId} sync already running, skipping queue`);
     return;
@@ -831,13 +875,14 @@ function enqueueSync(appUserId, priority = null) {
   syncQueue.queue.push({
     appUserId,
     priority: priority || Date.now(),
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    xRate: xRate !== null ? parseFloat(xRate) : null
   });
   
   // Sort by priority (lower priority number = higher priority)
   syncQueue.queue.sort((a, b) => a.priority - b.priority);
   
-  console.log(`User ${appUserId} added to sync queue (position: ${syncQueue.queue.length})`);
+  console.log(`User ${appUserId} added to sync queue (position: ${syncQueue.queue.length})${xRate !== null ? ` with x_rate=${xRate}` : ''}`);
   processSyncQueue();
 }
 
@@ -853,17 +898,34 @@ async function processSyncQueue() {
   
   while (syncQueue.queue.length > 0 && syncQueue.running.size < syncQueue.maxConcurrent) {
     const item = syncQueue.queue.shift();
-    const { appUserId } = item;
+    const { appUserId, xRate } = item;
     
     if (syncQueue.running.has(appUserId)) {
       continue; // Skip if already running
     }
     
+    // Check if user is suspended before starting sync
+    try {
+      if (dbPool) {
+        const [userRows] = await dbPool.query(
+          'SELECT is_active FROM users WHERE id = ?',
+          [appUserId]
+        );
+        if (userRows.length > 0 && (userRows[0].is_active === 0 || userRows[0].is_active === false)) {
+          console.log(`Sync skipped for suspended user ${appUserId} (removed from queue)`);
+          continue; // Skip this user and process next item
+        }
+      }
+    } catch (error) {
+      console.error(`Error checking user suspension status for user ${appUserId}:`, error.message);
+      // Continue with sync if check fails (fail open)
+    }
+    
     syncQueue.running.add(appUserId);
-    console.log(`Starting sync for user ${appUserId} (${syncQueue.running.size}/${syncQueue.maxConcurrent} concurrent)`);
+    console.log(`Starting sync for user ${appUserId} (${syncQueue.running.size}/${syncQueue.maxConcurrent} concurrent)${xRate !== null ? ` with x_rate=${xRate}` : ''}`);
     
     // Run sync in background
-    syncStockFromAllegroToPrestashop(appUserId)
+    syncStockFromAllegroToPrestashop(appUserId, xRate)
       .then(() => {
         syncQueue.running.delete(appUserId);
         console.log(`Sync completed for user ${appUserId} (${syncQueue.running.size}/${syncQueue.maxConcurrent} concurrent)`);
@@ -1714,8 +1776,9 @@ async function saveSyncStatistics(appUserId, stats) {
         price_error_count,
         sync_start_time,
         sync_end_time,
-        changed_info
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        changed_info,
+        x_rate
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       appUserId,
       stats.stockSyncedCount || 0,
@@ -1728,7 +1791,8 @@ async function saveSyncStatistics(appUserId, stats) {
       stats.priceErrorCount || 0,
       stats.syncStartTime ? new Date(stats.syncStartTime).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' '),
       stats.syncEndTime ? new Date(stats.syncEndTime).toISOString().slice(0, 19).replace('T', ' ') : new Date().toISOString().slice(0, 19).replace('T', ' '),
-      changedInfoJson
+      changedInfoJson,
+      stats.xRate !== undefined ? parseFloat(stats.xRate) : 100.00
     ]);
   } catch (error) {
     // Silently fail - statistics saving shouldn't break sync
@@ -2470,7 +2534,7 @@ app.get('/api/admin/users', authMiddleware, requireAdmin, async (req, res) => {
     }
 
     const [rows] = await dbPool.query(
-      'SELECT id, email, role, failed_attempts, lock_until, is_active, last_login_at, created_at, updated_at FROM users ORDER BY created_at DESC'
+      'SELECT id, email, role, failed_attempts, lock_until, is_active, last_login_at, created_at, updated_at, suspended_at FROM users ORDER BY created_at DESC'
     );
 
     res.json({
@@ -2484,7 +2548,8 @@ app.get('/api/admin/users', authMiddleware, requireAdmin, async (req, res) => {
         is_active: user.is_active === 1 || user.is_active === true,
         last_login_at: user.last_login_at,
         created_at: user.created_at,
-        updated_at: user.updated_at
+        updated_at: user.updated_at,
+        suspended_at: user.suspended_at
       }))
     });
   } catch (error) {
@@ -2520,9 +2585,9 @@ app.put('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res) =
 
     const { email, password, role, is_active } = req.body || {};
     
-    // Check if user exists
+    // Check if user exists and get current status
     const [existing] = await dbPool.query(
-      'SELECT id FROM users WHERE id = ?',
+      'SELECT id, is_active FROM users WHERE id = ?',
       [userId]
     );
     if (existing.length === 0) {
@@ -2532,6 +2597,7 @@ app.put('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res) =
       });
     }
 
+    const currentIsActive = existing[0].is_active === 1 || existing[0].is_active === true;
     const updates = [];
     const values = [];
 
@@ -2568,8 +2634,35 @@ app.put('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res) =
 
     // Update is_active if provided
     if (is_active !== undefined) {
+      const newIsActive = is_active ? 1 : 0;
       updates.push('is_active = ?');
-      values.push(is_active ? 1 : 0);
+      values.push(newIsActive);
+      
+      // Set or clear suspended_at based on is_active change
+      if (currentIsActive && !is_active) {
+        // User is being suspended
+        updates.push('suspended_at = NOW()');
+        // Stop sync timers for this user
+        const userTimer = userSyncTimers.get(userId);
+        if (userTimer && userTimer.intervalId) {
+          clearInterval(userTimer.intervalId);
+          userSyncTimers.set(userId, { intervalId: null, active: false });
+          console.log(`Stopped stock sync timer for suspended user ${userId}`);
+        }
+        // Stop category sync timer
+        const categoryTimer = userCategorySyncTimers.get(userId);
+        if (categoryTimer && categoryTimer.intervalId) {
+          clearInterval(categoryTimer.intervalId);
+          userCategorySyncTimers.set(userId, { intervalId: null, active: false });
+          console.log(`Stopped category sync timer for suspended user ${userId}`);
+        }
+      } else if (!currentIsActive && is_active) {
+        // User is being unsuspended
+        updates.push('suspended_at = NULL');
+        // Note: Sync timers will be started manually by user or on next server restart
+        // We don't auto-start them here to avoid unexpected behavior
+        console.log(`User ${userId} unsuspended. Sync timers can be started manually.`);
+      }
     }
 
     if (updates.length === 0) {
@@ -2587,7 +2680,7 @@ app.put('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res) =
 
     // Fetch updated user
     const [updated] = await dbPool.query(
-      'SELECT id, email, role, failed_attempts, lock_until, is_active, last_login_at, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, email, role, failed_attempts, lock_until, is_active, last_login_at, created_at, updated_at, suspended_at FROM users WHERE id = ?',
       [userId]
     );
 
@@ -2602,7 +2695,8 @@ app.put('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res) =
         is_active: updated[0].is_active === 1 || updated[0].is_active === true,
         last_login_at: updated[0].last_login_at,
         created_at: updated[0].created_at,
-        updated_at: updated[0].updated_at
+        updated_at: updated[0].updated_at,
+        suspended_at: updated[0].suspended_at
       }
     });
   } catch (error) {
@@ -5612,6 +5706,20 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
       });
     }
 
+    // Check if user is suspended
+    if (dbPool) {
+      const [userRows] = await dbPool.query(
+        'SELECT is_active FROM users WHERE id = ?',
+        [appUserId]
+      );
+      if (userRows.length > 0 && (userRows[0].is_active === 0 || userRows[0].is_active === false)) {
+        return res.status(403).json({
+          success: false,
+          error: 'User account is suspended. Category sync is not allowed.'
+        });
+      }
+    }
+
     // Load user's PrestaShop credentials before making any API calls
     await loadPrestashopCredentials(appUserId);
 
@@ -7209,11 +7317,63 @@ app.get('/api/export/products.csv', authMiddleware, async (req, res) => {
  * Optimized: Only syncs products that exist in PrestaShop (by reference field)
  * This is much more efficient than checking all Allegro offers
  */
-async function syncStockFromAllegroToPrestashop(appUserId = null) {
+async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) {
   if (!appUserId) {
     console.error('User ID is required for sync');
     return;
   }
+
+  // Check if user is suspended (is_active = 0)
+  try {
+    if (dbPool) {
+      const [userRows] = await dbPool.query(
+        'SELECT is_active FROM users WHERE id = ?',
+        [appUserId]
+      );
+      if (userRows.length > 0 && (userRows[0].is_active === 0 || userRows[0].is_active === false)) {
+        console.log(`Stock sync skipped for suspended user ${appUserId}`);
+        userSyncStates.set(appUserId, { ...userSyncStates.get(appUserId), running: false });
+        return;
+      }
+    }
+  } catch (error) {
+    console.error(`Error checking user suspension status for user ${appUserId}:`, error.message);
+    // Continue with sync if check fails (fail open)
+  }
+
+  // If xRate not provided, get it from the last sync statistics (default: 100)
+  if (xRate === null) {
+    try {
+      if (dbPool) {
+        const [rows] = await dbPool.query(`
+          SELECT x_rate FROM sync_statistics 
+          WHERE app_user_id = ? 
+          ORDER BY sync_end_time DESC 
+          LIMIT 1
+        `, [appUserId]);
+        if (rows.length > 0 && rows[0].x_rate !== null && rows[0].x_rate !== undefined) {
+          xRate = parseFloat(rows[0].x_rate);
+        } else {
+          xRate = 100.00; // Default value
+        }
+      } else {
+        xRate = 100.00; // Default value
+      }
+    } catch (error) {
+      console.warn(`Error loading x_rate for user ${appUserId}, using default 100:`, error.message);
+      xRate = 100.00; // Default value
+    }
+  } else {
+    xRate = parseFloat(xRate);
+  }
+
+  // Validate xRate range (0-500)
+  if (isNaN(xRate) || xRate < 0 || xRate > 500) {
+    console.warn(`Invalid x_rate value ${xRate}, using default 100`);
+    xRate = 100.00;
+  }
+
+  console.log(`Using x_rate=${xRate} for sync (PrestaShop price = Allegro price * ${xRate}/100)`);
 
   // Check if this user's sync is already running (check both in-memory and database)
   const userState = userSyncStates.get(appUserId) || { running: false };
@@ -7957,16 +8117,19 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
 
           // Price comparison and sync (after stock sync)
           if (allegroPrice !== null && prestashopPrice !== null) {
+            // Calculate target PrestaShop price using formula: PrestaShop price = Allegro price * X/100
+            const targetPrestashopPrice = (allegroPrice * xRate) / 100;
+            
             // Compare prices with tolerance for floating point precision
-            const priceDiff = Math.abs(allegroPrice - prestashopPrice);
+            const priceDiff = Math.abs(targetPrestashopPrice - prestashopPrice);
             const priceTolerance = 0.009; // Tolerance for floating point precision (0.009 PLN)
             // This allows differences of 0.01 PLN (1 grosz) or more to be synced
             // while ignoring tiny floating point errors
             
             if (priceDiff > priceTolerance) {
-              // Prices differ - sync from Allegro to PrestaShop
+              // Prices differ - sync from Allegro to PrestaShop using x_rate formula
               try {
-                console.log(`Price differs for product ${prestashopProductId} (Allegro offer ${offerId}): Allegro=${allegroPrice.toFixed(2)}, PrestaShop=${prestashopPrice.toFixed(2)}. Syncing from Allegro to PrestaShop...`);
+                console.log(`Price differs for product ${prestashopProductId} (Allegro offer ${offerId}): Allegro=${allegroPrice.toFixed(2)}, Target PrestaShop=${targetPrestashopPrice.toFixed(2)} (x_rate=${xRate}), Current PrestaShop=${prestashopPrice.toFixed(2)}. Syncing...`);
                 
                 // Fetch full product data to preserve all fields (name, description, categories, etc.)
                 // We need all fields because PrestaShop API may clear fields if not included in PUT request
@@ -8019,7 +8182,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                   description: normalizedDescription,
                   description_short: normalizedDescriptionShort,
                   link_rewrite: normalizedLinkRewrite,
-                  price: allegroPrice.toFixed(2), // Update only the price
+                  price: targetPrestashopPrice.toFixed(2), // Update price using formula: Allegro price * X/100
                   active: String(fullProductForUpdate.active !== undefined ? fullProductForUpdate.active : '1'),
                   state: String(fullProductForUpdate.state !== undefined ? fullProductForUpdate.state : '1'),
                   visibility: fullProductForUpdate.visibility || 'both',
@@ -8055,7 +8218,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                   prestashopProductId: prestashopProductId,
                   allegroOfferId: offerId,
                   priceBefore: prestashopPrice,
-                  priceAfter: allegroPrice,
+                  priceAfter: targetPrestashopPrice,
                   stockBefore: prestashopStockNum,
                   stockAfter: allegroStockNum
                 };
@@ -8063,7 +8226,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                 if (existingChangeIndex >= 0) {
                   // Update existing entry with price change
                   productChanges[existingChangeIndex].priceBefore = prestashopPrice;
-                  productChanges[existingChangeIndex].priceAfter = allegroPrice;
+                  productChanges[existingChangeIndex].priceAfter = targetPrestashopPrice;
                 } else {
                   // Add new entry for price change only
                   productChanges.push(changeInfo);
@@ -8071,7 +8234,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                 
                 await addSyncLog({
                   status: 'success',
-                  message: `Price synced from Allegro to PrestaShop: ${prestashopPrice.toFixed(2)} PLN → ${allegroPrice.toFixed(2)} PLN`,
+                  message: `Price synced: ${prestashopPrice.toFixed(2)} PLN → ${targetPrestashopPrice.toFixed(2)} PLN (Allegro: ${allegroPrice.toFixed(2)} PLN, x_rate: ${xRate})`,
                   productName: productName,
                   categoryName: categoryName,
                   offerId: offerId,
@@ -8082,10 +8245,10 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
                   },
                   priceChange: {
                     from: prestashopPrice,
-                    to: allegroPrice
+                    to: targetPrestashopPrice
                   },
                   allegroPrice: allegroPrice,
-                  prestashopPrice: prestashopPrice // Keep original PrestaShop price to show before/after in UI
+                  prestashopPrice: targetPrestashopPrice
                 }, appUserId);
               } catch (priceError) {
                 console.error(`Error updating PrestaShop price for product ${prestashopProductId}:`, priceError.message);
@@ -8284,6 +8447,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null) {
       totalProductsChecked: totalProductsChecked,
       stockUnchangedCount: unchangedCount,
       stockSkippedCount: skippedCount,
+      xRate: xRate,
       stockErrorCount: errorCount,
       priceUnchangedCount: priceUnchangedCount,
       priceErrorCount: priceErrorCount,
@@ -8354,6 +8518,25 @@ async function startStockSyncCron() {
         // Then run every SYNC_INTERVAL_MINUTES minutes for this user
         // Use queue system to manage concurrent syncs
         const intervalId = setInterval(async () => {
+          // Check if user is suspended before triggering sync
+          try {
+            if (dbPool) {
+              const [userRows] = await dbPool.query(
+                'SELECT is_active FROM users WHERE id = ?',
+                [appUserId]
+              );
+              if (userRows.length > 0 && (userRows[0].is_active === 0 || userRows[0].is_active === false)) {
+                console.log(`Stock sync timer skipped for suspended user ${appUserId}`);
+                // Stop the timer for suspended users
+                clearInterval(intervalId);
+                userSyncTimers.set(appUserId, { intervalId: null, active: false });
+                return;
+              }
+            }
+          } catch (error) {
+            console.error(`Error checking user suspension status in stock sync timer for user ${appUserId}:`, error.message);
+          }
+          
           const nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
           userSyncStates.set(appUserId, { 
             ...userSyncStates.get(appUserId), 
@@ -8526,7 +8709,8 @@ app.get('/api/sync/statistics', authMiddleware, async (req, res) => {
         priceErrorCount: row.price_error_count,
         syncStartTime: row.sync_start_time ? new Date(row.sync_start_time + 'Z').toISOString() : null,
         syncEndTime: row.sync_end_time ? new Date(row.sync_end_time + 'Z').toISOString() : null,
-        changedInfo: changedInfo
+        changedInfo: changedInfo,
+        xRate: row.x_rate !== null && row.x_rate !== undefined ? parseFloat(row.x_rate) : 100.00
       };
     });
     
@@ -8654,6 +8838,33 @@ app.get('/api/sync/statistics', authMiddleware, async (req, res) => {
 app.post('/api/sync/trigger', authMiddleware, async (req, res) => {
   try {
     const appUserId = req.user.userId;
+    const { xRate } = req.body; // Get x_rate from request body
+    
+    // Check if user is suspended
+    if (dbPool) {
+      const [userRows] = await dbPool.query(
+        'SELECT is_active FROM users WHERE id = ?',
+        [appUserId]
+      );
+      if (userRows.length > 0 && (userRows[0].is_active === 0 || userRows[0].is_active === false)) {
+        return res.status(403).json({
+          success: false,
+          error: 'User account is suspended. Stock sync is not allowed.'
+        });
+      }
+    }
+    
+    // Validate xRate if provided
+    let validatedXRate = null;
+    if (xRate !== null && xRate !== undefined) {
+      validatedXRate = parseFloat(xRate);
+      if (isNaN(validatedXRate) || validatedXRate < 0 || validatedXRate > 500) {
+        return res.status(400).json({
+          success: false,
+          error: 'x_rate must be a number between 0 and 500'
+        });
+      }
+    }
     
     // Check if this user's sync is already running or in queue
     const userState = userSyncStates.get(appUserId) || { running: false };
@@ -8672,7 +8883,7 @@ app.post('/api/sync/trigger', authMiddleware, async (req, res) => {
     }
 
     // Add to queue instead of running immediately (prevents resource exhaustion)
-    enqueueSync(appUserId);
+    enqueueSync(appUserId, null, validatedXRate);
     
     const queuePosition = syncQueue.queue.findIndex(item => item.appUserId === appUserId) + 1;
     const message = queuePosition > 0 
@@ -9002,6 +9213,25 @@ async function startCategorySyncCronManual(appUserId) {
   const nextSyncTime = new Date(now + CATEGORY_SYNC_INTERVAL_MS).toISOString();
   
   const intervalId = setInterval(async () => {
+    // Check if user is suspended before triggering sync
+    try {
+      if (dbPool) {
+        const [userRows] = await dbPool.query(
+          'SELECT is_active FROM users WHERE id = ?',
+          [appUserId]
+        );
+        if (userRows.length > 0 && (userRows[0].is_active === 0 || userRows[0].is_active === false)) {
+          console.log(`Category sync timer skipped for suspended user ${appUserId}`);
+          // Stop the timer for suspended users
+          clearInterval(intervalId);
+          userCategorySyncTimers.set(appUserId, { intervalId: null, active: false });
+          return;
+        }
+      }
+    } catch (error) {
+      console.error(`Error checking user suspension status in category sync timer for user ${appUserId}:`, error.message);
+    }
+    
     const nextSyncTime = new Date(Date.now() + CATEGORY_SYNC_INTERVAL_MS).toISOString();
     // Persist nextSyncTime to database
     try {
@@ -9238,6 +9468,20 @@ app.get('/api/category-sync/status', authMiddleware, async (req, res) => {
 app.post('/api/category-sync/trigger', authMiddleware, async (req, res) => {
   try {
     const appUserId = req.user.userId;
+    
+    // Check if user is suspended
+    if (dbPool) {
+      const [userRows] = await dbPool.query(
+        'SELECT is_active FROM users WHERE id = ?',
+        [appUserId]
+      );
+      if (userRows.length > 0 && (userRows[0].is_active === 0 || userRows[0].is_active === false)) {
+        return res.status(403).json({
+          success: false,
+          error: 'User account is suspended. Category sync is not allowed.'
+        });
+      }
+    }
     
     // Update last sync time
     const now = new Date().toISOString();

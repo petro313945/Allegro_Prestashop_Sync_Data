@@ -108,7 +108,7 @@
                         <div class="form-row">
                             <div class="form-group">
                                 <label for="prestashopUrl">Base URL</label>
-                                <input type="text" id="prestashopUrl" placeholder="https://www.interkul.net" autocomplete="off">
+                                <input type="text" id="prestashopUrl" placeholder="Enter PrestaShop URL" autocomplete="off">
                             </div>
                             <div class="form-group">
                                 <label for="prestashopApiKey">API Key</label>
@@ -282,21 +282,28 @@
                                     </div>
                                 </div>
                                 <div class="sync-header-right">
-                                    <button id="startSyncBtn" class="btn btn-success" disabled>
-                                        <span id="startSyncBtnText">Start Automatic Sync</span>
-                                    </button>
-                                    <button id="stopSyncBtn" class="btn btn-danger" style="display: none;">
-                                        <span>Stop Sync Timer</span>
-                                    </button>
-                                    <button id="triggerSyncBtn" class="btn btn-primary" disabled>
-                                        <span>Sync Now</span>
-                                    </button>
+                                    <div class="sync-status-row" style="margin: 0; font-size: 0.9em; color: #333; font-weight: normal;">Sync Status: <span id="syncTimerStatus" class="sync-status-value">Stopped</span></div>
                                 </div>
                             </div>
                         </div>
                         <div id="syncPrerequisitesMsg" class="message" style="display: none; margin-bottom: 15px;"></div>
-                        <div style="margin-bottom: 2px; padding-bottom: 2px; overflow: hidden;">
-                            <div class="sync-status-row" style="float: left; margin: 0; margin-left: 8px; font-size: 0.9em; color: #333; font-weight: normal;">Sync Status: <span id="syncTimerStatus" class="sync-status-value">Stopped</span></div>
+                        <div style="margin-bottom: 2px; padding-bottom: 2px; overflow: hidden; display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <button id="startSyncBtn" class="btn btn-success" disabled>
+                                    <span id="startSyncBtnText">Start Automatic Sync</span>
+                                </button>
+                                <button id="stopSyncBtn" class="btn btn-danger" style="display: none;">
+                                    <span>Stop Sync Timer</span>
+                                </button>
+                                <button id="triggerSyncBtn" class="btn btn-primary" disabled>
+                                    <span>Sync Now</span>
+                                </button>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px; min-width: 200px;">
+                                <label for="xRateSlider" style="font-size: 0.9em; font-weight: 500; color: #666; white-space: nowrap;">Price Rate (X):</label>
+                                <input type="range" id="xRateSlider" min="0" max="500" value="100" step="1" style="flex: 1; min-width: 150px;">
+                                <span id="xRateValue" style="font-size: 0.9em; font-weight: 600; color: #1a73e8; min-width: 45px; text-align: right;">100</span>
+                            </div>
                         </div>
                         <div id="syncStatisticsContainer" class="sync-statistics-container">
                             <div id="syncStatisticsList" class="sync-statistics-list"></div>
@@ -415,7 +422,7 @@
                                         <th>Email</th>
                                         <th>Role</th>
                                         <th>Last Login</th>
-                                        <th>Created At</th>
+                                        <th>Suspend Date</th>
                                         <th>Status</th>
                                         <th>Actions</th>
                                     </tr>

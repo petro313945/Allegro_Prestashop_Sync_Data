@@ -2827,7 +2827,7 @@ input[type="checkbox"] {
 
 .sync-statistics-icon.price-icon {
     background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
-    color: #e65100;
+    color: #ea4335;
 }
 
 .sync-statistics-time-content {
@@ -2907,7 +2907,11 @@ input[type="checkbox"] {
 }
 
 .sync-statistics-metric-item:nth-child(3) .sync-statistics-metric-value {
-    color: #e65100;
+    color: #ea4335;
+}
+
+.price-rate-value {
+    color: #ea4335 !important;
 }
 
 .sync-statistics-empty {
@@ -3536,4 +3540,54 @@ table td {
     .modal-content {
         max-width: 95%;
     }
+}
+
+/* X Rate Slider Styles */
+#xRateSlider {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 3px;
+    background: #e0e0e0;
+    outline: none;
+    transition: background 0.2s;
+}
+
+#xRateSlider:hover {
+    background: #d0d0d0;
+}
+
+#xRateSlider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #1a73e8;
+    cursor: pointer;
+    transition: all 0.2s;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+#xRateSlider::-webkit-slider-thumb:hover {
+    background: #1557b0;
+    transform: scale(1.1);
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
+}
+
+#xRateSlider::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #1a73e8;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+#xRateSlider::-moz-range-thumb:hover {
+    background: #1557b0;
+    transform: scale(1.1);
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
 }

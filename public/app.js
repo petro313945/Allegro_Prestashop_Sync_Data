@@ -803,6 +803,17 @@ function setupEventListeners() {
         triggerSyncBtn.addEventListener('click', triggerSyncNow);
     }
     
+    // X Rate slider
+    const xRateSlider = document.getElementById('xRateSlider');
+    const xRateValue = document.getElementById('xRateValue');
+    if (xRateSlider && xRateValue) {
+        xRateSlider.addEventListener('input', (e) => {
+            const value = parseFloat(e.target.value);
+            xRateValue.textContent = value;
+            userChangedSlider = true; // Mark that user manually changed it
+        });
+    }
+    
     // Category sync timer control buttons
     const startCategorySyncBtn = document.getElementById('startCategorySyncBtn');
     if (startCategorySyncBtn) {
@@ -6046,6 +6057,20 @@ function displaySyncStatistics(statistics) {
         return;
     }
     
+    // Update slider with x_rate from statistics (only if user hasn't manually changed it)
+    if (statistics.length > 0 && statistics[0].xRate !== null && statistics[0].xRate !== undefined && !userChangedSlider) {
+        const newXRate = parseFloat(statistics[0].xRate);
+        lastXRate = newXRate;
+        const slider = document.getElementById('xRateSlider');
+        const valueDisplay = document.getElementById('xRateValue');
+        if (slider && slider.value !== newXRate.toString()) {
+            slider.value = newXRate;
+        }
+        if (valueDisplay) {
+            valueDisplay.textContent = newXRate.toFixed(2);
+        }
+    }
+    
     syncStatisticsList.innerHTML = statistics.map(stat => {
         const syncStartTime = stat.syncStartTime ? new Date(stat.syncStartTime).toLocaleString('en-US', {
             month: '2-digit',
@@ -6154,6 +6179,21 @@ function displaySyncStatistics(statistics) {
                             <span class="sync-statistics-metric-value">${stat.priceSyncedCount}</span>
                         </div>
                     </div>
+                    ${stat.xRate !== null && stat.xRate !== undefined ? `
+                    <div class="sync-statistics-metric-item">
+                        <div class="sync-statistics-icon price-icon">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <circle cx="7" cy="7" r="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <circle cx="17" cy="17" r="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M19 5L5 19" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="sync-statistics-metric-content">
+                            <span class="sync-statistics-metric-label">Price Rate (X)</span>
+                            <span class="sync-statistics-metric-value price-rate-value">${parseFloat(stat.xRate).toFixed(2)}</span>
+                        </div>
+                    </div>
+                    ` : ''}
                 </div>
                 ${stat.changedInfo && Array.isArray(stat.changedInfo) && stat.changedInfo.length > 0 ? `
                 <div class="sync-statistics-changes">
@@ -6446,6 +6486,7 @@ let currentCategoryNextSyncTime = null;
 let categorySyncTimerInterval = null;
 let isCategoryTimerActive = false; // Track if category sync timer is running
 let categorySyncCheckInterval = null; // Interval to check if it's time to sync categories
+let isCategorySyncInProgress = false; // Track if a manual category sync is currently in progress
 
 function updateSyncStatus(lastSyncTime, nextSyncTime) {
     currentLastSyncTime = lastSyncTime;
@@ -6704,6 +6745,49 @@ async function updateSyncStatusFromServer() {
 // Start sync timer
 async function startSyncTimerControl() {
     const startBtn = document.getElementById('startSyncBtn');
+    const slider = document.getElementById('xRateSlider');
+    
+    if (!slider) {
+        showToast('Price rate slider not found', 'error');
+        return;
+    }
+    
+    const currentXRate = parseFloat(slider.value);
+    
+    // Check if x_rate differs from last sync
+    if (lastXRate !== null && lastXRate !== undefined && Math.abs(currentXRate - lastXRate) > 0.01) {
+        const confirmed = confirm(
+            `The current price rate (X=${currentXRate}) differs from the last sync rate (X=${lastXRate}).\n\n` +
+            `Do you want to use the current slider value (X=${currentXRate}) for automatic syncs?\n\n` +
+            `Formula: PrestaShop price = Allegro price × ${currentXRate}/100\n\n` +
+            `Note: A sync will be triggered immediately with this rate to save it.`
+        );
+        
+        if (!confirmed) {
+            return; // User cancelled
+        }
+        
+        // Trigger a sync with the new x_rate to save it
+        try {
+            const syncResponse = await authFetch(`${API_BASE}/api/sync/trigger`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ xRate: currentXRate })
+            });
+            const syncData = await syncResponse.json();
+            if (!syncData.success) {
+                showToast('Failed to save price rate: ' + (syncData.error || 'Unknown error'), 'error');
+                return;
+            }
+        } catch (error) {
+            console.error('Error triggering sync to save x_rate:', error);
+            showToast('Failed to save price rate: ' + error.message, 'error');
+            return;
+        }
+    }
+    
     if (startBtn) {
         startBtn.disabled = true;
         startBtn.querySelector('span').textContent = 'Starting...';
@@ -6757,9 +6841,35 @@ async function stopSyncTimerControl() {
     }
 }
 
+// Get last x_rate from statistics
+let lastXRate = 100;
+let userChangedSlider = false; // Track if user manually changed slider
+
 // Trigger sync now
 async function triggerSyncNow() {
     const triggerBtn = document.getElementById('triggerSyncBtn');
+    const slider = document.getElementById('xRateSlider');
+    
+    if (!slider) {
+        showToast('Price rate slider not found', 'error');
+        return;
+    }
+    
+    const currentXRate = parseFloat(slider.value);
+    
+    // Check if x_rate differs from last sync
+    if (lastXRate !== null && lastXRate !== undefined && Math.abs(currentXRate - lastXRate) > 0.01) {
+        const confirmed = confirm(
+            `The current price rate (X=${currentXRate}) differs from the last sync rate (X=${lastXRate}).\n\n` +
+            `Do you want to use the current slider value (X=${currentXRate}) for this sync?\n\n` +
+            `Formula: PrestaShop price = Allegro price × ${currentXRate}/100`
+        );
+        
+        if (!confirmed) {
+            return; // User cancelled
+        }
+    }
+    
     if (triggerBtn) {
         triggerBtn.disabled = true;
         triggerBtn.querySelector('span').textContent = 'Running...';
@@ -6767,12 +6877,18 @@ async function triggerSyncNow() {
     
     try {
         const response = await authFetch(`${API_BASE}/api/sync/trigger`, {
-            method: 'POST'
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ xRate: currentXRate })
         });
         const data = await response.json();
         
         if (data.success) {
             showToast('Sync triggered successfully', 'success');
+            // Reset user changed flag after sync starts
+            userChangedSlider = false;
             // Refresh statistics after a short delay
             setTimeout(() => {
                 loadSyncStatistics();
@@ -6943,7 +7059,8 @@ async function updateCategorySyncControlButtons() {
         const prerequisitesMet = await checkCategorySyncPrerequisites();
         
         if (startBtn) {
-            startBtn.disabled = !prerequisitesMet || data.timerActive;
+            // Disable start button if prerequisites not met, timer is active, or manual sync is in progress
+            startBtn.disabled = !prerequisitesMet || data.timerActive || isCategorySyncInProgress;
             if (data.timerActive) {
                 startBtn.style.display = 'none';
             } else {
@@ -6956,7 +7073,8 @@ async function updateCategorySyncControlButtons() {
         }
         
         if (triggerBtn) {
-            triggerBtn.disabled = !prerequisitesMet;
+            // Disable trigger button if prerequisites not met or manual sync is in progress
+            triggerBtn.disabled = !prerequisitesMet || isCategorySyncInProgress;
         }
         
         if (statusEl) {
@@ -7133,10 +7251,20 @@ async function checkAndTriggerCategorySync() {
 // Trigger category sync now (automatic sync - no confirmation)
 async function triggerCategorySyncNow(showConfirmation = false) {
     const triggerBtn = document.getElementById('triggerCategorySyncBtn');
+    const startBtn = document.getElementById('startCategorySyncBtn');
     
     // For automatic sync, don't require button to be enabled
     if (showConfirmation && triggerBtn && triggerBtn.disabled) {
         return;
+    }
+    
+    // If this is a manual sync (showConfirmation = true), set the in-progress flag
+    if (showConfirmation) {
+        isCategorySyncInProgress = true;
+        // Disable start button when manual sync starts
+        if (startBtn) {
+            startBtn.disabled = true;
+        }
     }
     
     if (triggerBtn) {
@@ -7164,10 +7292,16 @@ async function triggerCategorySyncNow(showConfirmation = false) {
         console.error('Error triggering category sync:', error);
         showToast('Failed to trigger category sync: ' + error.message, 'error');
     } finally {
+        // Clear the in-progress flag when sync completes (only for manual syncs)
+        if (showConfirmation) {
+            isCategorySyncInProgress = false;
+        }
+        
+        // Update button states
+        await updateCategorySyncControlButtons();
+        
         if (triggerBtn) {
-            triggerBtn.disabled = false;
             triggerBtn.querySelector('span').textContent = 'Sync Now';
-            updateSyncCategoryButtonState();
         }
     }
 }
@@ -7209,8 +7343,11 @@ async function loadUsers() {
                 const lastLogin = user.last_login_at 
                     ? new Date(user.last_login_at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
                     : 'Never';
-                const createdAt = new Date(user.created_at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
                 const isActive = user.is_active !== false && user.is_active !== 0;
+                // Display suspended_at if user is suspended, otherwise display "live"
+                const suspendDate = user.suspended_at
+                    ? new Date(user.suspended_at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+                    : 'live';
                 const isLocked = user.lock_until && new Date(user.lock_until).getTime() > Date.now();
                 // Disable switch if user is locked (locked takes precedence)
                 const canToggle = !isLocked;
@@ -7223,7 +7360,7 @@ async function loadUsers() {
                         <td>${user.email}</td>
                         <td><span class="user-role-badge ${user.role}">${user.role}</span></td>
                         <td>${lastLogin}</td>
-                        <td>${createdAt}</td>
+                        <td>${suspendDate}</td>
                         <td>
                             <label class="user-status-switch" title="${isLocked ? 'User is locked' : isLastAdmin ? 'Cannot deactivate the last admin' : isActive ? 'Click to deactivate' : 'Click to activate'}">
                                 <input type="checkbox" ${isActive ? 'checked' : ''} ${!canToggle || isLastAdmin ? 'disabled' : ''} onchange="toggleUserStatus(${user.id}, ${isActive}, '${user.email.replace(/'/g, "\\'")}')">
