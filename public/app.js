@@ -4376,17 +4376,17 @@ async function syncCategoriesToPrestashop() {
             const allegroParentId = categoryNode.parentId;
             
             // Determine PrestaShop parent ID
-            // Step 7: Find parent category via meta_title (Allegro ID)
+            // Step 7: Find parent category via meta_keywords (Allegro ID)
             let prestashopParentId = 2; // Default to Home (ID: 2)
             
             if (allegroParentId && categoryIdMap.has(allegroParentId)) {
                 // Use mapped PrestaShop parent ID (parent was created in previous level)
                 prestashopParentId = categoryIdMap.get(allegroParentId);
             } else if (allegroParentId) {
-                // Parent should be found by meta_title (Allegro ID) on the backend
+                // Parent should be found by meta_keywords (Allegro ID) on the backend
                 // We'll pass allegroParentId and let the backend find it
-                // For now, use default parent - backend will find it by meta_title
-                prestashopParentId = 2; // Backend will find parent by meta_title
+                // For now, use default parent - backend will find it by meta_keywords
+                prestashopParentId = 2; // Backend will find parent by meta_keywords
             }
 
             // Check if we've already processed this category by Allegro ID in this sync session

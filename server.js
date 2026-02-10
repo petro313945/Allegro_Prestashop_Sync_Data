@@ -3281,7 +3281,7 @@ function buildCategoryXml(category) {
   const nameXml = buildLocalizedFieldXml('name', category.name);
   const linkRewriteXml = buildLocalizedFieldXml('link_rewrite', category.link_rewrite);
   const descriptionXml = category.description ? buildLocalizedFieldXml('description', category.description) : '';
-  const metaTitleXml = category.meta_title ? buildLocalizedFieldXml('meta_title', category.meta_title) : '';
+  const metaKeywordsXml = category.meta_keywords ? buildLocalizedFieldXml('meta_keywords', category.meta_keywords) : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -3291,7 +3291,7 @@ function buildCategoryXml(category) {
     <active>${xmlEscape(category.active)}</active>
     ${linkRewriteXml}
     ${descriptionXml}
-    ${metaTitleXml}
+    ${metaKeywordsXml}
   </category>
 </prestashop>`;
 }
@@ -5141,7 +5141,7 @@ async function findCategoryByNameAndParent(categoryName, idParent = null, appUse
 }
 
 /**
- * Find category in PrestaShop by meta_title (Allegro ID)
+ * Find category in PrestaShop by meta_keywords (Allegro ID)
  * @param {string} allegroCategoryId - Allegro category ID to search for
  * @param {number} appUserId - Optional application user ID to use per-user credentials
  * @returns {Promise<number|null>} - Category ID if found, null otherwise
@@ -5165,9 +5165,9 @@ async function findCategoryByMetaTitle(allegroCategoryId, appUserId = null) {
     
     while (hasMore) {
       try {
-        // Request id, name, id_parent, and meta_title to check meta_title
+        // Request id, name, id_parent, and meta_keywords to check meta_keywords
         const data = await prestashopApiRequest(
-          `categories?display=[id,name,id_parent,meta_title]&limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`,
+          `categories?display=[id,name,id_parent,meta_keywords]&limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`,
           'GET',
           null,
           appUserId
@@ -5234,22 +5234,22 @@ async function findCategoryByMetaTitle(allegroCategoryId, appUserId = null) {
       }
     }
     
-    // Search for category with matching meta_title (Allegro ID)
+    // Search for category with matching meta_keywords (Allegro ID)
     for (const category of allCategories) {
-      if (category.meta_title) {
+      if (category.meta_keywords) {
         // Handle both array format and object format
-        let metaTitleArray = [];
-        if (Array.isArray(category.meta_title)) {
-          metaTitleArray = category.meta_title;
-        } else if (category.meta_title.language && Array.isArray(category.meta_title.language)) {
-          metaTitleArray = category.meta_title.language;
-        } else if (category.meta_title.language) {
-          metaTitleArray = [category.meta_title.language];
-        } else if (typeof category.meta_title === 'object' && category.meta_title.value) {
-          metaTitleArray = [category.meta_title];
-        } else if (typeof category.meta_title === 'string') {
-          // Direct string meta_title
-          if (category.meta_title === String(allegroCategoryId)) {
+        let metaKeywordsArray = [];
+        if (Array.isArray(category.meta_keywords)) {
+          metaKeywordsArray = category.meta_keywords;
+        } else if (category.meta_keywords.language && Array.isArray(category.meta_keywords.language)) {
+          metaKeywordsArray = category.meta_keywords.language;
+        } else if (category.meta_keywords.language) {
+          metaKeywordsArray = [category.meta_keywords.language];
+        } else if (typeof category.meta_keywords === 'object' && category.meta_keywords.value) {
+          metaKeywordsArray = [category.meta_keywords];
+        } else if (typeof category.meta_keywords === 'string') {
+          // Direct string meta_keywords
+          if (category.meta_keywords === String(allegroCategoryId)) {
             const categoryId = category.id || category.category?.id;
             if (categoryId) {
               return categoryId;
@@ -5258,9 +5258,9 @@ async function findCategoryByMetaTitle(allegroCategoryId, appUserId = null) {
         }
         
         // Check if any language version matches the Allegro ID
-        for (const metaTitleEntry of metaTitleArray) {
-          if (!metaTitleEntry) continue;
-          const rawValue = metaTitleEntry.value || (typeof metaTitleEntry === 'string' ? metaTitleEntry : null);
+        for (const metaKeywordsEntry of metaKeywordsArray) {
+          if (!metaKeywordsEntry) continue;
+          const rawValue = metaKeywordsEntry.value || (typeof metaKeywordsEntry === 'string' ? metaKeywordsEntry : null);
           if (!rawValue || typeof rawValue !== 'string') continue;
           if (rawValue === String(allegroCategoryId)) {
             const categoryId = category.id || category.category?.id;
@@ -5274,7 +5274,7 @@ async function findCategoryByMetaTitle(allegroCategoryId, appUserId = null) {
     
     return null; // Category not found
   } catch (error) {
-    console.error(`Error finding category by meta_title (Allegro ID "${allegroCategoryId}"):`, error.message);
+    console.error(`Error finding category by meta_keywords (Allegro ID "${allegroCategoryId}"):`, error.message);
     return null; // Return null on error to allow creation to proceed
   }
 }
@@ -5615,13 +5615,13 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
     // Load user's PrestaShop credentials before making any API calls
     await loadPrestashopCredentials(appUserId);
 
-    // Step 1: Check if category exists by meta_title (Allegro ID) - this is the primary key
+    // Step 1: Check if category exists by meta_keywords (Allegro ID) - this is the primary key
     let existingCategoryId = null;
     if (allegroCategoryId) {
       existingCategoryId = await findCategoryByMetaTitle(allegroCategoryId, appUserId);
     }
 
-    // Step 2: If not found by meta_title, check by name AND parent (fallback)
+    // Step 2: If not found by meta_keywords, check by name AND parent (fallback)
     if (!existingCategoryId || isNaN(existingCategoryId)) {
       existingCategoryId = await findCategoryByNameAndParent(name, idParent, appUserId);
     }
@@ -5636,15 +5636,15 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
       });
     }
 
-    // Step 3: Determine parent ID - if allegroParentId is provided, find parent by meta_title
+    // Step 3: Determine parent ID - if allegroParentId is provided, find parent by meta_keywords
     let finalParentId = idParent;
     if (allegroParentId) {
       const parentCategoryId = await findCategoryByMetaTitle(allegroParentId, appUserId);
       if (parentCategoryId && !isNaN(parentCategoryId)) {
         finalParentId = parentCategoryId;
-        console.log(`Found parent category by meta_title (Allegro ID: ${allegroParentId}) -> PrestaShop ID: ${finalParentId}`);
+        console.log(`Found parent category by meta_keywords (Allegro ID: ${allegroParentId}) -> PrestaShop ID: ${finalParentId}`);
       } else {
-        console.warn(`Parent category with Allegro ID ${allegroParentId} not found by meta_title, using provided idParent: ${idParent}`);
+        console.warn(`Parent category with Allegro ID ${allegroParentId} not found by meta_keywords, using provided idParent: ${idParent}`);
       }
     }
 
@@ -5662,9 +5662,9 @@ app.post('/api/prestashop/categories', authMiddleware, async (req, res) => {
       ]
     };
 
-    // Add meta_title (Allegro ID) if provided
+    // Add meta_keywords (Allegro ID) if provided
     if (allegroCategoryId) {
-      categoryData.meta_title = [
+      categoryData.meta_keywords = [
         { id: 1, value: String(allegroCategoryId) }, // Polish (id: 1)
         { id: 2, value: String(allegroCategoryId) }  // English (id: 2)
       ];
