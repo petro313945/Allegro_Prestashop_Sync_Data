@@ -7605,18 +7605,13 @@ async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) 
           }
           
           // Fetch full product details - list endpoint only returns basic fields (doesn't include reference)
-          // We need to fetch individual product to get the reference field, name, and price
+          // We need to fetch individual product to get all fields (reference, name, price, description, etc.)
+          // Always fetch full product data to ensure we have all fields for price sync operations
           let fullProduct = prestashopProduct;
           try {
-            // Try with display parameter first to explicitly request needed fields
-            // Note: associations field is not available via display parameter, so we use id_category_default instead
-            let productData;
-            try {
-              productData = await prestashopApiRequest(`products/${prestashopProductId}?display=[id,name,reference,id_category_default,price]`, 'GET', null, appUserId);
-            } catch (displayError) {
-              // If display parameter fails, try without it (some PrestaShop versions might not support it)
-              productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
-            }
+            // Fetch full product data without display parameter to get all fields
+            // This ensures we have complete product info for price sync operations
+            const productData = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
             
             // PrestaShop returns: { product: {...} } or { products: [{ product: {...} }] }
             if (productData.product) {
@@ -7702,6 +7697,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) 
           // Use the new /sale/product-offers/{offerId} endpoint (old /sale/offers/{offerId} was deprecated in 2024)
           // Try to get stock and price from the parts endpoint first (more efficient), fallback to full offer data
           let allegroStock = 0;
+          let publicationStatus = null;
           try {
             // First try the parts endpoint for stock and price information (more efficient)
             // This endpoint allows fetching only specific parts like stock and price without the full offer data
@@ -7710,7 +7706,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) 
             let priceData = null;
             try {
               // Pass include as array - axios will convert to multiple query params: ?include=stock&include=price
-              const partsData = await allegroApiRequest(`/sale/product-offers/${offerId}/parts`, { include: ['stock', 'price'] }, true, {}, appUserId);
+              const partsData = await allegroApiRequest(`/sale/product-offers/${offerId}/parts`, { include: ['stock', 'price', 'publication'] }, true, {}, appUserId);
               // Check if stock information is in the parts response
               if (partsData.stock) {
                 stockData = partsData.stock;
@@ -7719,13 +7715,17 @@ async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) 
               if (partsData.price || partsData.sellingMode?.price) {
                 priceData = partsData.price || partsData.sellingMode?.price;
               }
+              // Check if publication status is in the parts response
+              if (partsData.publication?.status) {
+                publicationStatus = partsData.publication.status;
+              }
             } catch (partsError) {
               // If parts endpoint fails (might not be available or might need different params), fall back to full offer data
               // This is expected for some API versions, so we don't log it as an error
             }
             
-            // If we didn't get stock or price from parts, fetch full offer data
-            if (!stockData || !priceData) {
+            // If we didn't get stock, price, or publication status from parts, fetch full offer data
+            if (!stockData || !priceData || !publicationStatus) {
               const offerData = await allegroApiRequest(`/sale/product-offers/${offerId}`, {}, true, {}, appUserId);
               // Stock is in stock.available according to Allegro API documentation
               if (!stockData && offerData.stock) {
@@ -7735,11 +7735,20 @@ async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) 
               if (!priceData && (offerData.sellingMode?.price || offerData.price)) {
                 priceData = offerData.sellingMode?.price || offerData.price;
               }
+              // Publication status is in publication.status according to Allegro API documentation
+              if (!publicationStatus && offerData.publication?.status) {
+                publicationStatus = offerData.publication.status;
+              }
             }
             
             // Extract stock value from stock object
             if (stockData && stockData.available !== undefined) {
               allegroStock = parseInt(stockData.available) || 0;
+            }
+            
+            // If product status is "ENDED", set stock to 0
+            if (publicationStatus === 'ENDED') {
+              allegroStock = 0;
             }
             
             // Extract price value from price object
@@ -8131,11 +8140,13 @@ async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) 
               try {
                 console.log(`Price differs for product ${prestashopProductId} (Allegro offer ${offerId}): Allegro=${allegroPrice.toFixed(2)}, Target PrestaShop=${targetPrestashopPrice.toFixed(2)} (x_rate=${xRate}), Current PrestaShop=${prestashopPrice.toFixed(2)}. Syncing...`);
                 
-                // Fetch full product data to preserve all fields (name, description, categories, etc.)
-                // We need all fields because PrestaShop API may clear fields if not included in PUT request
+                // Use full product data that was already fetched (with all fields)
+                // We already have complete product data from the initial fetch above
                 let fullProductForUpdate = fullProduct;
-                if (!fullProductForUpdate || !fullProductForUpdate.name) {
-                  // If we don't have full product data, fetch it now
+                
+                // Verify we have all required fields for update
+                if (!fullProductForUpdate || !fullProductForUpdate.name || !fullProductForUpdate.id) {
+                  // If somehow we don't have full product data, fetch it now as fallback
                   const productDataForUpdate = await prestashopApiRequest(`products/${prestashopProductId}`, 'GET', null, appUserId);
                   if (productDataForUpdate.product) {
                     fullProductForUpdate = productDataForUpdate.product;
@@ -8146,7 +8157,7 @@ async function syncStockFromAllegroToPrestashop(appUserId = null, xRate = null) 
                   }
                 }
                 
-                if (!fullProductForUpdate || !fullProductForUpdate.name) {
+                if (!fullProductForUpdate || !fullProductForUpdate.name || !fullProductForUpdate.id) {
                   throw new Error('Failed to fetch complete product data for price update');
                 }
                 

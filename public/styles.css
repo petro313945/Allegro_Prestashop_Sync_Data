@@ -3542,52 +3542,26 @@ table td {
     }
 }
 
-/* X Rate Slider Styles */
-#xRateSlider {
-    -webkit-appearance: none;
-    appearance: none;
-    height: 6px;
-    border-radius: 3px;
-    background: #e0e0e0;
+/* X Rate Input Styles */
+#xRateInput {
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 0.9em;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+#xRateInput:focus {
     outline: none;
-    transition: background 0.2s;
+    border-color: #1a73e8;
+    box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.1);
 }
 
-#xRateSlider:hover {
-    background: #d0d0d0;
+#xRateInput:invalid {
+    border-color: #ea4335;
 }
 
-#xRateSlider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: #1a73e8;
-    cursor: pointer;
-    transition: all 0.2s;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-}
-
-#xRateSlider::-webkit-slider-thumb:hover {
-    background: #1557b0;
-    transform: scale(1.1);
-    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
-}
-
-#xRateSlider::-moz-range-thumb {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: #1a73e8;
-    cursor: pointer;
-    border: none;
-    transition: all 0.2s;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-}
-
-#xRateSlider::-moz-range-thumb:hover {
-    background: #1557b0;
-    transform: scale(1.1);
-    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
+#xRateInput:invalid:focus {
+    border-color: #ea4335;
+    box-shadow: 0 0 0 2px rgba(234, 67, 53, 0.1);
 }

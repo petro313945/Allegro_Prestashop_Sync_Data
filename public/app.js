@@ -803,14 +803,28 @@ function setupEventListeners() {
         triggerSyncBtn.addEventListener('click', triggerSyncNow);
     }
     
-    // X Rate slider
-    const xRateSlider = document.getElementById('xRateSlider');
-    const xRateValue = document.getElementById('xRateValue');
-    if (xRateSlider && xRateValue) {
-        xRateSlider.addEventListener('input', (e) => {
+    // X Rate input field with validation
+    const xRateInput = document.getElementById('xRateInput');
+    if (xRateInput) {
+        xRateInput.addEventListener('input', (e) => {
             const value = parseFloat(e.target.value);
-            xRateValue.textContent = value;
+            // Validate range 0-500
+            if (isNaN(value) || value < 0 || value > 500) {
+                e.target.setCustomValidity('Value must be between 0 and 500');
+            } else {
+                e.target.setCustomValidity('');
+            }
             userChangedSlider = true; // Mark that user manually changed it
+        });
+        
+        xRateInput.addEventListener('blur', (e) => {
+            const value = parseFloat(e.target.value);
+            // Clamp value to valid range on blur
+            if (isNaN(value) || value < 0) {
+                e.target.value = 0;
+            } else if (value > 500) {
+                e.target.value = 500;
+            }
         });
     }
     
@@ -6057,17 +6071,13 @@ function displaySyncStatistics(statistics) {
         return;
     }
     
-    // Update slider with x_rate from statistics (only if user hasn't manually changed it)
+    // Update input with x_rate from statistics (only if user hasn't manually changed it)
     if (statistics.length > 0 && statistics[0].xRate !== null && statistics[0].xRate !== undefined && !userChangedSlider) {
         const newXRate = parseFloat(statistics[0].xRate);
         lastXRate = newXRate;
-        const slider = document.getElementById('xRateSlider');
-        const valueDisplay = document.getElementById('xRateValue');
-        if (slider && slider.value !== newXRate.toString()) {
-            slider.value = newXRate;
-        }
-        if (valueDisplay) {
-            valueDisplay.textContent = newXRate.toFixed(2);
+        const input = document.getElementById('xRateInput');
+        if (input && input.value !== newXRate.toString()) {
+            input.value = newXRate;
         }
     }
     
@@ -6745,20 +6755,28 @@ async function updateSyncStatusFromServer() {
 // Start sync timer
 async function startSyncTimerControl() {
     const startBtn = document.getElementById('startSyncBtn');
-    const slider = document.getElementById('xRateSlider');
+    const input = document.getElementById('xRateInput');
     
-    if (!slider) {
-        showToast('Price rate slider not found', 'error');
+    if (!input) {
+        showToast('Price rate input not found', 'error');
         return;
     }
     
-    const currentXRate = parseFloat(slider.value);
+    // Validate input value
+    const rawValue = parseFloat(input.value);
+    if (isNaN(rawValue) || rawValue < 0 || rawValue > 500) {
+        showToast('Price rate must be between 0 and 500', 'error');
+        input.focus();
+        return;
+    }
+    
+    const currentXRate = rawValue;
     
     // Check if x_rate differs from last sync
     if (lastXRate !== null && lastXRate !== undefined && Math.abs(currentXRate - lastXRate) > 0.01) {
         const confirmed = confirm(
             `The current price rate (X=${currentXRate}) differs from the last sync rate (X=${lastXRate}).\n\n` +
-            `Do you want to use the current slider value (X=${currentXRate}) for automatic syncs?\n\n` +
+            `Do you want to use the current value (X=${currentXRate}) for automatic syncs?\n\n` +
             `Formula: PrestaShop price = Allegro price × ${currentXRate}/100\n\n` +
             `Note: A sync will be triggered immediately with this rate to save it.`
         );
@@ -6843,25 +6861,33 @@ async function stopSyncTimerControl() {
 
 // Get last x_rate from statistics
 let lastXRate = 100;
-let userChangedSlider = false; // Track if user manually changed slider
+let userChangedSlider = false; // Track if user manually changed input
 
 // Trigger sync now
 async function triggerSyncNow() {
     const triggerBtn = document.getElementById('triggerSyncBtn');
-    const slider = document.getElementById('xRateSlider');
+    const input = document.getElementById('xRateInput');
     
-    if (!slider) {
-        showToast('Price rate slider not found', 'error');
+    if (!input) {
+        showToast('Price rate input not found', 'error');
         return;
     }
     
-    const currentXRate = parseFloat(slider.value);
+    // Validate input value
+    const rawValue = parseFloat(input.value);
+    if (isNaN(rawValue) || rawValue < 0 || rawValue > 500) {
+        showToast('Price rate must be between 0 and 500', 'error');
+        input.focus();
+        return;
+    }
+    
+    const currentXRate = rawValue;
     
     // Check if x_rate differs from last sync
     if (lastXRate !== null && lastXRate !== undefined && Math.abs(currentXRate - lastXRate) > 0.01) {
         const confirmed = confirm(
             `The current price rate (X=${currentXRate}) differs from the last sync rate (X=${lastXRate}).\n\n` +
-            `Do you want to use the current slider value (X=${currentXRate}) for this sync?\n\n` +
+            `Do you want to use the current value (X=${currentXRate}) for this sync?\n\n` +
             `Formula: PrestaShop price = Allegro price × ${currentXRate}/100`
         );
         
