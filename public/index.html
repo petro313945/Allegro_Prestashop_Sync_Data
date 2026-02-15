@@ -368,6 +368,7 @@
                                 <h2 style="margin: 0;">User Management</h2>
                             </div>
                             <div class="section-actions">
+                                <button id="setTimerBtn" class="btn btn-secondary">Set Timer</button>
                                 <button id="createUserBtn" class="btn btn-primary">Create New User</button>
                                 <button id="refreshUsersBtn" class="btn btn-secondary">Refresh</button>
                             </div>
@@ -401,6 +402,35 @@
                                         <div class="form-actions" style="margin-top: 20px;">
                                             <button type="submit" id="saveUserBtn" class="btn btn-primary">Save</button>
                                             <button type="button" id="cancelUserBtn" class="btn btn-secondary">Cancel</button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Timer Settings Modal -->
+                        <div id="timerModal" class="modal" style="display: none;">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <h3 id="timerModalTitle">Timer Settings</h3>
+                                    <button class="modal-close" id="closeTimerModal">&times;</button>
+                                </div>
+                                <div class="modal-body">
+                                    <form id="timerForm">
+                                        <div class="form-group">
+                                            <label for="categorySyncInterval">Category Sync Interval (hours) *</label>
+                                            <input type="number" id="categorySyncInterval" name="categorySyncInterval" min="1" max="8760" value="48" required>
+                                            <small style="color: #666; font-size: 12px;">Default: 48 hours</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="stockSyncInterval">Stock Sync Interval (minutes) *</label>
+                                            <input type="number" id="stockSyncInterval" name="stockSyncInterval" min="1" max="1440" value="3" required>
+                                            <small style="color: #666; font-size: 12px;">Default: 3 minutes</small>
+                                        </div>
+                                        <div id="timerFormError" class="error-message" style="display: none; margin-top: 10px;"></div>
+                                        <div class="form-actions" style="margin-top: 20px;">
+                                            <button type="submit" id="saveTimerBtn" class="btn btn-primary">Save</button>
+                                            <button type="button" id="cancelTimerBtn" class="btn btn-secondary">Cancel</button>
                                         </div>
                                     </form>
                                 </div>

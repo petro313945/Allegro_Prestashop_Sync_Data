@@ -676,6 +676,40 @@ async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
+  // Create admin_settings table (global admin settings for default sync intervals)
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS admin_settings (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      setting_key VARCHAR(100) NOT NULL UNIQUE,
+      setting_value TEXT NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // Initialize default admin settings if they don't exist
+  try {
+    const [existing] = await dbPool.query('SELECT setting_key FROM admin_settings WHERE setting_key IN (?, ?)', 
+      ['default_category_sync_interval_hours', 'default_stock_sync_interval_minutes']);
+    
+    const existingKeys = existing.map(row => row.setting_key);
+    
+    if (!existingKeys.includes('default_category_sync_interval_hours')) {
+      await dbPool.query(
+        'INSERT INTO admin_settings (setting_key, setting_value) VALUES (?, ?)',
+        ['default_category_sync_interval_hours', '48']
+      );
+    }
+    
+    if (!existingKeys.includes('default_stock_sync_interval_minutes')) {
+      await dbPool.query(
+        'INSERT INTO admin_settings (setting_key, setting_value) VALUES (?, ?)',
+        ['default_stock_sync_interval_minutes', '3']
+      );
+    }
+  } catch (error) {
+    console.warn('Note: Admin settings initialization:', error.message);
+  }
 
   // Ensure at least one admin user exists if ADMIN_EMAIL / ADMIN_PASSWORD are provided
   const adminEmail = process.env.ADMIN_EMAIL;
@@ -1399,6 +1433,54 @@ async function addSyncLog(entry, appUserId) {
 }
 
 /**
+ * Get stock sync interval from admin_settings table (in milliseconds)
+ * @returns {Promise<number>} Sync interval in milliseconds
+ */
+async function getStockSyncIntervalMs() {
+  try {
+    if (!dbPool) {
+      return SYNC_INTERVAL_MS; // Fallback to default
+    }
+    const [rows] = await dbPool.query(
+      'SELECT setting_value FROM admin_settings WHERE setting_key = ?',
+      ['default_stock_sync_interval_minutes']
+    );
+    if (rows.length > 0) {
+      const minutes = parseInt(rows[0].setting_value, 10) || 3;
+      return minutes * 60 * 1000;
+    }
+    return SYNC_INTERVAL_MS; // Fallback to default
+  } catch (error) {
+    console.error('Error getting stock sync interval from admin_settings:', error.message);
+    return SYNC_INTERVAL_MS; // Fallback to default
+  }
+}
+
+/**
+ * Get category sync interval from admin_settings table (in milliseconds)
+ * @returns {Promise<number>} Category sync interval in milliseconds
+ */
+async function getCategorySyncIntervalMs() {
+  try {
+    if (!dbPool) {
+      return CATEGORY_SYNC_INTERVAL_MS; // Fallback to default
+    }
+    const [rows] = await dbPool.query(
+      'SELECT setting_value FROM admin_settings WHERE setting_key = ?',
+      ['default_category_sync_interval_hours']
+    );
+    if (rows.length > 0) {
+      const hours = parseInt(rows[0].setting_value, 10) || 48;
+      return hours * 60 * 60 * 1000;
+    }
+    return CATEGORY_SYNC_INTERVAL_MS; // Fallback to default
+  } catch (error) {
+    console.error('Error getting category sync interval from admin_settings:', error.message);
+    return CATEGORY_SYNC_INTERVAL_MS; // Fallback to default
+  }
+}
+
+/**
  * Load sync settings from database for a specific user
  * @param {number} appUserId - Application user ID
  * @returns {object} Sync settings object
@@ -1411,9 +1493,10 @@ async function loadSyncSettings(appUserId) {
   try {
     if (!dbPool) {
       console.warn('Database not initialized, cannot load sync settings');
+      const defaultStockInterval = await getStockSyncIntervalMs();
       return {
         autoSyncEnabled: false,
-        syncIntervalMs: SYNC_INTERVAL_MS,
+        syncIntervalMs: defaultStockInterval,
         lastSyncTime: null,
         nextSyncTime: null,
         syncTimerActive: false
@@ -1427,8 +1510,8 @@ async function loadSyncSettings(appUserId) {
 
     if (rows.length > 0) {
       const row = rows[0];
-      const storedIntervalMs = row.sync_interval_ms || SYNC_INTERVAL_MS;
-      const currentIntervalMs = SYNC_INTERVAL_MS;
+      const currentIntervalMs = await getStockSyncIntervalMs();
+      const storedIntervalMs = row.sync_interval_ms || currentIntervalMs;
       
       // Handle timezone: MySQL DATETIME is timezone-naive, treat it as UTC
       let lastSyncTime = null;
@@ -1505,8 +1588,8 @@ async function loadSyncSettings(appUserId) {
       }
       
       // Handle category sync settings
-      const storedCategoryIntervalMs = row.category_sync_interval_ms || CATEGORY_SYNC_INTERVAL_MS;
-      const currentCategoryIntervalMs = CATEGORY_SYNC_INTERVAL_MS;
+      const currentCategoryIntervalMs = await getCategorySyncIntervalMs();
+      const storedCategoryIntervalMs = row.category_sync_interval_ms || currentCategoryIntervalMs;
       
       let categoryLastSyncTime = null;
       if (row.category_last_sync_time) {
@@ -1586,13 +1669,15 @@ async function loadSyncSettings(appUserId) {
       };
     } else {
       // No settings found, return defaults
+      const defaultStockInterval = await getStockSyncIntervalMs();
+      const defaultCategoryInterval = await getCategorySyncIntervalMs();
       return {
         autoSyncEnabled: false,
-        syncIntervalMs: SYNC_INTERVAL_MS,
+        syncIntervalMs: defaultStockInterval,
         lastSyncTime: null,
         nextSyncTime: null,
         syncTimerActive: false,
-        categorySyncIntervalMs: CATEGORY_SYNC_INTERVAL_MS,
+        categorySyncIntervalMs: defaultCategoryInterval,
         categoryLastSyncTime: null,
         categoryNextSyncTime: null,
         categorySyncTimerActive: false
@@ -1601,13 +1686,15 @@ async function loadSyncSettings(appUserId) {
   } catch (error) {
     console.error('Error loading sync settings from database:', error.message);
     // Return defaults on error
+    const defaultStockInterval = await getStockSyncIntervalMs().catch(() => SYNC_INTERVAL_MS);
+    const defaultCategoryInterval = await getCategorySyncIntervalMs().catch(() => CATEGORY_SYNC_INTERVAL_MS);
     return {
       autoSyncEnabled: false,
-      syncIntervalMs: SYNC_INTERVAL_MS,
+      syncIntervalMs: defaultStockInterval,
       lastSyncTime: null,
       nextSyncTime: null,
       syncTimerActive: false,
-      categorySyncIntervalMs: CATEGORY_SYNC_INTERVAL_MS,
+      categorySyncIntervalMs: defaultCategoryInterval,
       categoryLastSyncTime: null,
       categoryNextSyncTime: null,
       categorySyncTimerActive: false
@@ -1631,6 +1718,10 @@ async function saveSyncSettings(appUserId, settings) {
       return;
     }
 
+    // Get default intervals if not provided
+    const defaultStockInterval = settings.syncIntervalMs || await getStockSyncIntervalMs();
+    const defaultCategoryInterval = settings.categorySyncIntervalMs || await getCategorySyncIntervalMs();
+
     const [result] = await dbPool.query(`
       INSERT INTO user_sync_settings (
         app_user_id, auto_sync_enabled, sync_interval_ms,
@@ -1653,11 +1744,11 @@ async function saveSyncSettings(appUserId, settings) {
     `, [
       appUserId,
       settings.autoSyncEnabled ? 1 : 0,
-      settings.syncIntervalMs || SYNC_INTERVAL_MS,
+      defaultStockInterval,
       convertToMySQLDateTime(settings.lastSyncTime),
       convertToMySQLDateTime(settings.nextSyncTime),
       settings.syncTimerActive ? 1 : 0,
-      settings.categorySyncIntervalMs || CATEGORY_SYNC_INTERVAL_MS,
+      defaultCategoryInterval,
       convertToMySQLDateTime(settings.categoryLastSyncTime),
       convertToMySQLDateTime(settings.categoryNextSyncTime),
       settings.categorySyncTimerActive ? 1 : 0
@@ -2763,10 +2854,116 @@ app.delete('/api/admin/users/:id', authMiddleware, requireAdmin, async (req, res
       message: 'User deleted successfully'
     });
   } catch (error) {
-    console.error('Delete user error:', error.message);
+    console.error('Error deleting user:', error);
     res.status(500).json({
       success: false,
-      error: 'Could not delete user'
+      error: 'Failed to delete user'
+    });
+  }
+});
+
+// Get admin timer settings
+app.get('/api/admin/timer-settings', authMiddleware, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not initialized yet'
+      });
+    }
+
+    const [rows] = await dbPool.query(
+      'SELECT setting_key, setting_value FROM admin_settings WHERE setting_key IN (?, ?)',
+      ['default_category_sync_interval_hours', 'default_stock_sync_interval_minutes']
+    );
+
+    const settings = {
+      categorySyncIntervalHours: 48,
+      stockSyncIntervalMinutes: 3
+    };
+
+    rows.forEach(row => {
+      if (row.setting_key === 'default_category_sync_interval_hours') {
+        settings.categorySyncIntervalHours = parseInt(row.setting_value, 10) || 48;
+      } else if (row.setting_key === 'default_stock_sync_interval_minutes') {
+        settings.stockSyncIntervalMinutes = parseInt(row.setting_value, 10) || 3;
+      }
+    });
+
+    res.json({
+      success: true,
+      settings
+    });
+  } catch (error) {
+    console.error('Error getting admin timer settings:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get timer settings',
+      details: error.message
+    });
+  }
+});
+
+// Update admin timer settings
+app.put('/api/admin/timer-settings', authMiddleware, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not initialized yet'
+      });
+    }
+
+    const { categorySyncIntervalHours, stockSyncIntervalMinutes } = req.body;
+
+    if (!categorySyncIntervalHours || !stockSyncIntervalMinutes) {
+      return res.status(400).json({
+        success: false,
+        error: 'Both category sync interval and stock sync interval are required'
+      });
+    }
+
+    const categoryHours = parseInt(categorySyncIntervalHours, 10);
+    const stockMinutes = parseInt(stockSyncIntervalMinutes, 10);
+
+    if (isNaN(categoryHours) || categoryHours < 1 || categoryHours > 8760) {
+      return res.status(400).json({
+        success: false,
+        error: 'Category sync interval must be between 1 and 8760 hours'
+      });
+    }
+
+    if (isNaN(stockMinutes) || stockMinutes < 1 || stockMinutes > 1440) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stock sync interval must be between 1 and 1440 minutes'
+      });
+    }
+
+    // Update or insert settings
+    await dbPool.query(
+      'INSERT INTO admin_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()',
+      ['default_category_sync_interval_hours', categoryHours.toString()]
+    );
+
+    await dbPool.query(
+      'INSERT INTO admin_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()',
+      ['default_stock_sync_interval_minutes', stockMinutes.toString()]
+    );
+
+    res.json({
+      success: true,
+      message: 'Timer settings updated successfully',
+      settings: {
+        categorySyncIntervalHours: categoryHours,
+        stockSyncIntervalMinutes: stockMinutes
+      }
+    });
+  } catch (error) {
+    console.error('Error updating admin timer settings:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update timer settings'
     });
   }
 });
@@ -8506,6 +8703,10 @@ async function startStockSyncCron() {
     try {
       const [users] = await dbPool.query('SELECT id FROM users WHERE is_active = 1');
       
+      // Get sync interval from database once (for all users)
+      const defaultSyncIntervalMs = await getStockSyncIntervalMs();
+      const defaultSyncIntervalMinutes = defaultSyncIntervalMs / (60 * 1000);
+      
       // Start per-user sync timers
       for (const user of users) {
         const appUserId = user.id;
@@ -8517,7 +8718,7 @@ async function startStockSyncCron() {
         
         // Set next sync time
         const now = Date.now();
-        const nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
+        const nextSyncTime = new Date(now + defaultSyncIntervalMs).toISOString();
         userSyncStates.set(appUserId, { 
           ...userSyncStates.get(appUserId), 
           nextSyncTime 
@@ -8526,7 +8727,7 @@ async function startStockSyncCron() {
         // Note: Sync is now only triggered manually via the sync-start button
         // Removed automatic startup sync - users can start sync manually when needed
 
-        // Then run every SYNC_INTERVAL_MINUTES minutes for this user
+        // Then run every defaultSyncIntervalMinutes minutes for this user
         // Use queue system to manage concurrent syncs
         const intervalId = setInterval(async () => {
           // Check if user is suspended before triggering sync
@@ -8548,7 +8749,9 @@ async function startStockSyncCron() {
             console.error(`Error checking user suspension status in stock sync timer for user ${appUserId}:`, error.message);
           }
           
-          const nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
+          // Get current interval from database (may have changed)
+          const currentIntervalMs = await getStockSyncIntervalMs();
+          const nextSyncTime = new Date(Date.now() + currentIntervalMs).toISOString();
           userSyncStates.set(appUserId, { 
             ...userSyncStates.get(appUserId), 
             nextSyncTime 
@@ -8561,13 +8764,13 @@ async function startStockSyncCron() {
           }
           // Add to queue instead of running directly
           enqueueSync(appUserId);
-        }, SYNC_INTERVAL_MS);
+        }, defaultSyncIntervalMs);
         
         // Store timer for this user
         userSyncTimers.set(appUserId, { intervalId, active: true });
       }
 
-      console.log(`Stock sync timer started for ${users.length} user(s) (runs every ${SYNC_INTERVAL_MINUTES} minutes using setInterval)`);
+      console.log(`Stock sync timer started for ${users.length} user(s) (runs every ${defaultSyncIntervalMinutes} minutes using setInterval)`);
     } catch (error) {
       console.error('Error starting sync cron:', error);
     }
@@ -8623,16 +8826,22 @@ async function startStockSyncCronManual(appUserId) {
     userSyncStates.set(appUserId, { running: false, lastSyncTime: null, nextSyncTime: null });
   }
   
+  // Get sync interval from database
+  const syncIntervalMs = await getStockSyncIntervalMs();
+  const syncIntervalMinutes = syncIntervalMs / (60 * 1000);
+  
   // Start new interval for this user
   const now = Date.now();
-  const nextSyncTime = new Date(now + SYNC_INTERVAL_MS).toISOString();
+  const nextSyncTime = new Date(now + syncIntervalMs).toISOString();
   userSyncStates.set(appUserId, { 
     ...userSyncStates.get(appUserId), 
     nextSyncTime 
   });
   
   const intervalId = setInterval(async () => {
-    const nextSyncTime = new Date(Date.now() + SYNC_INTERVAL_MS).toISOString();
+    // Get current interval from database (may have changed)
+    const currentIntervalMs = await getStockSyncIntervalMs();
+    const nextSyncTime = new Date(Date.now() + currentIntervalMs).toISOString();
     userSyncStates.set(appUserId, { 
       ...userSyncStates.get(appUserId), 
       nextSyncTime 
@@ -8645,17 +8854,17 @@ async function startStockSyncCronManual(appUserId) {
     }
     // Add to queue instead of running directly
     enqueueSync(appUserId);
-  }, SYNC_INTERVAL_MS);
+  }, syncIntervalMs);
   
   userSyncTimers.set(appUserId, { intervalId, active: true });
-  console.log(`Stock sync timer started manually for user ${appUserId} (runs every ${SYNC_INTERVAL_MINUTES} minutes)`);
+  console.log(`Stock sync timer started manually for user ${appUserId} (runs every ${syncIntervalMinutes} minutes)`);
   
   // Save timer state to database
   try {
     const userState = userSyncStates.get(appUserId);
     await saveSyncSettings(appUserId, {
       autoSyncEnabled: true,
-      syncIntervalMs: SYNC_INTERVAL_MS,
+      syncIntervalMs: syncIntervalMs,
       lastSyncTime: userState?.lastSyncTime || null,
       nextSyncTime: nextSyncTime,
       syncTimerActive: true
@@ -9219,9 +9428,13 @@ async function startCategorySyncCronManual(appUserId) {
     userSyncStates.set(appUserId, { running: false, lastSyncTime: null, nextSyncTime: null });
   }
   
-  // Start new interval for this user (48 hours)
+  // Get category sync interval from database
+  const categoryIntervalMs = await getCategorySyncIntervalMs();
+  const categoryIntervalHours = categoryIntervalMs / (60 * 60 * 1000);
+  
+  // Start new interval for this user
   const now = Date.now();
-  const nextSyncTime = new Date(now + CATEGORY_SYNC_INTERVAL_MS).toISOString();
+  const nextSyncTime = new Date(now + categoryIntervalMs).toISOString();
   
   const intervalId = setInterval(async () => {
     // Check if user is suspended before triggering sync
@@ -9243,7 +9456,9 @@ async function startCategorySyncCronManual(appUserId) {
       console.error(`Error checking user suspension status in category sync timer for user ${appUserId}:`, error.message);
     }
     
-    const nextSyncTime = new Date(Date.now() + CATEGORY_SYNC_INTERVAL_MS).toISOString();
+    // Get current interval from database (may have changed)
+    const currentCategoryIntervalMs = await getCategorySyncIntervalMs();
+    const nextSyncTime = new Date(Date.now() + currentCategoryIntervalMs).toISOString();
     // Persist nextSyncTime to database
     try {
       const settings = await loadSyncSettings(appUserId);
@@ -9256,11 +9471,11 @@ async function startCategorySyncCronManual(appUserId) {
     }
     // Trigger category sync via API endpoint (client will call it)
     // Note: Category sync is triggered client-side, so we just update the next sync time
-    console.log(`Category sync timer triggered for user ${appUserId} (next sync in 48 hours)`);
-  }, CATEGORY_SYNC_INTERVAL_MS);
+    console.log(`Category sync timer triggered for user ${appUserId} (next sync in ${currentCategoryIntervalMs / (60 * 60 * 1000)} hours)`);
+  }, categoryIntervalMs);
   
   userCategorySyncTimers.set(appUserId, { intervalId, active: true });
-  console.log(`Category sync timer started manually for user ${appUserId} (runs every ${CATEGORY_SYNC_INTERVAL_HOURS} hours)`);
+  console.log(`Category sync timer started manually for user ${appUserId} (runs every ${categoryIntervalHours} hours)`);
   
   // Save timer state to database
   try {
@@ -9276,7 +9491,7 @@ async function startCategorySyncCronManual(appUserId) {
   
   return {
     success: true,
-    message: `Category sync timer started (runs every ${CATEGORY_SYNC_INTERVAL_HOURS} hours)`
+    message: `Category sync timer started (runs every ${categoryIntervalHours} hours)`
   };
 }
 

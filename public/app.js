@@ -54,10 +54,54 @@ function setAuthToken(token) {
     }
 }
 
+// Helper function to clear all cookies
+function clearAllCookies() {
+    // Get all cookies
+    const cookies = document.cookie.split(';');
+    
+    // Clear each cookie by setting it to expire in the past
+    cookies.forEach(cookie => {
+        const eqPos = cookie.indexOf('=');
+        const name = eqPos > -1 ? cookie.substr(0, eqPos).trim() : cookie.trim();
+        
+        // Clear cookie for current path
+        document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/`;
+        
+        // Clear cookie for root path
+        document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=${window.location.hostname}`;
+        
+        // Clear cookie without domain (for localhost)
+        document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=`;
+    });
+}
+
+// Helper function to clear all localStorage items
+function clearAllLocalStorage() {
+    try {
+        localStorage.clear();
+    } catch (error) {
+        console.error('Error clearing localStorage:', error);
+    }
+}
+
+// Helper function to clear all sessionStorage items
+function clearAllSessionStorage() {
+    try {
+        sessionStorage.clear();
+    } catch (error) {
+        console.error('Error clearing sessionStorage:', error);
+    }
+}
+
 function clearAuth() {
     authToken = null;
     currentUser = null;
-    localStorage.removeItem('auth_token');
+    
+    // Clear all browser storage: localStorage, sessionStorage, and cookies
+    clearAllLocalStorage();
+    clearAllSessionStorage();
+    clearAllCookies();
+    
     // Reset session expired message flag when clearing auth
     sessionExpiredMessageShown = false;
 }
@@ -7718,6 +7762,12 @@ function setupUserManagement() {
         }
     }
 
+    // Set Timer button
+    const setTimerBtn = document.getElementById('setTimerBtn');
+    if (setTimerBtn) {
+        setTimerBtn.addEventListener('click', openTimerModal);
+    }
+
     // Create user button
     const createUserBtn = document.getElementById('createUserBtn');
     if (createUserBtn) {
@@ -7761,6 +7811,179 @@ function setupUserManagement() {
                 resetUserForm(); // Clear form when clicking outside
             }
         });
+    }
+
+    // Timer form submit
+    const timerForm = document.getElementById('timerForm');
+    if (timerForm) {
+        timerForm.addEventListener('submit', saveTimerSettings);
+    }
+
+    // Close timer modal buttons
+    const closeTimerModal = document.getElementById('closeTimerModal');
+    const cancelTimerBtn = document.getElementById('cancelTimerBtn');
+    if (closeTimerModal) {
+        closeTimerModal.addEventListener('click', () => {
+            document.getElementById('timerModal').style.display = 'none';
+        });
+    }
+    if (cancelTimerBtn) {
+        cancelTimerBtn.addEventListener('click', () => {
+            document.getElementById('timerModal').style.display = 'none';
+        });
+    }
+
+    // Close timer modal when clicking outside
+    const timerModal = document.getElementById('timerModal');
+    if (timerModal) {
+        timerModal.addEventListener('click', (e) => {
+            if (e.target === timerModal) {
+                timerModal.style.display = 'none';
+            }
+        });
+    }
+}
+
+// Open timer settings modal
+async function openTimerModal() {
+    const timerModal = document.getElementById('timerModal');
+    const errorEl = document.getElementById('timerFormError');
+    
+    if (errorEl) {
+        errorEl.style.display = 'none';
+        errorEl.textContent = '';
+    }
+    
+    if (timerModal) {
+        timerModal.style.display = 'flex';
+        
+        // Load current settings
+        try {
+            const token = getAuthToken();
+            if (!token) {
+                throw new Error('Not authenticated');
+            }
+
+            const response = await fetch('/api/admin/timer-settings', {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                let errorMessage = 'Failed to load timer settings';
+                try {
+                    const errorData = await response.json();
+                    errorMessage = errorData.error || errorMessage;
+                } catch (e) {
+                    // If response is not JSON, use status text
+                    errorMessage = response.statusText || errorMessage;
+                }
+                throw new Error(errorMessage);
+            }
+
+            const data = await response.json();
+
+            if (data.success && data.settings) {
+                document.getElementById('categorySyncInterval').value = data.settings.categorySyncIntervalHours;
+                document.getElementById('stockSyncInterval').value = data.settings.stockSyncIntervalMinutes;
+            } else {
+                // If response is OK but data format is unexpected, log it
+                console.warn('Timer settings response format unexpected:', data);
+            }
+        } catch (error) {
+            console.error('Error loading timer settings:', error);
+            if (errorEl) {
+                // Show the actual error message from server, or fallback to generic message
+                const errorMessage = error.message || 'Failed to load timer settings. Using defaults.';
+                errorEl.textContent = errorMessage;
+                errorEl.style.display = 'block';
+            }
+        }
+    }
+}
+
+// Save timer settings
+async function saveTimerSettings(event) {
+    event.preventDefault();
+    
+    const errorEl = document.getElementById('timerFormError');
+    const saveBtn = document.getElementById('saveTimerBtn');
+    
+    if (errorEl) {
+        errorEl.style.display = 'none';
+        errorEl.textContent = '';
+    }
+
+    const categorySyncInterval = document.getElementById('categorySyncInterval').value;
+    const stockSyncInterval = document.getElementById('stockSyncInterval').value;
+
+    if (!categorySyncInterval || !stockSyncInterval) {
+        if (errorEl) {
+            errorEl.textContent = 'Please fill in all fields';
+            errorEl.style.display = 'block';
+        }
+        return;
+    }
+
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+    }
+
+    try {
+        const token = getAuthToken();
+        if (!token) {
+            throw new Error('Not authenticated');
+        }
+
+        const response = await fetch('/api/admin/timer-settings', {
+            method: 'PUT',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                categorySyncIntervalHours: parseInt(categorySyncInterval, 10),
+                stockSyncIntervalMinutes: parseInt(stockSyncInterval, 10)
+            })
+        });
+
+        if (!response.ok) {
+            let errorMessage = 'Failed to save timer settings';
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                errorMessage = response.statusText || errorMessage;
+            }
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to save timer settings');
+        }
+
+        // Show success message
+        showToast('Timer settings saved successfully', 'success');
+        
+        // Close modal
+        document.getElementById('timerModal').style.display = 'none';
+    } catch (error) {
+        console.error('Error saving timer settings:', error);
+        if (errorEl) {
+            errorEl.textContent = error.message || 'Failed to save timer settings';
+            errorEl.style.display = 'block';
+        }
+    } finally {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+        }
     }
 }
 
